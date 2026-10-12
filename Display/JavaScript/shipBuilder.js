@@ -340,7 +340,7 @@ function renderFleet() {
 
   if (!hasSaveShips && !hasBuiltShips) {
     grid.innerHTML = `<div class="fleet-empty"><div class="fleet-empty__icon">🛸</div>
-      <p>No ships yet. Create a new ship, outfit an existing one, or import a save file.</p></div>`;
+      <p>No ships yet. Add one to start:</p>${sbAddShipOptionsHtml()}</div>`;
     return;
   }
 
@@ -694,6 +694,38 @@ async function _sbEnsureDefaultSaveFile(userId) {
 // ═══════════════════════════════════════════════════════════
 //  MODE ENTRY POINTS
 // ═══════════════════════════════════════════════════════════
+// Every way to put a ship into the fleet — shown in the empty fleet and in "＋ Add ship".
+function sbAddShipOptionsHtml() {
+  let hasSave = false;
+  try { hasSave = !!JSON.parse(localStorage.getItem('ES_SM_CURRENT') || 'null'); } catch (_) {}
+  const opt = (onclick, icon, title, hint) => `<button type="button" class="sb-add-opt" onclick="${onclick}">
+      <span class="sb-add-opt__icon">${icon}</span><span><strong>${title}</strong><span class="sb-add-opt__hint">${hint}</span></span></button>`;
+  return `<div class="sb-add-opts">
+    ${opt("sbCloseAddShip();openOutfitExisting()", '🔧', 'Outfit a game ship', 'Start from any ship in your selected plugins and change its outfits')}
+    ${opt("sbCloseAddShip();openEditExisting()", '✏️', 'Edit a game ship', 'Copy a ship and change anything — hull, hardpoints, outfits')}
+    ${opt("sbCloseAddShip();newShip()", '＋', 'New ship from scratch', 'Set every attribute yourself')}
+    ${opt("sbCloseAddShip();openImport()", '↑', 'Paste ship data', 'Paste ship definitions from a plugin or data file')}
+    <a class="sb-add-opt" href="UserManager.html"><span class="sb-add-opt__icon">💾</span><span><strong>Ships from my save</strong>
+      <span class="sb-add-opt__hint">${hasSave ? 'On Saves &amp; Account, use “Import Fleet to Builder” or a ship\'s 🛠 Builder button' : 'Open a save on Saves &amp; Account, then use “Import Fleet to Builder”'}</span></span></a>
+  </div>`;
+}
+function sbOpenAddShip() {
+  let m = document.getElementById('sb-add-ship-modal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'sb-add-ship-modal'; m.className = 'modal-overlay';
+    m.addEventListener('click', e => { if (e.target === m) sbCloseAddShip(); });
+    document.body.appendChild(m);
+  }
+  m.innerHTML = `<div class="modal-box" style="width:min(560px,96vw);">
+    <div class="modal-header"><div class="modal-title">Add a ship to this fleet</div>
+      <button class="modal-close" onclick="sbCloseAddShip()" aria-label="Close">×</button></div>
+    ${sbAddShipOptionsHtml()}</div>`;
+  m.classList.add('active');
+}
+function sbCloseAddShip() { const m = document.getElementById('sb-add-ship-modal'); if (m) m.classList.remove('active'); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') sbCloseAddShip(); });
+
 function newShip() {
   sbRefreshLiveData();
   sbMode = 'new'; sbEditIdx = -1; sbSaveEditIdx = -1; sbEditMode = 'built';

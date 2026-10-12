@@ -117,6 +117,7 @@
         ${fleets.map(f => `<option value="${escHtml(f.id)}"${f.id === activeId ? ' selected' : ''}>${escHtml(f.name)} (${f.shipCount})</option>`).join('')}
       </select>
       <div class="btn-group" style="margin:0;">
+        <button class="btn btn-primary btn-sm" onclick="sbOpenAddShip()" title="Add a ship to this fleet">＋ Add ship</button>
         <button class="btn btn-secondary btn-sm" onclick="SBFleets.promptNew()">+ New fleet</button>
         <button class="btn btn-secondary btn-sm" onclick="SBFleets.promptRename()">Rename</button>
         <button class="btn btn-secondary btn-sm" onclick="SBFleets.duplicateActive()">Duplicate</button>
@@ -280,7 +281,7 @@
       if (!sbFleet.length && !sbSaveFleet.length) {
         const grid = document.getElementById('fleet-grid');
         const empty = grid && grid.querySelector('.fleet-empty p');
-        if (empty) empty.textContent = `"${name}" has no ships yet. Create a new ship, outfit an existing one, or import a save file.`;
+        if (empty) empty.textContent = `"${name}" has no ships yet. Add one to start:`;
       }
       document.querySelectorAll('#built-fleet-cards .fleet-card').forEach((card, i) => {
         const actions = card.querySelector('.fleet-card__actions');
