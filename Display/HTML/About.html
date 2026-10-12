@@ -113,40 +113,66 @@
             <!-- Ship / Outfit Data Viewer -->
             <div class="page-block">
                 <div class="page-block-header">
-                    <span class="page-block-title">🛰️ Ship & Outfit Data Viewer</span>
+                    <span class="page-block-title">📊 Data Viewer</span>
                     <span class="page-block-status status-live">Live</span>
                 </div>
                 <div class="page-block-body">
                     <ul class="feature-list">
-                        <li>Searchable, filterable card grid of ships and outfits</li>
-                        <li>Category, plugin, and attribute-based filters with clear-all option</li>
-                        <li>Multi-attribute sorter with drag-style reordering and per-sort averages</li>
-                        <li>Detailed modal view with tabbed attributes, description, and stacking notes</li>
-                        <li>Plugin picker for scoping results to specific installed/local plugins</li>
-                        <li>Tooltips on hover for derived / calculated attribute values</li>
+                        <li>Every ship, variant and outfit from the base game and your selected plugins, as a searchable card grid</li>
+                        <li>Search by name or display name (search carries over between Ships and Variants)</li>
+                        <li>Filters by category and by government (who flies or sells it), with Clear Filters</li>
+                        <li>Multi-attribute sorter with computed stats (energy, heat, DPS …) and per-sort averages</li>
+                        <li>Item pop-up with tabs for attributes, where to get it, thumbnail and sprite</li>
+                        <li>Ships with a display name show it first, with the internal name dimmed</li>
                     </ul>
                 </div>
             </div>
-
-            <!-- Compare -->
             <div class="page-block">
                 <div class="page-block-header">
-                    <span class="page-block-title">📊 Compare</span>
+                    <span class="page-block-title">⚖️ Compare</span>
                     <span class="page-block-status status-live">Live</span>
                 </div>
                 <div class="page-block-body">
                     <ul class="feature-list">
-                        <li>Sticky bottom compare bar with per-item quantity controls</li>
-                        <li>Slide-up full-screen comparison panel</li>
-                        <li>Toggle between column view and full attribute table view</li>
-                        <li>Group comparisons — bundle multiple ships/outfits into one column</li>
-                        <li>Best/worst value highlighting per attribute row</li>
-                        <li>Fleet summary banner for aggregate stats across a selection</li>
+                        <li>Compare bar at the bottom of the Data Viewer, with a quantity for each item</li>
+                        <li>Full-screen comparison in columns or as one table</li>
+                        <li>Group comparisons — bundle several ships or outfits into one column</li>
+                        <li>Best and worst values highlighted on every row</li>
                     </ul>
                 </div>
             </div>
-
-            <!-- Battle Simulator -->
+            <div class="page-block">
+                <div class="page-block-header">
+                    <span class="page-block-title">⚓ Ship Builder</span>
+                    <span class="page-block-status status-live">Live</span>
+                </div>
+                <div class="page-block-body">
+                    <ul class="feature-list">
+                        <li>Several fleets per pilot (new, rename, duplicate, delete), kept in your account when logged in</li>
+                        <li>Start from a game ship (outfit or fully edit it), from scratch, or by pasting ship data — “＋ Add ship” shows every way</li>
+                        <li>Outfit picker with type-ahead search, capacity bars, gun/turret hardpoints and expandable outfit stats</li>
+                        <li>Live stats with energy, heat and fuel checks, and undo (↶ / Ctrl+Z)</li>
+                        <li>Export to Endless Sky data format, share ships with other pilots, and put a ship straight into one of your saves (add or refit, with a before/after comparison and optional payment)</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="page-block">
+                <div class="page-block-header">
+                    <span class="page-block-title">⚡ Auto-fit</span>
+                    <span class="page-block-status status-live">Live</span>
+                </div>
+                <div class="page-block-body">
+                    <ul class="feature-list">
+                        <li>Builds a fit for a goal: damage (primary, secondary or both), acceleration, top speed, tank, cargo, bunks, all-round, or just your own targets</li>
+                        <li>🎯 Beat an enemy: fits against a government or chosen ships — their missiles and tracking, damage types, range, speed and anti-missile</li>
+                        <li>Targets on any stat or attribute (at least / at most / as close as possible / as much or as little as possible) with priorities</li>
+                        <li>Only uses outfits you can get: your selected plugins, factions you have met, outfitters you have visited, licences you hold, what you own — and stealing, with its reputation cost and the story missions that repair it</li>
+                        <li>Exclude list and a “no secondary weapons” switch, both remembered</li>
+                        <li>All-round is judged against ships of the same class and weight</li>
+                        <li>Every result is checked (fits, moves, turns, powers and cools itself, crew, fuel, ammo) and refitted if a check fails; “⚔ Test in Battle Simulator” fights it for real</li>
+                    </ul>
+                </div>
+            </div>
             <div class="page-block">
                 <div class="page-block-header">
                     <span class="page-block-title">⚔️ Battle Simulator</span>
@@ -154,53 +180,41 @@
                 </div>
                 <div class="page-block-body">
                     <ul class="feature-list">
-                        <li>Ship-vs-ship matchup builder with searchable ship slots</li>
-                        <li>Team mode supporting multiple teams with custom names and colors</li>
-                        <li>Simulated combat timeline with phase-by-phase breakdown</li>
-                        <li>HP-over-time chart and side-by-side stat comparison</li>
-                        <li>Weapon loadout breakdown per ship, including ammo stock summary</li>
-                        <li>Battle matrix and rankings view for multi-ship tournaments</li>
-                        <li>Responsive mobile layout with stacked comparison rows</li>
+                        <li>Any number of teams with custom names and colours, any ships and counts</li>
+                        <li>Shields, hull, energy, heat, ion and other damage types, missiles and anti-missile</li>
+                        <li>Pilots fly the fight: distance, kiting, aiming, dodging, turning and missile guidance</li>
+                        <li>Choose which ships have skilled pilots — per ship, how many of a stack, per team (“Make all skilled”) or everyone</li>
+                        <li>Report of how the fight was flown, HP-over-time chart, phase breakdown, and a win matrix with rankings for 3+ teams</li>
                     </ul>
                 </div>
             </div>
-
-            <!-- Ship Builder -->
             <div class="page-block">
                 <div class="page-block-header">
-                    <span class="page-block-title">🔧 Ship Builder</span>
+                    <span class="page-block-title">🌌 Systems Map</span>
                     <span class="page-block-status status-live">Live</span>
                 </div>
                 <div class="page-block-body">
                     <ul class="feature-list">
-                        <li>Full outfit picker grouped by category, with hardpoint index tracking</li>
-                        <li>Live outfit-space bar showing used vs. available capacity</li>
-                        <li>Editable attribute panel for on-the-fly stat tweaking</li>
-                        <li>Expandable outfit rows showing full stats, description, and image</li>
-                        <li>Save/load builds, with support for local (unpublished) plugin builds</li>
-                        <li>Raw output/code box for exporting the finished ship definition</li>
+                        <li>Interactive galaxy map of your selected plugins: systems, planets, governments, jump links and wormholes</li>
+                        <li>Search systems, click planets for details, toggle map layers</li>
+                        <li>Timeline: preview any story event’s map changes; with a save, step through your pilot’s history and see what’s coming up</li>
+                        <li>Trade runs between systems, and “as your pilot sees it” when a save is open</li>
                     </ul>
                 </div>
             </div>
-
-            <!-- Plugin Manager -->
             <div class="page-block">
                 <div class="page-block-header">
-                    <span class="page-block-title">🔧 Plugin Manager</span>
+                    <span class="page-block-title">📜 Missions</span>
                     <span class="page-block-status status-live">Live</span>
                 </div>
                 <div class="page-block-body">
                     <ul class="feature-list">
-                        <li>Full list of all plugins currently added to this project</li>
-                        <li>The current status for the parser (running or idle)</li>
-                        <li>Ability to add plugins by either ZIP or URL</li>
-                        <li>It can edit the names or links of plugins</li>
-                        <li>It can remove plugins from the list so if people want to test a plugin then they can add or remove it them selves</li>
+                        <li>Every mission from your selected plugins: where it starts, its requirements and rewards, and the raw definition</li>
+                        <li>With a save open: each mission’s status for your pilot and whether you can get it now</li>
+                        <li>Filters for status, availability and job-board missions; loads in batches so it stays quick on phones</li>
                     </ul>
                 </div>
             </div>
-
-            <!-- Save Reader -->
             <div class="page-block">
                 <div class="page-block-header">
                     <span class="page-block-title">💾 Saves &amp; Account</span>
@@ -208,12 +222,24 @@
                 </div>
                 <div class="page-block-body">
                     <ul class="feature-list">
-                        <li>Full list of added pilots to this project</li>
-                        <li>The ability to add your save files as many as you want</li>
-                        <li>It gives you a fleet break down and some basic info on the ships</li>
-                        <li>It tells you what planets you have each items stored on and any items you have in your cargo</li>
-                        <li>It tells your your income and licenses</li>
-                        <li>It informs you of the current plugins you have active and which of those it can find within this data viewer</li>
+                        <li>Keep as many saves as you like (or choose “No save” to use the site without a pilot); saves sync to your account when logged in</li>
+                        <li>Overview of your fleet, cargo, where items are stored, income and licences, plus a health check for missing plugins, ships and outfits</li>
+                        <li>Save editor with search, pages and undo: pilot, credits, date, ships (add, refit, flagship, park), cargo, licences, reputation, missions, events and conditions</li>
+                        <li>Complete a mission with its rewards, or schedule a story event</li>
+                        <li>Link a save to its game file: re-scan after playing and save edits straight back into the game</li>
+                        <li>Account: username, profile page with your shared ships, and downloading or deleting your data</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="page-block">
+                <div class="page-block-header">
+                    <span class="page-block-title">🧩 Plugin Manager</span>
+                    <span class="page-block-status status-live">Live</span>
+                </div>
+                <div class="page-block-body">
+                    <ul class="feature-list">
+                        <li>Every plugin included on the site, and whether the parser is running</li>
+                        <li>Add plugins by ZIP or link, edit their names or links, or remove them</li>
                     </ul>
                 </div>
             </div>
@@ -228,7 +254,19 @@
 
             <div class="bug-item">
                 <span class="bug-icon">⚠️</span>
-                <span class="bug-text"><strong>Not showing all plugins as found</strong> On the Save reader then it will say that some plugins may not be found. This could be either because we havnt added them wich isnt a bug or there is no ship or outfit data within that plugin to parse out so the plugin is dropped.</span>
+                <span class="bug-text"><strong>Not every plugin shows as found</strong> On Saves &amp; Account a save may list plugins as not found. Either the plugin hasn’t been added to the site, or it has no ships, outfits or missions for the parser to read, so there’s nothing to show for it.</span>
+            </div>
+            <div class="bug-item">
+                <span class="bug-icon">⚠️</span>
+                <span class="bug-text"><strong>Battle teams fly as one group</strong> In the Battle Simulator each team manoeuvres as a single group (averaged speed, turning and size); individual ships in a team don’t fly separately or in formation.</span>
+            </div>
+            <div class="bug-item">
+                <span class="bug-icon">⚠️</span>
+                <span class="bug-text"><strong>Auto-fit is a strong estimate, not a proof</strong> Auto-fit builds fits step by step and checks them, but doesn’t try every possible combination, and its damage figures don’t model aim, homing or range exactly — use ⚔ Test in Battle Simulator to see a real fight.</span>
+            </div>
+            <div class="bug-item">
+                <span class="bug-icon">⚠️</span>
+                <span class="bug-text"><strong>Some data appears only after the parser runs</strong> Government lists, reputation repairs and display names come from the data parser; after the site’s code changes they appear once the next parse has finished.</span>
             </div>
         </section>
 
@@ -241,19 +279,27 @@
 
             <div class="plan-item">
                 <span class="plan-icon">🚧</span>
-                <span class="plan-text"><strong>Enhancing save file features</strong> Having the save files default selected governments within the Ship Builder, Data Viewer, and Battle Sim</span>
+                <span class="plan-text"><strong>Plugin Writer</strong> A screen to run my scripts against any plugins you choose, to help make them compatible with each other.</span>
             </div>
             <div class="plan-item">
                 <span class="plan-icon">🚧</span>
-                <span class="plan-text"><strong>New screen to manage save files</strong> A new screen to manage missions and events within a save file</span>
+                <span class="plan-text"><strong>More auto-fit options</strong> A credits budget (defaulting to your pilot’s credits), outfits to always keep, sliders for what “all-round” means to you, and “why this outfit?” explanations.</span>
             </div>
             <div class="plan-item">
                 <span class="plan-icon">🚧</span>
-                <span class="plan-text"><strong>Plugin Writer</strong> A new screen to run plugin scripts i make against as many plugins as they want to make stuff plugin compatible</span>
+                <span class="plan-text"><strong>Compare and save fits</strong> Keep several auto-fit results side by side and save the ones you like as designs.</span>
             </div>
             <div class="plan-item">
                 <span class="plan-icon">🚧</span>
-                <span class="plan-text"><strong>Map</strong> A new screen to show the map with slected plugin data, where missions spawn, ships are sold, outfits are sold, toggleable repeatable and none repeatble missions</span>
+                <span class="plan-text"><strong>Fit for a mission</strong> Pick a mission and make sure the ship has the cargo, bunks and jump range it needs.</span>
+            </div>
+            <div class="plan-item">
+                <span class="plan-icon">🚧</span>
+                <span class="plan-text"><strong>Ships that fly separately in battles</strong> Let each ship in a team manoeuvre on its own instead of as one group.</span>
+            </div>
+            <div class="plan-item">
+                <span class="plan-icon">🚧</span>
+                <span class="plan-text"><strong>Display names for outfits</strong> Show outfits by their in-game display name, like ships already are.</span>
             </div>
         </section>
 
