@@ -56,7 +56,7 @@ function loadData() {
         if (attrDefs) {
             if (typeof setSorterAttrDefs === 'function') setSorterAttrDefs(attrDefs);
             if (typeof initComputedStats === 'function') {
-                const REPO_URL = 'GIVEMEFOOD5/endless-sky-ship-builder';
+                const REPO_URL = 'GIVEMEFOOD5/endless-sky-nexus';
                 initComputedStats(attrDefs, `https://raw.githubusercontent.com/${REPO_URL}/main/data`);
             }
         }
@@ -316,7 +316,7 @@ async function _loadSpriteForCard(card, generation) {
             imgWrap.appendChild(element);
         } else {
             const img = document.createElement('img');
-            img.src   = 'https://GIVEMEFOOD5.github.io/endless-sky-ship-builder/data/endless-sky/images/outfit/unknown.png';
+            img.src   = 'https://GIVEMEFOOD5.github.io/endless-sky-nexus/data/endless-sky/images/outfit/unknown.png';
             img.style.cssText = 'max-width:100%;max-height:100%;object-fit:contain;image-rendering:pixelated;display:block;margin:auto;';
             imgWrap.innerHTML = '';
             imgWrap.appendChild(img);

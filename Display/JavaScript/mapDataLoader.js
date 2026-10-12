@@ -67,7 +67,7 @@
 
 (function () {
 
-const REPO_URL = 'GIVEMEFOOD5/endless-sky-ship-builder';
+const REPO_URL = 'GIVEMEFOOD5/endless-sky-nexus';
 
 // ── Environment detection: local dev server vs. production ─────
 function _isLocalHost() {

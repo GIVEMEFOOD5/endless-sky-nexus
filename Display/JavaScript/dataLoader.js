@@ -32,7 +32,7 @@
 
 (function () {
 
-const REPO_URL   = 'GIVEMEFOOD5/endless-sky-ship-builder';
+const REPO_URL   = 'GIVEMEFOOD5/endless-sky-nexus';
 const BASE_URL   = `https://raw.githubusercontent.com/${REPO_URL}/main/data`;
 const LOCAL_KEY  = 'es_ship_builder_v4';
 const LOCAL_PLUGIN_ID = '__local_builds__';

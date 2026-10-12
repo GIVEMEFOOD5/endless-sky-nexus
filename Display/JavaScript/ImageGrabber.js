@@ -37,11 +37,11 @@
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const GITHUB_REPO   = 'GIVEMEFOOD5/endless-sky-ship-builder';
+const GITHUB_REPO   = 'GIVEMEFOOD5/endless-sky-nexus';
 const GITHUB_BRANCH = 'main';
 
 // Base URL for raw image serving — works from any host, no GitHub Pages dependency
-const GITHUB_PAGES_BASE = `https://raw.githubusercontent.com/GIVEMEFOOD5/endless-sky-ship-builder/main/data/`;
+const GITHUB_PAGES_BASE = `https://raw.githubusercontent.com/GIVEMEFOOD5/endless-sky-nexus/main/data/`;
     
 // Raw GitHub URL base for API
 const GITHUB_API_BASE = `https://api.github.com/repos/${GITHUB_REPO}/git/trees/${GITHUB_BRANCH}?recursive=1`;

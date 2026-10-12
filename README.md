@@ -1,62 +1,46 @@
-# Endless Sky Data Parser
+# Endless Sky Nexus
 
-Prefered Link:
-https://endless-sky-nexus.ravenslittlesis.workers.dev
+Free fan-made tools for the space game [Endless Sky](https://endless-sky.github.io/):
+ship & outfit database, ship builder with auto-fit, battle simulator, galaxy map,
+mission browser and save editor — for the base game and community plugins.
 
-use:
-https://givemefood5.github.io/endless-sky-ship-builder/
-If neccassary
+**Website:** https://endless-sky-nexus.ravenslittlesis.workers.dev
 
-Automatically parses ship and outfit data from Endless Sky GitHub repositories.
+## What's in this repository
 
-## How It Works
-
-This repository uses GitHub Actions to automatically fetch and parse data from Endless Sky repositories monthly. The parser searches the entire repository for all `.txt` files in the `data/` directory and extracts ship and outfit information.
-
-## Repository Structure
 ```
 .
+├── Display/                      # the website (HTML, CSS, JavaScript, images)
+│   ├── HTML/                     # one page per tool
+│   ├── JavaScript/               # page logic (autoFitting/ = the ship auto-fitter)
+│   ├── CSS/
+│   └── Images/                   # site icon and social-sharing image
 ├── .github/workflows/
-│   └── parse-endless-sky.yml    # GitHub Actions workflow
-├── data/                         # Generated data (auto-updated)
-│   ├── official-game/
-│   │   ├── ships.json
-│   │   ├── outfits.json
-│   │   └── complete.json
-│   └── adde-plugin/
-│       ├── ships.json
-│       ├── outfits.json
-│       └── complete.json
-├── parser.js                     # Parser script
-└── plugins.json                  # Repository configuration
+│   └── parse-endless-sky.yml     # GitHub Action: parses the game + plugins into Supabase
+├── parser.js (+ *Parser.js, *Resolver.js, pushCache.js …)  # the data parser
+├── plugins.json                  # which game/plugin repositories are parsed
+├── supabase/                     # database set-up scripts
+├── robots.txt, sitemap.xml, _redirects   # search engines and the root redirect
+└── wrangler.toml                 # Cloudflare deployment
 ```
 
-## Adding a New Plugin
+## Adding a plugin
 
-1. Edit `plugins.json`
-2. Add a new entry:
+Use the Plugin Manager page on the website, or add an entry to `plugins.json`:
+
 ```json
-   {
-     "name": "my-plugin",
-     "repository": "https://github.com/username/repository"
-   }
+{ "name": "my-plugin", "repository": "https://github.com/username/repository" }
 ```
-3. Commit and push the changes
-4. The workflow will automatically run and generate data
 
-## Manual Trigger
+Pushing a change to `plugins.json` runs the parser automatically.
 
-1. Go to the "Actions" tab in GitHub
-2. Click "Parse Endless Sky Data"
-3. Click "Run workflow"
+## Updating the data
 
-## Scheduled Updates
+The parser runs on the 1st of every month. To run it now: **Actions → Parse Endless Sky Data → Run workflow**
+(tick *full refresh* to resend everything).
 
-The parser automatically runs on the 1st of every month at midnight UTC.
+## Search engines
 
-## Output Files
-
-For each plugin, three files are generated:
-- `ships.json` - All ship data (without installed outfits)
-- `outfits.json` - All outfit data
-- `complete.json` - Combined data with metadata
+`sitemap.xml` lists every page and `robots.txt` points to it. If the site moves to a new address,
+replace `https://endless-sky-nexus.ravenslittlesis.workers.dev` in `sitemap.xml`, `robots.txt`,
+`index.html` and the `<head>` of each page in `Display/HTML/`.

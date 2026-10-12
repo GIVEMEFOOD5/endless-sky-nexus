@@ -32,7 +32,7 @@
 
 (function () {
 
-const REPO_URL  = 'GIVEMEFOOD5/endless-sky-ship-builder';
+const REPO_URL  = 'GIVEMEFOOD5/endless-sky-nexus';
 const BASE_URL  = `https://raw.githubusercontent.com/${REPO_URL}/main/data`;
 // This is the SAME key dataLoader.js uses for ships/outfits/effects — see
 // generalPluginStuff.js's own header comment: "both systems share a single

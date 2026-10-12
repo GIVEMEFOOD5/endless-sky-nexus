@@ -118,7 +118,7 @@ async function init() {
 
 /** Returns the GitHub raw base URL that DataLoader uses — kept in one place. */
 function _baseUrl() {
-    const REPO_URL = 'GIVEMEFOOD5/endless-sky-ship-builder';
+    const REPO_URL = 'GIVEMEFOOD5/endless-sky-nexus';
     return `https://raw.githubusercontent.com/${REPO_URL}/main/data`;
 }
 

@@ -3,19 +3,94 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>An Endless Sky Data Center</title>
+    <title>Endless Sky Nexus — ship builder, outfits, battles & saves</title>
+    <meta name="description" content="Free fan tools for Endless Sky: every ship and outfit, a ship builder with auto-fit, battle simulator, galaxy map, missions and a save editor — plugins included.">
+    <link rel="canonical" href="https://endless-sky-nexus.ravenslittlesis.workers.dev/Display/HTML/Home.html">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="robots" content="index, follow">
+    <link rel="icon" href="../Images/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="../Images/favicon-32.png" sizes="32x32" type="image/png">
+    <link rel="apple-touch-icon" href="../Images/apple-touch-icon.png">
+    <meta property="og:site_name" content="Endless Sky Nexus">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Endless Sky Nexus — ship builder, outfits, battles & saves">
+    <meta property="og:description" content="Free fan tools for Endless Sky: every ship and outfit, a ship builder with auto-fit, battle simulator, galaxy map, missions and a save editor — plugins included.">
+    <meta property="og:url" content="https://endless-sky-nexus.ravenslittlesis.workers.dev/Display/HTML/Home.html">
+    <meta property="og:image" content="https://endless-sky-nexus.ravenslittlesis.workers.dev/Display/Images/og-image.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Endless Sky Nexus — tools for Endless Sky">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Endless Sky Nexus — ship builder, outfits, battles & saves">
+    <meta name="twitter:description" content="Free fan tools for Endless Sky: every ship and outfit, a ship builder with auto-fit, battle simulator, galaxy map, missions and a save editor — plugins included.">
+    <meta name="twitter:image" content="https://endless-sky-nexus.ravenslittlesis.workers.dev/Display/Images/og-image.png">
     <link rel="stylesheet" href="../CSS/main.css">
+    <script type="application/ld+json">
+    {"@context":"https://schema.org","@graph":[
+      {"@type":"WebSite","name":"Endless Sky Nexus","url":"https://endless-sky-nexus.ravenslittlesis.workers.dev/","description":"Free fan-made tools for the space game Endless Sky: ship and outfit database, ship builder with auto-fit, battle simulator, galaxy map, mission browser and save editor."},
+      {"@type":"WebApplication","name":"Endless Sky Nexus","url":"https://endless-sky-nexus.ravenslittlesis.workers.dev/Display/HTML/Home.html","applicationCategory":"GameApplication","operatingSystem":"Any (web browser)","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"about":{"@type":"VideoGame","name":"Endless Sky","url":"https://endless-sky.github.io/"}},
+      {"@type":"FAQPage","mainEntity":[
+        {"@type":"Question","name":"Is Endless Sky Nexus free?","acceptedAnswer":{"@type":"Answer","text":"Yes. Endless Sky Nexus is a free fan project, not affiliated with the Endless Sky developers."}},
+        {"@type":"Question","name":"Do I need an account?","acceptedAnswer":{"@type":"Answer","text":"No. Everything works in your browser. An account only lets you keep your fleets and saves across devices and share ships."}},
+        {"@type":"Question","name":"Can it change my save file?","acceptedAnswer":{"@type":"Answer","text":"Yes. Open a save on Saves & Account, edit it (every change can be undone), then download it or save it straight back into your game file."}}]}
+    ]}
+    </script>
 </head>
 <body>
+    <noscript><p style="padding:16px;max-width:900px;margin:0 auto;">Endless Sky Nexus needs JavaScript for its interactive tools. Free fan tools for Endless Sky: every ship and outfit, a ship builder with auto-fit, battle simulator, galaxy map, missions and a save editor — plugins included.</p></noscript>
     
     <div id="navbar-mount" data-src="NavBar.html"></div>
     <script src="../JavaScript/navLoader.js"></script>
     
     <div class="container">
         <header>
-            <h1>🚀 An Endless Sky Data Center</h1>
-            <p class="subtitle">Browse and manage ships and outfits from the amazing game Endless Sky!</p>
+            <h1>🚀 Endless Sky Nexus</h1>
+            <p class="subtitle">Free fan-made tools for the space game <strong>Endless Sky</strong> — ships, outfits, battles, the galaxy, missions and your saves, for the base game and its plugins.</p>
         </header>
+
+        <main>
+            <section class="panel home-section" aria-labelledby="home-tools">
+                <h2 class="section-title" id="home-tools">What you can do</h2>
+                <div class="home-tools">
+                <a class="home-tool" href="DataViewer.html">
+                    <span class="home-tool__icon" aria-hidden="true">📊</span>
+                    <span><strong>Data Viewer</strong><span class="home-tool__text">Every ship, variant and outfit in Endless Sky and its plugins — search, filter by category or government, sort by any stat and compare side by side.</span></span>
+                </a>
+                <a class="home-tool" href="shipBuilder.html">
+                    <span class="home-tool__icon" aria-hidden="true">⚓</span>
+                    <span><strong>Ship Builder</strong><span class="home-tool__text">Build and outfit ships with live stats, energy, heat and fuel checks. The auto-fitter builds for damage, speed, cargo, toughness or beating a particular enemy.</span></span>
+                </a>
+                <a class="home-tool" href="BattleSim.html">
+                    <span class="home-tool__icon" aria-hidden="true">⚔️</span>
+                    <span><strong>Battle Simulator</strong><span class="home-tool__text">Pit ships and fleets against each other: shields, hull, energy, heat, missiles and anti-missile, ion and other damage, with skilled or ordinary pilots.</span></span>
+                </a>
+                <a class="home-tool" href="Systems.html">
+                    <span class="home-tool__icon" aria-hidden="true">🌌</span>
+                    <span><strong>Systems Map</strong><span class="home-tool__text">Explore the galaxy: systems, planets, governments and jump links, trade runs, and how story events change the map over time.</span></span>
+                </a>
+                <a class="home-tool" href="UserMissionHelper.html">
+                    <span class="home-tool__icon" aria-hidden="true">📜</span>
+                    <span><strong>Missions</strong><span class="home-tool__text">Every mission with where it starts, what it needs and what it pays — and, with your save open, which ones you can get next.</span></span>
+                </a>
+                <a class="home-tool" href="UserManager.html">
+                    <span class="home-tool__icon" aria-hidden="true">💾</span>
+                    <span><strong>Saves &amp; Account</strong><span class="home-tool__text">Open your save to see your fleet, cargo, licences and story progress; edit it safely with undo, check it for problems and keep it in your account.</span></span>
+                </a>
+                </div>
+            </section>
+
+            <section class="panel home-section" aria-labelledby="home-plugins">
+                <h2 class="section-title" id="home-plugins">Works with plugins</h2>
+                <p>Endless Sky Nexus reads the game's own data files and many community plugins, so plugin ships, outfits, missions and systems appear alongside the base game. Choose which plugins to include with <strong>☰ Select Plugins</strong> on any page — every search, stat and fit then uses only those.</p>
+            </section>
+
+            <section class="panel home-section" aria-labelledby="home-faq">
+                <h2 class="section-title" id="home-faq">Questions</h2>
+                <details><summary>Is it free?</summary><p>Yes. Endless Sky Nexus is a free fan project, not affiliated with the Endless Sky developers.</p></details>
+                <details><summary>Do I need an account?</summary><p>No. Everything works in your browser. An account only lets you keep your fleets and saves across devices and share ships.</p></details>
+                <details><summary>Can it change my save file?</summary><p>Yes — open a save on Saves &amp; Account, edit it (every change can be undone), then download it or save it straight back into your game file.</p></details>
+            </section>
+        </main>
     </div>
 <!--why-->
     <!--<button class="btn btn-primary" onclick="location.href = 'Display/HTML/DataViewer.html'">Data Viewer</button>

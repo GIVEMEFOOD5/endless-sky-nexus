@@ -26,7 +26,7 @@
     grid.innerHTML = '';
     return;
   }
-  document.title = `${profile.username} — ${'Endless Sky Data Center'}`;
+  document.title = `${profile.username} — Pilot Profile — Endless Sky Nexus`;
   $('pf-title').textContent = `👤 ${profile.username}`;
 
   await window.EsAuth.ready();

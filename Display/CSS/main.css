@@ -4695,3 +4695,15 @@ body select:not([multiple]):not([size]) { background-color: var(--c-surface-2); 
 .team-skill { display: inline-flex; align-items: center; gap: 4px; font-size: 0.78rem; color: var(--c-text-dim); white-space: nowrap; }
 .team-skill-input { width: 52px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--c-border); background: var(--c-bg); color: var(--c-text); }
 @media (pointer: coarse) { .team-skill-input { min-height: 36px; } }
+
+/* Home page */
+.home-section { padding: 24px; margin-bottom: 20px; }
+.home-section p { color: var(--c-text-mid); line-height: 1.6; }
+.home-section details { margin: 8px 0; }
+.home-section summary { cursor: pointer; font-weight: 600; color: var(--c-text); }
+.home-tools { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 12px; }
+.home-tool { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: var(--r-md);
+  border: 1px solid var(--c-border); background: var(--c-surface-2); color: var(--c-text); text-decoration: none; }
+.home-tool:hover, .home-tool:focus-visible { border-color: var(--c-accent); outline: none; }
+.home-tool__icon { font-size: 1.6rem; line-height: 1.2; }
+.home-tool__text { display: block; font-size: 0.86rem; color: var(--c-text-dim); margin-top: 3px; line-height: 1.45; }
