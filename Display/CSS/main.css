@@ -4685,3 +4685,13 @@ body select:not([multiple]):not([size]) { background-color: var(--c-surface-2); 
 .sb-add-opt__icon { font-size: 1.3rem; line-height: 1.2; }
 .sb-add-opt__hint { display: block; font-size: 0.78rem; color: var(--c-text-dim); font-weight: 400; margin-top: 2px; }
 .fleet-empty:has(.sb-add-opts) { grid-column: 1 / -1; padding: 28px 20px; }
+
+/* Battle simulator: pilot skill per ship / per team */
+.team-skill-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+  margin: 6px 0 8px; font-size: 0.8rem; color: var(--c-text-dim); }
+.team-skill-btn { border: 1px solid var(--c-border); background: var(--c-surface-2); color: var(--c-text); border-radius: var(--r-md);
+  padding: 4px 10px; font-size: 0.78rem; cursor: pointer; }
+.team-skill-btn:hover { border-color: var(--c-accent); }
+.team-skill { display: inline-flex; align-items: center; gap: 4px; font-size: 0.78rem; color: var(--c-text-dim); white-space: nowrap; }
+.team-skill-input { width: 52px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--c-border); background: var(--c-bg); color: var(--c-text); }
+@media (pointer: coarse) { .team-skill-input { min-height: 36px; } }

@@ -100,16 +100,21 @@
     ];
     return 1 - p.reduce((miss, x) => miss * (1 - x), 1);
   }
+  // Pilot skill (0–1, the share of a side flown by skilled pilots):
+  //   skilled pilots dodge, lead their shots and keep their guns on target;
+  //   ordinary pilots fly straight at the enemy, don't dodge and aim worse.
+  const skillOf = s => (s && Number.isFinite(s.skill) ? Math.max(0, Math.min(1, s.skill)) : 1);
   function unguidedHit(f, attacker, target, d) {
     const t = f.beam || !f.speed ? 0 : d / f.speed;                // flight time (s)
-    const dodge = DODGE_SHARE * Math.min(target.speedNow * t, 0.5 * target.accel * t * t);
+    const dodge = DODGE_SHARE * skillOf(target) * Math.min(target.speedNow * t, 0.5 * target.accel * t * t);
     const spread = d * Math.tan(Math.min(89, f.inaccuracy) / RAD);
-    return Math.max(0.03, Math.min(1, target.radius / (target.radius + 0.5 * spread + dodge)));
+    const aim = 0.7 + 0.3 * skillOf(attacker);                      // leading the target
+    return Math.max(0.03, Math.min(1, aim * target.radius / (target.radius + 0.5 * spread + dodge)));
   }
   function facing(f, attacker, target, d) {
     // the enemy's sideways motion, as an angle per second seen from here
     const omega = (target.speedNow * 0.5 / Math.max(MIN_DISTANCE, d)) * RAD;
-    const canTurn = f.turret ? (f.turretTurn || 60) : attacker.turnNow;
+    const canTurn = (f.turret ? (f.turretTurn || 60) : attacker.turnNow) * (0.6 + 0.4 * skillOf(attacker));
     return omega <= 0 ? 1 : Math.max(0.15, Math.min(1, canTurn / omega));
   }
 
@@ -124,7 +129,8 @@
     const side = (stats, meta) => {
       const mv = movement(stats);
       return { stats, mv, facts: stats.weapons.map((w, i) => weaponFacts(w, meta && meta[i])), v: 0, speedNow: mv.speed, turnNow: mv.turn,
-               accel: mv.accel, radius: mv.radius, radar: mv.radar, optical: mv.optical, running: false };
+               accel: mv.accel, radius: mv.radius, radar: mv.radar, optical: mv.optical, running: false,
+               skill: Number.isFinite(stats.skill) ? Math.max(0, Math.min(1, stats.skill)) : 1 };
     };
     const A = side(sA, metaA), B = side(sB, metaB);
     const sides = { A, B };
@@ -165,13 +171,16 @@
       }
       return best;
     };
-    A.want = plan(A, B); B.want = plan(B, A);
+    // Skilled pilots fly to their best distance; ordinary ones close in to brawl.
+    const want = (me, foe) => MIN_DISTANCE + me.skill * (plan(me, foe) - MIN_DISTANCE);
+    A.want = want(A, B); B.want = want(B, A);
 
     // Re-think every 5 s: if I'm not wearing them down where I am (their repairs
     // keep up), a good pilot moves in closer to where more of my weapons bite.
     const RETHINK = 5 * FPS;
     const hpOf = st => Math.max(0, st.shields) + Math.max(0, st.hull);
     function rethink(me, foe, foeSt) {
+      if (me.skill < 0.5) return;                       // only skilled pilots change their plan mid-fight
       if (me.lastFoeHp != null && hpOf(foeSt) >= me.lastFoeHp - 1) {
         const closer = candidates().filter(x => x < me.want - 20 && nominal(me, foe, x) > nominal(me, foe, me.want) * 1.1);
         if (closer.length) { me.want = closer[closer.length - 1]; me.replans = (me.replans || 0) + 1; }
@@ -253,6 +262,8 @@
       const reachA = Math.max(0, ...A.facts.filter(f => f.damaging).map(f => f.range));
       const reachB = Math.max(0, ...B.facts.filter(f => f.damaging).map(f => f.range));
       const notes = [];
+      const pct = x => `${Math.round(x * 100)}%`;
+      if (A.skill < 1 || B.skill < 1) notes.push(`Pilots: ${nameA} ${pct(A.skill)} skilled, ${nameB} ${pct(B.skill)} skilled (ordinary pilots charge in, don't dodge and aim less well).`);
       notes.push(`Fought at ~${Math.round(avgD)} px on average. ${nameA} plans to fight at ~${Math.round(A.want)} px (reach ${Math.round(reachA)}), ${nameB} at ~${Math.round(B.want)} px (reach ${Math.round(reachB)}).`);
       notes.push(`Speed ${Math.round(A.mv.speed)} vs ${Math.round(B.mv.speed)}; turning ${Math.round(A.mv.turn)}°/s vs ${Math.round(B.mv.turn)}°/s.`);
       const eng = Math.max(1, log.engaged);

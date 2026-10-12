@@ -147,6 +147,7 @@
       if (act === 'goal') { ui.goal = b.dataset.goal; ui.result = null; render(); }
       else if (act === 'run') run();
       else if (act === 'apply') apply();
+      else if (act === 'battle') testInBattle();
       else if (act === 'fac-all') { ui.factions = new Set(ui.ctx.factions.map(f => f.name)); render(); }
       else if (act === 'fac-none') { ui.factions = new Set(); render(); }
       else if (act === 'fac-visited') { ui.factions = new Set(ui.ctx.factions.filter(f => f.visited).map(f => f.name)); render(); }
@@ -335,6 +336,7 @@
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
         <button class="btn btn-primary" data-af="run"${ui.loading ? ' disabled' : ''}>${ui.running ? 'Working…' : ui.result ? 'Fit again' : 'Find the best fit'}</button>
         ${ui.result ? '<button class="btn btn-secondary" data-af="apply">Use this fit</button>' : ''}
+        ${ui.result ? '<button class="btn btn-secondary" data-af="battle" title="Fight it in the Battle Simulator (opens a new tab)">⚔ Test in Battle Simulator</button>' : ''}
       </div>
       ${ui.notice ? `<p style="color:var(--c-warn-text,#fbbf24);margin:8px 0 0;">${h(ui.notice)}</p>` : ''}
       <div id="af-result">${ui.result ? resultHtml() : ''}</div>`;
@@ -392,6 +394,46 @@
     const why = p.basis === 'same class and weight' ? `${h(p.category)}s weighing ${fmt(p.mass.min)}–${fmt(p.mass.max)} t`
       : p.basis === 'same class' ? `${h(p.category)}s (no others this weight)` : `ships weighing ${fmt(p.mass.min)}–${fmt(p.mass.max)} t`;
     return `All-round scores damage, speed, turning, toughness and cargo against similar ships — ${p.count} ${why} (${src}); typically turning ${t}°/s, top speed ${sp}, cargo ${fmt(p.cargo)}. Closest: ${p.examples.map(n => h(shipLabel(n))).join(', ')}.`;
+  }
+
+  function checksHtml(r) {
+    if (!r.checks) return '';
+    const bad = r.checks.filter(c => !c.ok);
+    return `<details style="margin:12px 0 0;" ${bad.length ? 'open' : ''}><summary style="cursor:pointer;font-weight:600;font-size:0.9rem;">
+        ${bad.length ? `⚠ ${bad.length} check${bad.length === 1 ? '' : 's'} failed` : '✅ Passed every check'} — tested before showing you</summary>
+      ${r.repaired ? `<div style="font-size:0.8rem;color:var(--c-text-dim);margin:4px 0;">The first fit failed “${h(r.repaired.join('”, “'))}”, so it was fitted again to fix that.</div>` : ''}
+      <ul style="margin:6px 0 0;padding-left:0;list-style:none;font-size:0.84rem;">${r.checks.map(c => `<li>${c.ok ? '✅' : '❌'} ${h(c.label)} <span style="color:var(--c-text-dim);">— ${h(c.detail)}</span></li>`).join('')}</ul>
+      <div style="font-size:0.78rem;color:var(--c-text-dim);margin-top:4px;">Want to see it fight? Use ⚔ Test in Battle Simulator.</div>
+    </details>`;
+  }
+
+  // Send the fit (and what it's up against) to the battle simulator.
+  function testInBattle() {
+    if (!ui || !ui.result) return;
+    const d = JSON.parse(JSON.stringify(ui.design));
+    d.outfits = ui.result.outfits.map(([name, count]) => ({ name, count }));
+    for (const hp of [...(d.guns || []), ...(d.turrets || [])]) hp.over = '';
+    const weaponsLeft = new Map(ui.result.outfits);
+    const slot = (list, isTurret) => { for (const hp of list || []) for (const [n, k] of weaponsLeft) {
+      const o = ui.idx.get(n) || {}; const a = o.attributes || o;
+      if (k > 0 && (a.weapon || o.weapon) && ((Number(a['turret mounts']) || 0) < 0) === isTurret) { hp.over = n; weaponsLeft.set(n, k - 1); break; } } };
+    slot(d.guns, false); slot(d.turrets, true);
+    d.name = `${d.name || 'Ship'} (auto-fit)`;
+    let opponents, opponentLabel;
+    if (ui.goal === 'counter' && ui.foe.profile) {
+      const names = ui.foe.ships.length ? ui.foe.ships : ui.foe.profile.worst.map(w => w.name);
+      // "How many at once": that many enemies, taking the chosen ships in turn
+      const tally = new Map();
+      for (let i = 0; i < Math.max(1, ui.foe.count); i++) { const n = names[i % names.length]; tally.set(n, (tally.get(n) || 0) + 1); }
+      opponents = [...tally].map(([name, count]) => ({ name, count }));
+      opponentLabel = ui.foe.ships.length ? 'Your chosen enemies' : `${ui.foe.government} (hardest hitters)`;
+    } else {
+      const stock = ui.design._sourceShip || ui.design.name;
+      opponents = [{ name: stock, count: 1 }];
+      opponentLabel = `${shipLabel(stock)} (stock)`;
+    }
+    try { localStorage.setItem('ES_BS_PENDING', JSON.stringify({ fit: d, fitLabel: d.name, opponents, opponentLabel })); } catch (_) {}
+    window.open('BattleSim.html', '_blank');
   }
 
   function targetsResultHtml(d) {
@@ -470,6 +512,7 @@
         <thead><tr><th style="text-align:left;">&nbsp;</th><th style="text-align:right;">Now</th><th style="text-align:right;">Auto-fit</th>${ui.peers && ui.goal === 'general' ? '<th style="text-align:right;" title="Median of similar ships (same class and weight)">Similar ships</th>' : ''}<th style="text-align:right;">Change</th></tr></thead>
         <tbody>${statRows(ui.current, d, ui.goal === 'general' ? ui.peers : null)}</tbody></table></div>
       ${targetsResultHtml(d)}
+      ${checksHtml(r)}
       ${r.counterNotes ? `<div style="margin:12px 0 0;padding:10px 12px;border:1px solid var(--c-border);border-radius:8px;font-size:0.86rem;">
         <div style="font-weight:600;margin-bottom:4px;">Against ${h(ui.foe.ships.length ? ui.foe.ships.map(shipLabel).join(', ') : ui.foe.government)}</div>
         <ul style="margin:0;padding-left:18px;">${r.counterNotes.map(l => `<li>${l}</li>`).join('')}</ul>
@@ -543,7 +586,19 @@
           opts.counter = window.AfThreat.makeCounter(ui.foe.profile, ui.foe.count);
           if (ui.foe.matchSpeed) opts.minSpeed = Math.max(opts.minSpeed || 0, Math.round(ui.foe.profile.defence.speed));
         }
-        const r = O().optimize({ base: ui.base, candidates: list, goal: ui.goal, options: opts, keep, reference: mine, referenceIndex: ui.idx });
+        let r = O().optimize({ base: ui.base, candidates: list, goal: ui.goal, options: opts, keep, reference: mine, referenceIndex: ui.idx });
+        // Check the result before showing it. If something basic fails (power,
+        // cooling, crew, fuel …), fit again with each failure made a must-have.
+        let checks = S().verify(r.derived);
+        let repaired = null;
+        const failing = checks.filter(c => !c.ok && c.fix);
+        if (failing.length) {
+          const opts2 = { ...opts, targets: [...(opts.targets || []), ...failing.map((c, i) => ({ ...c.fix, order: -1 - i, ref: S().statValue(r.derived, c.fix.id) }))] };
+          const r2 = O().optimize({ base: ui.base, candidates: list, goal: ui.goal, options: opts2, keep, reference: mine, referenceIndex: ui.idx });
+          const checks2 = S().verify(r2.derived);
+          if (checks2.filter(c => !c.ok).length < checks.filter(c => !c.ok).length) { repaired = failing.map(c => c.label); r = r2; checks = checks2; }
+        }
+        r.checks = checks; r.repaired = repaired;
         r.access = access;
         r.counterNotes = ui.goal === 'counter' ? window.AfThreat.explain(ui.current, r.derived, ui.foe.profile, ui.foe.count) : null;
         r.suggestions = ui.goal === 'general' ? suggestions(r, list) : [];

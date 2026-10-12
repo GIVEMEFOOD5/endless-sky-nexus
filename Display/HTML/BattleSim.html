@@ -42,9 +42,9 @@
         <div class="fight-btn-wrap">
             <button class="fight-btn" id="fightBtn" disabled>⚔ SIMULATE BATTLE</button>
             <label class="sim-option" style="display:flex;gap:8px;align-items:center;justify-content:center;margin-top:10px;font-size:0.88rem;color:var(--c-text-mid);">
-              <input type="checkbox" id="skilledPilots" checked>
-              <span>✈ Skilled pilots — fly the fight: range, kiting, aim, dodging, turning and missile guidance
-                <span style="display:block;font-size:0.76rem;color:var(--c-text-dim);">Untick for the old "every shot hits, always in range" damage race.</span></span>
+              <input type="checkbox" id="skilledPilots" checked onchange="setEveryoneSkilled(this.checked)">
+              <span>✈ Every ship has a skilled pilot
+                <span style="display:block;font-size:0.76rem;color:var(--c-text-dim);">Skilled pilots pick their range, kite, lead their shots and dodge. Untick, or set it per ship or per team above, for ordinary pilots who charge in and aim less well.</span></span>
             </label>
         </div>
 

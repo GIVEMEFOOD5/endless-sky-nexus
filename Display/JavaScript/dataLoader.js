@@ -333,6 +333,8 @@ window.DataLoader = {
     },
 
     getActivePlugins() { return [..._activePlugins]; },
+    /** A ship-builder design as a ship object other pages can use (e.g. the battle simulator). */
+    normaliseDesign(design) { return _normaliseSavedShip(design, { _isLocalBuild: true }); },
     /** { outputName: pluginData } for the selected plugins only (Local Builds included when on). */
     getActiveData() { return _activeData(); },
     /**

@@ -301,6 +301,8 @@
     ['energyCap', 'Energy capacity (batteries)', '', d => d.energy.capacity],
     ['fightTime', 'Seconds of full fight before energy runs out', 's', d => d.energy.uptime.fighting == null ? 3600 : d.energy.uptime.fighting],
     ['heat.fight', 'Heat in a full fight', '%', d => d.heat.equilibriumPct.fighting],
+    ['heat.fly', 'Heat flying flat-out', '%', d => d.heat.equilibriumPct.flying],
+    ['heat.idle', 'Heat sitting still', '%', d => d.heat.equilibriumPct.idle],
     ['mass', 'Mass', 't', d => d.mass],
     ['cost', 'Cost (hull + outfits)', 'cr', d => d.cost],
     ['free.outfit', 'Free outfit space', '', d => d.space.outfit.free],
@@ -308,6 +310,29 @@
     ['free.engine', 'Free engine capacity', '', d => d.space.engine.free],
   ].map(([id, label, unit, get]) => ({ id, label, unit, get }));
   const STAT_BY_ID = new Map(STATS.map(x => [x.id, x]));
+  /**
+   * The checks every auto-fit result is put through before it's shown.
+   * → [{ ok, label, detail, fix? }] — `fix` is a target that would repair it.
+   */
+  function verify(d) {
+    const sp = d.space, out = [];
+    const add = (ok, label, detail, fix) => out.push({ ok: !!ok, label, detail, fix });
+    const over = Object.entries({ outfit: 'outfit space', weapon: 'weapon capacity', engine: 'engine capacity', guns: 'gun ports', turrets: 'turret mounts' })
+      .filter(([k]) => sp[k].free < -1e-9).map(([, l]) => l);
+    add(!over.length, 'Everything fits', over.length ? `over on ${over.join(', ')}` : 'within every capacity and mount');
+    add(d.maxSpeed > 0, 'It can move', `top speed ${Math.round(d.maxSpeed)}`);
+    add(d.turnRate > 0, 'It can turn', `${d.turnRate.toFixed(1)}°/s`);
+    add(d.energy.perSec.idle >= 0, 'Powers itself when idle', `${d.energy.perSec.idle.toFixed(0)} energy/s`, { id: 'energy.idle', mode: 'min', value: 0, priority: 'must' });
+    add(d.energy.perSec.flying >= 0, 'Powers itself while flying', `${d.energy.perSec.flying.toFixed(0)} energy/s`, { id: 'energy.fly', mode: 'min', value: 0, priority: 'must' });
+    add(d.heat.equilibriumPct.idle <= 100, 'Stays cool when idle', `heat settles at ${Math.round(d.heat.equilibriumPct.idle)}%`, { id: 'heat.idle', mode: 'max', value: 95, priority: 'must' });
+    add(d.heat.equilibriumPct.flying <= 100, 'Stays cool while flying', `heat settles at ${Math.round(d.heat.equilibriumPct.flying)}%`, { id: 'heat.fly', mode: 'max', value: 95, priority: 'must' });
+    add(d.bunks >= d.requiredCrew, 'Room for its crew', `${d.bunks} bunks for ${d.requiredCrew} crew`, { id: 'spareBunks', mode: 'min', value: 0, priority: 'must' });
+    add(d.fuel.jumps >= 1, 'Can jump to other systems', `${d.fuel.jumps} jump${d.fuel.jumps === 1 ? '' : 's'} of fuel`, { id: 'jumps', mode: 'min', value: 1, priority: 'must' });
+    const dry = d.ammo.filter(a => !a.rounds).map(a => a.weapon);
+    add(!dry.length, 'Launchers have ammunition', dry.length ? `no ammo for ${dry.join(', ')}` : (d.ammo.length ? 'all loaded' : 'no launchers'));
+    return out;
+  }
+
   function statValue(d, id) {
     if (id.startsWith('attr:')) return d.raw[id.slice(5)] || 0;
     const st = STAT_BY_ID.get(id);
@@ -316,5 +341,5 @@
   function statLabel(id) { return id.startsWith('attr:') ? `${id.slice(5)} (attribute)` : (STAT_BY_ID.get(id) || { label: id }).label; }
 
   return { derive, fromTotals, totals, weaponStats, warnings, isSecondary, hullAttrs, fmtTime, activeData, activePluginIds, activeLocations,
-           STATS, statValue, statLabel, DAMAGE_KEYS };
+           STATS, statValue, statLabel, verify, DAMAGE_KEYS };
 });

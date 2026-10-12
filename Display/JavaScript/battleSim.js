@@ -175,10 +175,34 @@ async function onPluginsChanged() {
         document.getElementById('simPanel').style.display = 'block';
         renderAllTeams();
         updateSimButton();
+        loadPendingMatchup();
 
     } catch (err) {
         console.error('[battleSim] onPluginsChanged failed:', err);
     }
+}
+
+// "⚔ Test in Battle Simulator" from the ship builder's auto-fit: the fit on
+// team 1, what it was fitted against (or the stock ship) on team 2.
+function loadPendingMatchup() {
+    let p = null;
+    try { p = JSON.parse(localStorage.getItem('ES_BS_PENDING') || 'null'); } catch (_) {}
+    if (!p || !p.fit || !window.DataLoader?.normaliseDesign) return;
+    localStorage.removeItem('ES_BS_PENDING');
+    while (_teams.length < 2) createTeam('Team ' + (_teams.length + 1));
+    for (const t of _teams) t.ships = [];
+    const fit = { ...window.DataLoader.normaliseDesign(p.fit), _pluginId: '__local_builds__' };
+    _teams[0].name = p.fitLabel || fit.name;
+    addShipToTeam(_teams[0].id, fit, 1);
+    _teams[1].name = p.opponentLabel || 'Opponents';
+    const missing = [];
+    for (const o of p.opponents || []) {
+        const ship = _allShips.find(s => s.name === o.name);
+        if (ship) addShipToTeam(_teams[1].id, ship, o.count || 1); else missing.push(o.name);
+    }
+    renderAllTeams(); updateSimButton();
+    if (_teams[1].ships.length) setTimeout(() => runSimulation(), 300);
+    else setStatus(`None of the opponent ships (${missing.join(', ')}) are in your selected plugins.`, true);
 }
 // ═══════════════════════════════════════════════════════════════════════════════
 //  ATTRIBUTE HELPERS
@@ -1224,7 +1248,9 @@ function addShipToTeam(teamId, shipData, count) {
     const resolved = resolveShipStats(shipData);
     if (typeof window.MovementStats?.compute === 'function')
         resolved.movementProfile = window.MovementStats.compute(resolved.combined);
-    team.ships.push({ shipData, count: Math.max(1, count), resolved });
+    const allSkilled = document.getElementById('skilledPilots')?.checked !== false;
+    const n = Math.max(1, count);
+    team.ships.push({ shipData, count: n, skilled: allSkilled ? n : 0, resolved });
     renderTeamCard(team);
     updateSimButton();
     hideResults();
@@ -1242,10 +1268,58 @@ function removeShipFromTeam(teamId, shipIdx) {
 function updateShipCount(teamId, shipIdx, newCount) {
     const team = _teams.find(t => t.id === teamId);
     if (!team || !team.ships[shipIdx]) return;
-    team.ships[shipIdx].count = Math.max(1, parseInt(newCount) || 1);
+    const e = team.ships[shipIdx];
+    const wasAll = e.skilled >= e.count;
+    e.count = Math.max(1, parseInt(newCount) || 1);
+    // keep "all skilled" ships all skilled; otherwise never more skilled than there are ships
+    e.skilled = wasAll ? e.count : Math.min(e.skilled || 0, e.count);
+    const sk = document.getElementById(`skilled_${teamId}_${shipIdx}`);
+    if (sk) { sk.max = e.count; sk.value = e.skilled; }
+    syncSkillMaster();
     updateSimButton();
     hideResults();
 }
+
+// ── Pilot skill: per ship (how many of a stack are skilled), per team, or everyone ──
+function setShipSkilled(teamId, shipIdx, value) {
+    const team = _teams.find(t => t.id === teamId);
+    const e = team && team.ships[shipIdx];
+    if (!e) return;
+    e.skilled = typeof value === 'boolean' ? (value ? e.count : 0) : Math.max(0, Math.min(e.count, parseInt(value) || 0));
+    // redraw after this event finishes (redrawing removes the box being edited)
+    setTimeout(() => { renderTeamCard(team); syncSkillMaster(); }, 0);
+    hideResults();
+}
+function setTeamSkilled(teamId, on) {
+    const team = _teams.find(t => t.id === teamId);
+    if (!team) return;
+    for (const e of team.ships) e.skilled = on ? e.count : 0;
+    renderTeamCard(team); syncSkillMaster(); hideResults();
+}
+function setEveryoneSkilled(on) {
+    for (const t of _teams) for (const e of t.ships) e.skilled = on ? e.count : 0;
+    renderAllTeams(); hideResults();
+}
+// the bottom "every ship is skilled" box reflects the teams
+function syncSkillMaster() {
+    const box = document.getElementById('skilledPilots');
+    if (!box) return;
+    const ships = _teams.flatMap(t => t.ships);
+    box.checked = !ships.length ? box.checked : ships.every(e => (e.skilled || 0) >= e.count);
+    box.indeterminate = ships.length > 0 && !box.checked && ships.some(e => (e.skilled || 0) > 0);
+}
+/** Share of a team that's skilled, weighted by how much each ship matters (toughness × count). */
+function teamSkill(team) {
+    let tot = 0, sk = 0;
+    for (const e of team.ships) {
+        const w = Math.max(1, (e.resolved.maxShields || 0) + (e.resolved.maxHull || 0));
+        tot += w * e.count; sk += w * Math.min(e.count, e.skilled || 0);
+    }
+    return tot ? sk / tot : 1;
+}
+window.setShipSkilled = setShipSkilled;
+window.setTeamSkilled = setTeamSkilled;
+window.setEveryoneSkilled = setEveryoneSkilled;
 
 function renameTeam(teamId, newName) {
     const team = _teams.find(t => t.id === teamId);
@@ -1336,7 +1410,17 @@ function createTeamCardElement(team) {
         <span class="team-ship-count">${totalShips} ship${totalShips !== 1 ? 's' : ''}</span>
         <button class="team-remove-btn" title="Remove team" onclick="removeTeam('${team.id}')">✕</button>
     `;
+    if (team.ships.length) {
+        const skilledShips = team.ships.reduce((n, e) => n + Math.min(e.count, e.skilled || 0), 0);
+        const allSk = skilledShips >= totalShips;
+        const bar = document.createElement('div');
+        bar.className = 'team-skill-bar';
+        bar.innerHTML = `<span>✈ ${skilledShips} of ${totalShips} skilled</span>
+            <button type="button" class="team-skill-btn" onclick="setTeamSkilled('${team.id}', ${!allSk})">${allSk ? 'Make none skilled' : 'Make all skilled'}</button>`;
+        el._skillBar = bar;
+    }
     el.appendChild(header);
+    if (el._skillBar) el.appendChild(el._skillBar);
 
     const shipList = document.createElement('div');
     shipList.className = 'team-ship-list';
@@ -1358,8 +1442,14 @@ function createTeamCardElement(team) {
                     </div>
                 </div>
                 <div class="team-ship-controls">
+                    ${entry.count > 1
+                        ? `<label class="team-skill" title="How many of these ${entry.count} ships have skilled pilots">✈
+                             <input class="team-skill-input" id="skilled_${team.id}_${idx}" type="number" min="0" max="${entry.count}" value="${Math.min(entry.count, entry.skilled || 0)}"
+                                    aria-label="Skilled pilots" onchange="setShipSkilled('${team.id}', ${idx}, this.value)"> skilled</label>`
+                        : `<label class="team-skill" title="This ship has a skilled pilot"><input type="checkbox" ${(entry.skilled || 0) >= 1 ? 'checked' : ''}
+                             aria-label="Skilled pilot" onchange="setShipSkilled('${team.id}', ${idx}, this.checked)"> ✈ skilled</label>`}
                     <input class="team-count-input" type="number" min="1" max="9999"
-                           value="${entry.count}"
+                           value="${entry.count}" aria-label="Number of ships"
                            onchange="updateShipCount('${team.id}', ${idx}, this.value)"
                            oninput="updateShipCount('${team.id}', ${idx}, this.value)">
                     <button class="team-remove-btn" title="Remove" onclick="removeShipFromTeam('${team.id}', ${idx})">✕</button>
@@ -1429,7 +1519,8 @@ async function runSimulation() {
         const teamStats = validTeams.map(team => {
             const entries = team.ships.filter(e => e.count > 0).map(e => ({ resolved: e.resolved, count: e.count }));
             const merged  = mergeTeamStats(entries);
-            merged._teamShips = entries;   // per-ship speed/size for the skilled-pilot model
+            merged._teamShips = entries;   // per-ship speed/size for the pilot model
+            merged.skill = teamSkill(team); // share of the team flown by skilled pilots
             merged.name   = team.name;
             merged.color  = team.color;
             merged._team  = team;
@@ -1437,7 +1528,8 @@ async function runSimulation() {
         });
 
         const payload = { damageTypes: _damageTypes, outfitIndex: _outfitIndex, attrDefs: _attrDefs, teamStats };
-        const simOpts = { skilled: !!document.getElementById('skilledPilots')?.checked };
+        // Pilots always fly the fight now; how well depends on each team's skilled share.
+        const simOpts = { skilled: true };
         const updateProgress = typeof window.BattleSimDisplay?.updateProgressModal === 'function'
             ? window.BattleSimDisplay.updateProgressModal : () => {};
 
