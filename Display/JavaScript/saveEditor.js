@@ -635,7 +635,7 @@
       ${entries.map(([n, c]) => `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
           <input type="number" class="text-input" data-outfit="${h(n)}" value="${c}" min="0" step="1" style="width:80px;">
-          <span>${h(n)}</span></div>`).join('') || '<p style="color:var(--c-text-dim);">No outfits installed.</p>'}
+          <span>${window.OutfitNames ? OutfitNames.html(n) : h(n)}</span></div>`).join('') || '<p style="color:var(--c-text-dim);">No outfits installed.</p>'}
       <div style="display:flex;gap:8px;margin-top:8px;">
         <span style="flex:1 1 220px;max-width:320px;"><input class="text-input" id="sv-add-outfit" placeholder="Start typing an outfit…" autocomplete="off"></span>
         <input type="number" class="text-input" id="sv-add-outfit-n" value="1" min="1" style="width:80px;">
@@ -651,7 +651,7 @@
       ${Object.entries(items).map(([n, c]) => `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
           <input type="number" class="text-input" data-item="${kind}" data-name="${h(n)}" value="${c}" min="0" step="1" style="width:90px;">
-          <span>${h(n)}</span></div>`).join('') || `<p style="color:var(--c-text-dim);margin:0 0 6px;">None.</p>`}
+          <span>${kind === 'cargo-o' && window.OutfitNames ? OutfitNames.html(n) : h(n)}</span></div>`).join('') || `<p style="color:var(--c-text-dim);margin:0 0 6px;">None.</p>`}
       <div style="display:flex;gap:8px;">
         <span style="flex:1 1 200px;max-width:300px;"><input class="text-input" id="sv-add-${kind}" placeholder="Start typing a${label === 'Outfit' ? 'n outfit' : ' commodity'}…" autocomplete="off"></span>
         <input type="number" class="text-input" id="sv-add-${kind}-n" value="1" min="1" style="width:90px;" aria-label="${unit}">

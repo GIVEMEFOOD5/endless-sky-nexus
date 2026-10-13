@@ -87,6 +87,7 @@
   // Ship names as players know them: display name first, internal name after.
   const SN = () => window.ShipNames;
   const shipLabel = name => { const s = allShips().get(name); return s && SN() ? SN().label(s) : name; };
+  const outfitHtml = name => (window.OutfitNames ? window.OutfitNames.html(name) : h(name));
   const shipHtml = name => { const s = allShips().get(name); return s && SN() ? SN().html(s) : h(name); };
   // Type-ahead for ships: matches the display name or the internal name, and
   // lists the display name first with the internal name dimmed underneath.
@@ -300,7 +301,7 @@
           <input type="checkbox" id="af-nosec"${ui.prefs.noSecondary ? ' checked' : ''}>
           <span>Don't use secondary weapons<span style="display:block;font-size:0.76rem;color:var(--c-text-dim);">No missiles, rockets, torpedoes or other launchers (or their ammunition), for every goal. Anti-missile turrets still count.</span></span></label>
         <div style="font-size:0.86rem;margin-top:8px;">Never use these outfits:</div>
-        <div style="margin:4px 0;">${ui.prefs.exclude.length ? ui.prefs.exclude.map(n => chip(h(n), 'excl-rm', n)).join('') + ' <button class="btn btn-secondary btn-sm" data-af="excl-clear">Clear all</button>' : '<em style="color:var(--c-text-dim);font-size:0.82rem;">none yet — add any you don\'t want here, or press “Exclude” next to an outfit in a result</em>'}</div>
+        <div style="margin:4px 0;">${ui.prefs.exclude.length ? ui.prefs.exclude.map(n => chip(outfitHtml(n), 'excl-rm', n)).join('') + ' <button class="btn btn-secondary btn-sm" data-af="excl-clear">Clear all</button>' : '<em style="color:var(--c-text-dim);font-size:0.82rem;">none yet — add any you don\'t want here, or press “Exclude” next to an outfit in a result</em>'}</div>
         <div style="max-width:360px;"><input id="af-excl-add" class="text-input" placeholder="Add an outfit to leave out…" autocomplete="off"></div>
         <div style="font-size:0.76rem;color:var(--c-text-dim);margin-top:4px;">Remembered on this device for every ship you fit.</div>
       </details>
@@ -493,7 +494,7 @@
     const rows = r.outfits.map(([n, k]) => {
       const src = r.access.get(n) || {};
       const ex = expanderNote(n);
-      return `<tr><td style="padding:3px 8px 3px 0;">${k}× ${h(n)}${ex ? `<span style="display:block;font-size:0.74rem;color:var(--c-text-dim);">${h(ex)}</span>` : ''}</td><td style="font-size:0.78rem;color:var(--c-text-dim);">${icon[src.how] || ''} ${h(src.note || '')}</td>
+      return `<tr><td style="padding:3px 8px 3px 0;">${k}× ${outfitHtml(n)}${ex ? `<span style="display:block;font-size:0.74rem;color:var(--c-text-dim);">${h(ex)}</span>` : ''}</td><td style="font-size:0.78rem;color:var(--c-text-dim);">${icon[src.how] || ''} ${h(src.note || '')}</td>
         <td style="text-align:right;white-space:nowrap;"><button type="button" class="af-excl-btn" data-af="excl-add" data-name="${h(n)}" title="Never use this outfit">Exclude</button></td></tr>`;
     }).join('');
     const steals = [...r.access.values()].filter(a => a.how === 'plunder' && a.steal);

@@ -919,4 +919,28 @@ async function ensurePluginLoaded(outputName) {
         },
     };
     window.ShipNames = ShipNames;
+
+    // OutfitNames — the same for outfits ("Tiny VLS" shows as "Vertical Launch
+    // Array (9)"). Works on an outfit object, or on just its internal name
+    // (looked up in the selected plugins).
+    let idxKey = '', idx = new Map();
+    function outfitByName(name) {
+        const data = (window.DataLoader && window.DataLoader.getActiveData) ? window.DataLoader.getActiveData() : (window.allData || {});
+        const key = Object.keys(data).map(k => k + ':' + ((data[k].outfits || []).length)).join('|');
+        if (key !== idxKey) {
+            idxKey = key; idx = new Map();
+            for (const p of Object.values(data)) for (const o of p.outfits || []) if (o && o.name && !idx.has(o.name)) idx.set(o.name, o);
+        }
+        return idx.get(name) || null;
+    }
+    const asOutfit = o => (typeof o === 'string' ? (outfitByName(o) || { name: o }) : o);
+    const OutfitNames = {
+        label(o) { return ShipNames.label(asOutfit(o)); },
+        internal(o) { return ShipNames.internal(asOutfit(o)); },
+        text(o) { return ShipNames.text(asOutfit(o)); },
+        matches(o, q) { return ShipNames.matches(asOutfit(o), q); },
+        html(o, wrap) { return ShipNames.html(asOutfit(o), wrap); },
+        get: outfitByName,
+    };
+    window.OutfitNames = OutfitNames;
 })();

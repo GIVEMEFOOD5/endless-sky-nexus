@@ -267,7 +267,8 @@ const OutfitExpander = (() => {
 
             const nameEl = row.querySelector('.sb-picker-name');
             if (!nameEl) return;
-            const outfitName = nameEl.textContent.trim();
+            // the internal name (the visible text may be the display name)
+            const outfitName = nameEl.dataset.name || nameEl.textContent.trim();
 
             const btn = document.createElement('button');
             btn.className   = CLS.toggle + ' oe-toggle--picker';

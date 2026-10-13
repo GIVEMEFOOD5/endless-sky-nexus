@@ -340,7 +340,7 @@ function buildWeaponItem(w) {
     if (w.relHull   > 0) extra.push(`%Hull: ${w.relHull}%/hit`);
 
     return `<div class="weapon-item">
-        <div class="weapon-item-name">${escHtml(w.name)}${
+        <div class="weapon-item-name">${window.OutfitNames ? OutfitNames.html(w.name) : escHtml(w.name)}${
             w.hasSubmunitions
                 ? `<span style="color:var(--c-accent-text);font-size:0.7em;margin-left:4px;">⚡sub</span>`
                 : ''

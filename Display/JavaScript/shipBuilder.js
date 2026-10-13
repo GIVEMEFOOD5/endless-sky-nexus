@@ -1553,7 +1553,7 @@ function sbRenderOutfitsList() {
     }).filter(Boolean).join('');
 
     return `<div class="outfit-item">
-      <span class="outfit-item__name" title="${esc(rawName)}">${esc(rawName)}</span>
+      <span class="outfit-item__name" title="${esc(rawName)}">${window.OutfitNames ? OutfitNames.html(rawName) : esc(rawName)}</span>
       ${costTags}
       <input class="outfit-item__count" type="number" min="1" value="${esc(String(count))}"
         onchange="sbUpdateOutfitCount(${i},this.value)">
@@ -1733,7 +1733,7 @@ function sbOpenOutfitPicker() {
         if (turretCost > 0 && hasTurretPorts) { const over = turretCost > freeTurretsForPicker; if (over) wouldBlock = true; costBadges.push(`<span class="sb-picker-size${over ? ' sb-picker-size--over' : ''}">${turretCost} turret${turretCost > 1 ? 's' : ''}</span>`); }
         const encoded = btoa(unescape(encodeURIComponent(JSON.stringify({ name, pluginId: oPluginId }))));
         return `<div class="sb-picker-row${wouldBlock ? ' sb-picker-row--over' : ''}" onclick="sbAddOutfitFromPicker('${encoded}')">
-          <span class="sb-picker-name">${esc(name || 'Unknown')}</span>
+          <span class="sb-picker-name" data-name="${esc(name || '')}">${(window.OutfitNames ? OutfitNames.html(o) : esc(name || 'Unknown'))}</span>
           <span class="sb-picker-meta" style="display:flex;align-items:center;gap:4px;flex-shrink:0;">${esc([cat, cost].filter(Boolean).join(' · '))}${costBadges.join('')}</span>
         </div>`;
       }).join('')}

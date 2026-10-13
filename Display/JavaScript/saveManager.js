@@ -735,7 +735,7 @@ function renderCargoStorage() {
   el('cargoList').innerHTML = (cargoEntries.length || commodityEntries.length)
     ? `<div class="ld-pills">${commodityEntries.map(([name, tons]) =>
         `<span class="ld-pill">${esc(name)} · ${tons.toLocaleString()} t</span>`).join('')}${cargoEntries.map(([name, count]) =>
-        `<span class="ld-pill">${esc(name)}${count > 1 ? ` ×${count}` : ''}</span>`).join('')}</div>`
+        `<span class="ld-pill">${smOutfitHtml(name)}${count > 1 ? ` ×${count}` : ''}</span>`).join('')}</div>`
     : `<div class="ld-empty">No cargo carried.</div>`;
 
   const storage = parsedSave.storage || [];
@@ -750,7 +750,7 @@ function renderCargoStorage() {
           <div class="ld-plugin-content-wrapper">
             ${entries.length
               ? `<div class="ld-pills">${entries.map(([name, count]) =>
-                  `<span class="ld-pill">${esc(name)}${count > 1 ? ` ×${count}` : ''}</span>`).join('')}</div>`
+                  `<span class="ld-pill">${smOutfitHtml(name)}${count > 1 ? ` ×${count}` : ''}</span>`).join('')}</div>`
               : `<div class="ld-unused">Nothing stored here.</div>`}
           </div>
         </div>`;
@@ -877,7 +877,7 @@ function openShipModal(idx) {
   ];
 
   const outfitChips     = ship.outfits.length
-    ? `<div class="ld-pills">${ship.outfits.map(o => `<span class="ld-pill">${esc(o.name)}${o.count > 1 ? ` ×${o.count}` : ''}</span>`).join('')}</div>`
+    ? `<div class="ld-pills">${ship.outfits.map(o => `<span class="ld-pill">${smOutfitHtml(o.name)}${o.count > 1 ? ` ×${o.count}` : ''}</span>`).join('')}</div>`
     : `<div class="ld-empty">No outfits installed.</div>`;
   const gunList         = ship.guns.length    ? ship.guns.map(g    => g.over ? esc(g.over) : '(empty mount)').join(', ') : null;
   const turretList      = ship.turrets.length ? ship.turrets.map(t => t.over ? esc(t.over) : '(empty mount)').join(', ') : null;
@@ -1253,3 +1253,6 @@ function smModelShip(model) {
 }
 function smModelLabel(model) { const s = smModelShip(model); return s && window.ShipNames ? window.ShipNames.label(s) : (model || ''); }
 function smModelHtml(model) { const s = smModelShip(model); return s && window.ShipNames ? window.ShipNames.html(s) : esc(model || ''); }
+
+// An outfit by its in-game display name, with the internal name dimmed beside it.
+function smOutfitHtml(name) { return window.OutfitNames ? window.OutfitNames.html(name) : esc(name); }

@@ -48,7 +48,12 @@
     for (const [id, p] of entries) {
       const pl = pluginName(id, p);
       if (kind === 'outfits') {
-        for (const o of p.outfits || []) if (o && o.name) add(o.name, o.name, o.category || attrs(o).category || '', pl);
+        for (const o of p.outfits || []) {
+          if (!o || !o.name) continue;
+          const ON = window.OutfitNames;
+          const label = ON ? ON.label(o) : o.name, internal = ON ? ON.internal(o) : '';
+          add(o.name, label, [internal, o.category || attrs(o).category || ''].filter(Boolean).join(' · '), pl, { internal });
+        }
       } else if (kind === 'ships') {
         for (const s of [...(p.ships || []), ...(p.variants || [])]) {
           if (!s || !s.name) continue;
