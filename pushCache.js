@@ -97,9 +97,13 @@ class PushCache {
   }
 
   /** For junction tables: which parents' child rows changed. `childrenOf(parentKey)` → plain data. */
+  /** Forget what was pushed for this junction cache, so every parent is rebuilt. */
+  distrust(table) { (this.distrusted = this.distrusted || new Set()).add(table); }
+
   changedParents(table, parentTable, parentKeys, childrenOf) {
-    // junction caches are only as trustworthy as their parent table's
-    const prev = this.trusted.has(parentTable) ? (this.state.tables[table] || {}) : {};
+    // junction caches are only as trustworthy as their parent table's —
+    // and not at all if the rows in the database don't add up (distrust())
+    const prev = this.trusted.has(parentTable) && !(this.distrusted && this.distrusted.has(table)) ? (this.state.tables[table] || {}) : {};
     const next = this.candidate[table] = {};
     const out = new Set();
     for (const k of parentKeys) {

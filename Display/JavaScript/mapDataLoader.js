@@ -143,17 +143,30 @@ async function _loadOnePlugin(outputName, meta) {
 
     const systemIds   = systemRows.map(s => s.id);
     const wormholeIds = wormholeRows.map(w => w.id);
+    // Ask for a few hundred ids at a time: a list of every system id in one
+    // request makes the web address too long for big plugins (the request
+    // then fails and the map would have no jump links, fleets or trade).
+    const byIds = async (table, column, ids) => {
+        const out = [];
+        for (let i = 0; i < ids.length; i += 200) {
+            const part = ids.slice(i, i + 200);
+            out.push(...await fetchAllRows(table, { filters: q => q.in(column, part), orderBy: 'id' }));
+        }
+        return out;
+    };
     const [fleetRows, hazardRows, asteroidRows, minableRows, linkRows, sysPlanetRows, tradeRows, whLinkRows] =
         await Promise.all([
-            fetchAllRows('system_fleets',    { filters: q => q.in('system_id', systemIds) }),
-            fetchAllRows('system_hazards',   { filters: q => q.in('system_id', systemIds) }),
-            fetchAllRows('system_asteroids', { filters: q => q.in('system_id', systemIds) }),
-            fetchAllRows('system_minables',  { filters: q => q.in('system_id', systemIds) }),
-            fetchAllRows('system_links',     { filters: q => q.in('system_id', systemIds) }),
-            fetchAllRows('system_planets',   { filters: q => q.in('system_id', systemIds) }),
-            fetchAllRows('system_trade',     { filters: q => q.in('system_id', systemIds) }),
-            fetchAllRows('wormhole_links',   { filters: q => q.in('wormhole_id', wormholeIds) }),
+            byIds('system_fleets',    'system_id', systemIds),
+            byIds('system_hazards',   'system_id', systemIds),
+            byIds('system_asteroids', 'system_id', systemIds),
+            byIds('system_minables',  'system_id', systemIds),
+            byIds('system_links',     'system_id', systemIds),
+            byIds('system_planets',   'system_id', systemIds),
+            byIds('system_trade',     'system_id', systemIds),
+            byIds('wormhole_links',   'wormhole_id', wormholeIds),
         ]);
+    if (systemIds.length > 20 && !linkRows.length)
+        console.warn(`[MapDataLoader] "${outputName}" has ${systemIds.length} systems but no jump links in the database — run the Parse workflow with "full refresh" ticked.`);
 
     const fleetsBySystem    = groupBy(fleetRows, 'system_id');
     const hazardsBySystem   = groupBy(hazardRows, 'system_id');
@@ -236,7 +249,8 @@ async function _loadOnePlugin(outputName, meta) {
     } // end buildFresh
 
     return window.EsCache
-        ? await window.EsCache.loadWithCache(`mapData:${outputName}`, buildFresh)
+        // v2: re-downloads once, replacing any copy saved while link data was missing
+        ? await window.EsCache.loadWithCache(`mapData2:${outputName}`, buildFresh)
         : await buildFresh(); // graceful fallback if esCache.js isn't on this page yet
 }
 

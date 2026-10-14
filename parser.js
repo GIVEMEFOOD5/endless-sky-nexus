@@ -3431,6 +3431,33 @@ async function main() {
     console.log(`\nPhase 3: building junction tables...`);
     const junctionStart = Date.now();
 
+    // Self-check: the cache says which children were already pushed, but if the
+    // database has lost rows since (e.g. a run that stopped half-way through a
+    // rebuild), trusting it would leave them missing for good — jump links,
+    // shipyards and so on. Compare row counts with last run's and rebuild any
+    // family that comes up short.
+    const JUNCTION_FAMILIES = {
+      ship_outfits: ['ship_outfits'], variant_outfits: ['variant_outfits'], wormhole_links: ['wormhole_links'],
+      planet_children: ['planet_shipyards', 'planet_outfitters'],
+      system_children: ['system_fleets', 'system_hazards', 'system_asteroids', 'system_minables', 'system_links', 'system_planets', 'system_trade'],
+    };
+    const expectedRows = cache.meta('junctionRows') || null;
+    if (expectedRows) {
+      for (const [family, tables] of Object.entries(JUNCTION_FAMILIES)) {
+        for (const t of tables) {
+          const want = expectedRows[t];
+          if (!want) continue;
+          const { count, error } = await supabase.from(t).select('*', { count: 'exact', head: true });
+          if (error || count == null) continue;
+          if (count < want * 0.98) {
+            console.log(`  ⚠ ${t} has ${count} rows but should have about ${want} — rebuilding all ${family.replace('_', ' ')}`);
+            cache.distrust(family);
+            break;
+          }
+        }
+      }
+    }
+
     // ── ship/variant outfits ──
     const shipChildren = new Map(), variantChildren = new Map();
     for (const { plugin } of allResults) {
@@ -3558,6 +3585,16 @@ async function main() {
     for (const t of Object.values(SYS_TABLES)) await deleteInChunked(t, 'system_id', changedSystemIds);
     for (const [part, t] of Object.entries(SYS_TABLES)) await insertChunked(t, sysRows[part]);
     cache.accept('system_children');
+
+    // remember how many rows each junction table holds now, for next run's self-check
+    {
+      const rows = {};
+      for (const tables of Object.values(JUNCTION_FAMILIES)) for (const t of tables) {
+        const { count, error } = await supabase.from(t).select('*', { count: 'exact', head: true });
+        if (!error && count != null) rows[t] = count;
+      }
+      cache.setMeta('junctionRows', rows);
+    }
 
     console.log(`  rebuilt children of ${changedShips.size} ships, ${changedVariants.size} variants, ${changedPlanets.size} planets, ` +
       `${changedSystems.size} systems, ${changedWormholes.size} wormholes (${secs(junctionStart)})`);
