@@ -185,6 +185,11 @@ async function _loadAndRender(activeOutputNames, resetView) {
 
         systemsArr = [...systemsByName.values()];
         linkSegments = MapCalculations.buildLinkSegments(systemsByName);
+        {   // a short health report, to spot missing lanes
+            let linkNames = 0, dangling = 0;
+            for (const s of systemsByName.values()) for (const l of s.links) { linkNames++; if (!systemsByName.has(l)) dangling++; }
+            console.info(`[Map] ${systemsByName.size} systems, ${linkSegments.length} lanes drawn (${linkNames} link entries, ${dangling} pointing at systems not loaded)`);
+        }
         govPalette = MapCalculations.buildGovernmentPalette(systemsArr, governmentColors);
 
         let missions = MapDataFormatter.formatMissions(pluginDataMap, activeOutputNames, planetsBySystem);

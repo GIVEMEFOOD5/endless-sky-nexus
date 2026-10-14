@@ -148,9 +148,10 @@ async function _loadOnePlugin(outputName, meta) {
     // then fails and the map would have no jump links, fleets or trade).
     const byIds = async (table, column, ids) => {
         const out = [];
-        for (let i = 0; i < ids.length; i += 200) {
-            const part = ids.slice(i, i + 200);
-            out.push(...await fetchAllRows(table, { filters: q => q.in(column, part), orderBy: 'id' }));
+        for (let i = 0; i < ids.length; i += 100) {
+            const part = ids.slice(i, i + 100);
+            // order by the parent id (every link table has it) so paging is stable
+            out.push(...await fetchAllRows(table, { filters: q => q.in(column, part), orderBy: column }));
         }
         return out;
     };
@@ -165,6 +166,7 @@ async function _loadOnePlugin(outputName, meta) {
             byIds('system_trade',     'system_id', systemIds),
             byIds('wormhole_links',   'wormhole_id', wormholeIds),
         ]);
+    console.info(`[MapDataLoader] ${outputName}: ${systemIds.length} systems, ${linkRows.length} jump-link rows, ${whLinkRows.length} wormhole links`);
     if (systemIds.length > 20 && !linkRows.length)
         console.warn(`[MapDataLoader] "${outputName}" has ${systemIds.length} systems but no jump links in the database — run the Parse workflow with "full refresh" ticked.`);
 
@@ -250,7 +252,7 @@ async function _loadOnePlugin(outputName, meta) {
 
     return window.EsCache
         // v2: re-downloads once, replacing any copy saved while link data was missing
-        ? await window.EsCache.loadWithCache(`mapData2:${outputName}`, buildFresh)
+        ? await window.EsCache.loadWithCache(`mapData3:${outputName}`, buildFresh)
         : await buildFresh(); // graceful fallback if esCache.js isn't on this page yet
 }
 
