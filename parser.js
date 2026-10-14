@@ -3090,17 +3090,23 @@ async function main() {
     // concurrent requests) gets retried automatically instead of failing
     // the whole run. Only retries — it never swallows a real data/schema
     // error, those still throw immediately.
-    async function withRetry(fn, { retries = 4, label = 'request' } = {}) {
+    // Errors that mean "Supabase (or the network) is busy right now", not "this
+    // request is wrong": dropped connections and the gateway's 502/503/504.
+    const isTransient = err => /fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|network|Bad Gateway|Service Unavailable|Gateway Time-?out|upstream|\b50[234]\b/i
+      .test((err && err.message) || '');
+    let busyUntil = 0;   // after a gateway error everyone slows down for a while
+    async function withRetry(fn, { retries = 6, label = 'request' } = {}) {
       let lastErr;
       for (let attempt = 1; attempt <= retries; attempt++) {
         try {
           return await fn();
         } catch (err) {
           lastErr = err;
-          const isNetworkError = /fetch failed|ECONNRESET|ETIMEDOUT|network/i.test(err.message ?? '');
-          if (!isNetworkError || attempt === retries) throw err;
-          const delayMs = 1000 * attempt;
-          console.log(`  ↻ ${label}: transient network error, retrying in ${delayMs}ms (attempt ${attempt}/${retries})`);
+          if (!isTransient(err) || attempt === retries) throw err;
+          // back off more each time: 2s, 4s, 8s, 16s, 30s
+          const delayMs = Math.min(30000, 2000 * 2 ** (attempt - 1));
+          busyUntil = Date.now() + 60000;
+          console.log(`  ↻ ${label}: Supabase busy (${(err.message || '').slice(0, 60)}), retrying in ${delayMs / 1000}s (attempt ${attempt}/${retries})`);
           await new Promise(r => setTimeout(r, delayMs));
         }
       }
@@ -3111,14 +3117,22 @@ async function main() {
     const CONCURRENCY = 4;
     async function inPool(items, worker, limit = CONCURRENCY) {
       let next = 0;
-      const run = async () => { while (next < items.length) { const i = next++; await worker(items[i], i); } };
-      await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+      // while Supabase is busy (a recent 502/503/504), only one worker keeps going
+      const run = async slot => {
+        while (next < items.length) {
+          if (slot > 0 && Date.now() < busyUntil) { await new Promise(r => setTimeout(r, 1000)); continue; }
+          const i = next++; await worker(items[i], i);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(limit, items.length) }, (_, slot) => run(slot)));
     }
     // Supabase cancels any statement that runs too long. Big rows (systems,
     // planets, missions carry large JSON) can hit that, especially with
     // several requests at once — so on a timeout the batch is split in half
     // and each half sent on its own, down to single rows if need be.
-    const isTimeout = err => /statement timeout|canceling statement|57014|timed out|payload too large|413/i.test(err && err.message || '');
+    // too slow or too big — or the gateway gave up on it even after retries:
+    // smaller batches are lighter, so split and try again
+    const isTimeout = err => /statement timeout|canceling statement|57014|timed out|payload too large|413/i.test(err && err.message || '') || isTransient(err);
     async function sendSplitting(part, send, label) {
       try {
         return await withRetry(() => send(part), { label });
