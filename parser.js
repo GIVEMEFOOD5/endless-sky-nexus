@@ -3455,6 +3455,36 @@ async function main() {
       planet_children: ['planet_shipyards', 'planet_outfitters'],
       system_children: ['system_fleets', 'system_hazards', 'system_asteroids', 'system_minables', 'system_links', 'system_planets', 'system_trade'],
     };
+    // Per-parent check: a parent that should have rows in a child table but has
+    // none is rebuilt, however the cache feels about it. (Totals alone can miss
+    // a whole plugin's rows going missing.)
+    async function idsWithRows(table, col) {
+      const have = new Set();
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await withRetry(() => supabase.from(table).select(col).order(col).range(from, from + 999), { label: `check ${table}` });
+        if (error) return null;
+        for (const r of data || []) have.add(r[col]);
+        if (!data || data.length < 1000) break;
+      }
+      return have;
+    }
+    const forceRebuild = { ships: new Set(), variants: new Set(), planets: new Set(), systems: new Set(), wormholes: new Set() };
+    async function checkCoverage(kind, childTable, col, childrenMap, idByKey, hasRows, label) {
+      if (!cache.usable) return;          // no cache = everything is rebuilt anyway
+      const have = await idsWithRows(childTable, col);
+      if (!have) return;
+      const missing = new Map();   // plugin → count
+      for (const [k, v] of childrenMap) {
+        if (!hasRows(v)) continue;
+        const id = idByKey.get(k);
+        if (id && !have.has(id)) {
+          forceRebuild[kind].add(k);
+          const pid = String(k).split('::')[0];
+          missing.set(pid, (missing.get(pid) || 0) + 1);
+        }
+      }
+      if (missing.size) console.log(`  ⚠ ${forceRebuild[kind].size} ${label} had no ${childTable} rows — rebuilding them (${[...missing].map(([p, n]) => `${p}: ${n}`).join(', ')})`);
+    }
     const expectedRows = cache.meta('junctionRows') || null;
     if (expectedRows) {
       for (const [family, tables] of Object.entries(JUNCTION_FAMILIES)) {
@@ -3480,8 +3510,12 @@ async function main() {
       for (const v of plugin.variants)
         variantChildren.set(v._internalId, Object.values(outfitMapToOutputFormat(v.outfitMap)).map(i => [i.internalId, i.count]));
     }
+    await checkCoverage('ships', 'ship_outfits', 'ship_id', shipChildren, shipIdByInternalId, v => v.some(([oi]) => outfitIdByInternalId.has(oi)), 'ships');
+    await checkCoverage('variants', 'variant_outfits', 'variant_id', variantChildren, variantIdByInternalId, v => v.some(([oi]) => outfitIdByInternalId.has(oi)), 'variants');
     const changedShips = cache.changedParents('ship_outfits', 'ships', [...shipChildren.keys()], k => shipChildren.get(k));
     const changedVariants = cache.changedParents('variant_outfits', 'variants', [...variantChildren.keys()], k => variantChildren.get(k));
+    for (const k of forceRebuild.ships) changedShips.add(k);
+    for (const k of forceRebuild.variants) changedVariants.add(k);
     const shipOutfitRows = [], variantOutfitRows = [];
     for (const k of changedShips) {
       const shipId = shipIdByInternalId.get(k);
@@ -3541,7 +3575,9 @@ async function main() {
     const wormholeChildren = new Map();
     for (const wormholes of rawWormholesByPlugin)
       for (const w of wormholes) wormholeChildren.set(w._internalId, (w.links ?? []).map(l => [l.from, l.to, l.count ?? 1]));
+    await checkCoverage('wormholes', 'wormhole_links', 'wormhole_id', wormholeChildren, wormholeIdByInternalId, v => v.length > 0, 'wormholes');
     const changedWormholes = cache.changedParents('wormhole_links', 'wormholes', [...wormholeChildren.keys()], k => wormholeChildren.get(k));
+    for (const k of forceRebuild.wormholes) changedWormholes.add(k);
     const linkRows = [];
     for (const k of changedWormholes) {
       const wormholeId = wormholeIdByInternalId.get(k);
@@ -3556,7 +3592,10 @@ async function main() {
     for (const planets of rawPlanetsByPlugin)
       for (const p of planets) planetChildren.set(p._internalId, {
         sy: (p.shipyards ?? []).map(x => x.name), of: (p.outfitters ?? []).map(x => x.name) });
+    await checkCoverage('planets', 'planet_outfitters', 'planet_id', planetChildren, planetIdByInternalId, v => v.of.length > 0, 'planets');
+    await checkCoverage('planets', 'planet_shipyards', 'planet_id', planetChildren, planetIdByInternalId, v => v.sy.length > 0, 'planets');
     const changedPlanets = cache.changedParents('planet_children', 'planets', [...planetChildren.keys()], k => planetChildren.get(k));
+    for (const k of forceRebuild.planets) changedPlanets.add(k);
     const shipyardRows = [], outfitterRows = [];
     for (const k of changedPlanets) {
       const planetId = planetIdByInternalId.get(k);
@@ -3584,7 +3623,11 @@ async function main() {
         planets: (sy.planets ?? []).map(p => ({ planet_name: p.name })),
         trade: (sy.trade ?? []).map(t => ({ commodity_name: t.name, cost: toNumeric(t.cost) })),
       });
+    await checkCoverage('systems', 'system_links', 'system_id', systemChildren, systemIdByInternalId, v => v.links.length > 0, 'systems');
+    await checkCoverage('systems', 'system_planets', 'system_id', systemChildren, systemIdByInternalId, v => v.planets.length > 0, 'systems');
+    await checkCoverage('systems', 'system_fleets', 'system_id', systemChildren, systemIdByInternalId, v => v.fleets.length > 0, 'systems');
     const changedSystems = cache.changedParents('system_children', 'systems', [...systemChildren.keys()], k => systemChildren.get(k));
+    for (const k of forceRebuild.systems) changedSystems.add(k);
     const sysRows = { fleets: [], hazards: [], asteroids: [], minables: [], links: [], planets: [], trade: [] };
     for (const k of changedSystems) {
       const systemId = systemIdByInternalId.get(k);
