@@ -576,7 +576,8 @@ if (HAS_CLEANUP_HELPER && HAS_STATUS_HELPER) {
 
             const parts = [];
             if (rewards.credits) parts.push(`${rewards.credits.toLocaleString()} credits`);
-            rewards.outfits.forEach(o => parts.push(`${o.name}${o.count > 1 ? ` ×${o.count}` : ''} (added to cargo)`));
+            const shown = n => (window.MissionNames ? MissionNames.text('outfits', n) : n);
+            rewards.outfits.forEach(o => parts.push(`${shown(o.name)}${o.count > 1 ? ` ×${o.count}` : ''} (added to cargo)`));
             if (result.unappliedShips.length) {
                 result.unappliedShips.forEach(s => parts.push(`${s.name} (SHIP — not added automatically, see note below)`));
             }

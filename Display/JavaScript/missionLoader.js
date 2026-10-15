@@ -73,6 +73,40 @@ function esc(str) {
         .replace(/>/g, '&gt;');
 }
 function mono(text)      { return `<span class="mission-tag">${esc(text)}</span>`; }
+
+// ── Display names (what the game shows) for ships and outfits ───────────────
+// This page doesn't load full ship/outfit data, so the parser saves a small
+// list ({ pluginId: { ships: {...}, outfits: {...} } } in app_config).
+// Only the selected plugins count. The raw mission view keeps internal names.
+const MissionNames = (() => {
+    let byPlugin = {}, pluginIdByOutput = new Map(), ready = null;
+    function load(pluginRows) {
+        for (const p of pluginRows || []) pluginIdByOutput.set(p.output_name, p.plugin_id);
+        if (!ready) ready = (async () => {
+            try {
+                const { data } = await window.supabaseClient.from('app_config').select('value').eq('key', 'displayNames').maybeSingle();
+                byPlugin = (data && data.value) || {};
+            } catch (_) { byPlugin = {}; }
+        })();
+        return ready;
+    }
+    function label(kind, name) {
+        const active = (typeof _activePlugins !== 'undefined' ? _activePlugins : []);
+        for (const out of active) {
+            const pid = pluginIdByOutput.get(out);
+            const dn = pid && byPlugin[pid] && byPlugin[pid][kind] && byPlugin[pid][kind][name];
+            if (dn) return dn;
+        }
+        return null;
+    }
+    // e.g. "Vertical Launch Array (9)" with the internal "Tiny VLS" dimmed after it
+    function tag(kind, name) {
+        const dn = label(kind, name);
+        return dn ? `${mono(dn)} <span class="ship-realname" title="Internal name">${esc(name)}</span>` : mono(name);
+    }
+    return { load, label, tag, text: (kind, name) => label(kind, name) || name };
+})();
+window.MissionNames = MissionNames;
 function tag(text, cls)  { return `<span class="mission-badge ${cls ? 'mission-badge--' + cls : ''}">${esc(text)}</span>`; }
 
 function formatRange(r) {
@@ -270,10 +304,10 @@ function formatMission(m, pluginId, pluginDisplay) {
     if (outfitRewards.length || shipRewards.length) {
         bodyHtml += '<div class="mission-subhead">Rewards</div><ul class="mission-reward-list">';
         outfitRewards.forEach(o => {
-            bodyHtml += `<li>Outfit: ${mono(o.name)} × ${o.count}${o.grantedIn ? ` <span class="mission-field-label">(on ${esc(o.grantedIn)})</span>` : ''}</li>`;
+            bodyHtml += `<li>Outfit: ${MissionNames.tag('outfits', o.name)} × ${o.count}${o.grantedIn ? ` <span class="mission-field-label">(on ${esc(o.grantedIn)})</span>` : ''}</li>`;
         });
         shipRewards.forEach(s => {
-            bodyHtml += `<li>Ship: ${mono(s.name)}${s.customName ? ` named "${esc(s.customName)}"` : ''}${s.grantedIn ? ` <span class="mission-field-label">(on ${esc(s.grantedIn)})</span>` : ''}</li>`;
+            bodyHtml += `<li>Ship: ${MissionNames.tag('ships', s.name)}${s.customName ? ` named "${esc(s.customName)}"` : ''}${s.grantedIn ? ` <span class="mission-field-label">(on ${esc(s.grantedIn)})</span>` : ''}</li>`;
         });
         bodyHtml += '</ul>';
     }
@@ -308,8 +342,8 @@ function formatMission(m, pluginId, pluginDisplay) {
     }
 
     const rewardNames = [
-        ...(m.rewards && m.rewards.outfits || []).map(o => o.name),
-        ...(m.rewards && m.rewards.ships   || []).map(s => s.name),
+        ...(m.rewards && m.rewards.outfits || []).flatMap(o => [o.name, MissionNames.label('outfits', o.name)]),
+        ...(m.rewards && m.rewards.ships   || []).flatMap(s => [s.name, MissionNames.label('ships', s.name)]),
     ];
 
     const searchText = [
@@ -607,6 +641,7 @@ async function _doLoad() {
         // plugin immediately even before its missions have loaded.
         const pluginRows = await fetchAllRows('plugins', { orderBy: 'source_priority' });
         if (!pluginRows.length) throw new Error('No plugins found in Supabase');
+        await MissionNames.load(pluginRows);   // tiny; needed before missions are shown
 
         for (const p of pluginRows) {
             if (!window.allMissionData[p.output_name]) {

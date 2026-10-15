@@ -3835,6 +3835,25 @@ async function main() {
       `${cleanup.flaggedShips} shared ship(s) and ${cleanup.flaggedFleets} fleet(s) flagged as needing a removed plugin (${secs(cleanupStart)})`);
     timings.push(['cleanup', (Date.now() - cleanupStart) / 1000]);
 
+    // Display names for pages that don't load full ship/outfit data (e.g. Missions):
+    // { pluginId: { ships: { internal: display }, outfits: { internal: display } } }
+    {
+      const names = {};
+      const put = (rows, kind) => {
+        for (const r of rows) {
+          const dn = r.attributes && r.attributes['display name'];
+          if (!dn || dn === r.name) continue;
+          const p = (names[r.plugin_id] = names[r.plugin_id] || { ships: {}, outfits: {} });
+          p[kind][r.name] = String(dn);
+        }
+      };
+      put(dedupedShipRows, 'ships'); put(dedupedVariantRows, 'ships'); put(dedupedOutfitRows, 'outfits');
+      await withRetry(async () => {
+        const { error } = await supabase.from('app_config').upsert({ key: 'displayNames', value: names }, { onConflict: 'key' });
+        if (error) throw new Error(`Supabase upsert failed for app_config: ${error.message}`);
+      }, { label: 'upsert displayNames' });
+    }
+
     // Tell the site there's new data (its cache checks this) — only when
     // something actually changed, so visitors' caches stay valid otherwise.
     const anythingChanged = cleanup.pluginsRemoved.length || cleanup.staleRows || Object.values(pushed).some(p => p.changed > 0)
