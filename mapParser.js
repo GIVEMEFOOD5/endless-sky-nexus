@@ -417,17 +417,41 @@ class EndlessSkyMapParser {
       hazards: [],
       starfieldDensity: null,
       objectTree: [],
+      // How the game treats lists when a system is defined again (System::Load):
+      //   "add <key> …"     adds to the list
+      //   "remove <key> …"  removes that entry
+      //   plain "<key> …"   REPLACES the list (first plain line clears it)
+      plainKeys: new Set(),
+      removals: [],
     };
 
+    const LIST_KEY = { link: 'links', asteroids: 'asteroids', minables: 'minables', trade: 'trade',
+                       fleet: 'fleets', hazard: 'hazards', raid: 'raids', belt: 'belts', attributes: 'attributes' };
     const systemBodyStart = i + 1;
     i++;
     while (i < lines.length) {
       const line = lines[i];
       const indent = indentOf(line);
       if (indent <= baseIndent && line.trim()) break;
-      const stripped = line.trim();
+      let stripped = line.trim();
 
       if (indent === baseIndent + 1) {
+        // "add …" / "remove …" modifiers on list keys
+        const mod = stripped.match(/^(add|remove)\s+(.+)$/);
+        if (mod) {
+          const rest = mod[2].trim();
+          const key = (rest.match(/^"([^"]+)"|^`([^`]+)`|^(\S+)/) || [])[0]?.replace(/["`]/g, '');
+          if (mod[1] === 'remove' && LIST_KEY[key]) {
+            const after = rest.slice(rest.match(/^("[^"]+"|`[^`]+`|\S+)/)[0].length).trim();
+            const nm = after ? (after.match(/^"([^"]+)"|^`([^`]+)`|^(\S+)/) || []).slice(1).find(x => x != null) : null;
+            partial.removals.push({ list: LIST_KEY[key], name: nm });   // name null = remove all
+            i++; continue;
+          }
+          if (mod[1] === 'add') stripped = rest;                         // parsed below as a normal line, but not "plain"
+        } else {
+          const key = (stripped.match(/^"([^"]+)"|^`([^`]+)`|^(\S+)/) || [])[0]?.replace(/["`]/g, '');
+          if (LIST_KEY[key]) partial.plainKeys.add(LIST_KEY[key]);
+        }
         if (stripped === 'inaccessible') { partial.flags.inaccessible = true; i++; continue; }
         if (stripped === 'hidden')       { partial.flags.hidden = true; i++; continue; }
         if (stripped === 'shrouded')     { partial.flags.shrouded = true; i++; continue; }
@@ -681,6 +705,7 @@ class EndlessSkyMapParser {
 
   _mergeSystem(name, partial, pluginId, rawEntries = null) {
     let node = this.systems.get(name);
+    const existed = !!node;
     if (!node) {
       node = this._stampNew({
         displayName: null, flags: { inaccessible: false, hidden: false, shrouded: false },
@@ -713,7 +738,13 @@ class EndlessSkyMapParser {
     if (partial.noRaids) node.noRaids = true;
     Object.assign(node.flags, partial.flags);
 
-    // Lists: append.
+    // Lists. Redefining a system follows the game: a plain list line replaces
+    // that list, "remove" takes entries out, "add" (and a first definition) appends.
+    if (existed && partial.plainKeys) for (const list of partial.plainKeys) if (Array.isArray(node[list])) node[list] = [];
+    for (const r of partial.removals || []) {
+      if (!Array.isArray(node[r.list])) continue;
+      node[r.list] = r.name == null ? [] : node[r.list].filter(x => (typeof x === 'string' ? x : x.name) !== r.name);
+    }
     node.attributes.push(...partial.attributes);
     node.belts.push(...partial.belts);
     mergeNamedRefList(node.links, partial.links);

@@ -3450,6 +3450,18 @@ async function main() {
     // rebuild), trusting it would leave them missing for good — jump links,
     // shipyards and so on. Compare row counts with last run's and rebuild any
     // family that comes up short.
+    // Each plugin's map slice only carries the parts of a system/planet/wormhole
+    // THAT plugin contributed (mapParser.toPluginSlice). A plugin that adds, say,
+    // minables to the base game's Sol therefore has a "Sol" with no links — and
+    // used to replace the base game's Sol here, wiping its jump links, planets,
+    // fleets and trade. Combine the pieces from every plugin instead.
+    function addChildren(map, key, part) {
+      const cur = map.get(key);
+      if (!cur) { map.set(key, part); return; }
+      if (Array.isArray(part)) { map.set(key, cur.concat(part)); return; }
+      for (const [k, v] of Object.entries(part)) cur[k] = (cur[k] || []).concat(v || []);
+    }
+
     const JUNCTION_FAMILIES = {
       ship_outfits: ['ship_outfits'], variant_outfits: ['variant_outfits'], wormhole_links: ['wormhole_links'],
       planet_children: ['planet_shipyards', 'planet_outfitters'],
@@ -3574,7 +3586,7 @@ async function main() {
     // ── wormhole links ──
     const wormholeChildren = new Map();
     for (const wormholes of rawWormholesByPlugin)
-      for (const w of wormholes) wormholeChildren.set(w._internalId, (w.links ?? []).map(l => [l.from, l.to, l.count ?? 1]));
+      for (const w of wormholes) addChildren(wormholeChildren, w._internalId, (w.links ?? []).map(l => [l.from, l.to, l.count ?? 1]));
     await checkCoverage('wormholes', 'wormhole_links', 'wormhole_id', wormholeChildren, wormholeIdByInternalId, v => v.length > 0, 'wormholes');
     const changedWormholes = cache.changedParents('wormhole_links', 'wormholes', [...wormholeChildren.keys()], k => wormholeChildren.get(k));
     for (const k of forceRebuild.wormholes) changedWormholes.add(k);
@@ -3590,7 +3602,7 @@ async function main() {
     // ── planet shipyards / outfitters ──
     const planetChildren = new Map();
     for (const planets of rawPlanetsByPlugin)
-      for (const p of planets) planetChildren.set(p._internalId, {
+      for (const p of planets) addChildren(planetChildren, p._internalId, {
         sy: (p.shipyards ?? []).map(x => x.name), of: (p.outfitters ?? []).map(x => x.name) });
     await checkCoverage('planets', 'planet_outfitters', 'planet_id', planetChildren, planetIdByInternalId, v => v.of.length > 0, 'planets');
     await checkCoverage('planets', 'planet_shipyards', 'planet_id', planetChildren, planetIdByInternalId, v => v.sy.length > 0, 'planets');
@@ -3614,7 +3626,7 @@ async function main() {
     // ── system fleets / hazards / asteroids / minables / links / planets / trade ──
     const systemChildren = new Map();
     for (const systems of rawSystemsByPlugin)
-      for (const sy of systems) systemChildren.set(sy._internalId, {
+      for (const sy of systems) addChildren(systemChildren, sy._internalId, {
         fleets: (sy.fleets ?? []).map(f => ({ fleet_name: f.name, period: toNumeric(f.period), to_spawn: f.toSpawn ?? null })),
         hazards: (sy.hazards ?? []).map(h => ({ hazard_name: h.name, period: toNumeric(h.period), to_spawn: h.toSpawn ?? null })),
         asteroids: (sy.asteroids ?? []).map(a => ({ asteroid_name: a.name, asteroid_count: toNumeric(a.count), energy: toNumeric(a.energy) })),
