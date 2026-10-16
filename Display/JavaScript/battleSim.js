@@ -918,6 +918,7 @@ async function simulateBattle(sA, sB, onProgress, opts = {}) {
     const hitB = eng ? (i, def) => eng.factor('B', i, def) : null;
 
     const YIELD_EVERY = 600;
+    let endAt = null, lowA = Infinity, lowB = Infinity, lastProgress = 0;
 
     while (frame < MAX_FRAMES) {
         const t = frame / FPS;
@@ -992,6 +993,19 @@ async function simulateBattle(sA, sB, onProgress, opts = {}) {
         if (!stA.destroyed && stA.hull < 0) { stA.destroyed = true; stA.destroyedAt = t; }
         if (!stB.destroyed && stB.hull < 0) { stB.destroyed = true; stB.destroyedAt = t; }
         if ((stA.disabled || stA.destroyed) && (stB.disabled || stB.destroyed)) break;
+        // Once one side is out of the fight nothing more can happen to the other
+        // (a disabled ship doesn't shoot) — finish a few seconds later, for any
+        // missiles still in flight, instead of simulating up to 100 minutes.
+        const outA = stA.disabled || stA.destroyed, outB = stB.disabled || stB.destroyed;
+        if ((outA || outB) && endAt == null) endAt = frame + 5 * FPS;
+        if (endAt != null && frame >= endAt) break;
+        // Stalemate: if for two minutes neither side has dropped below its lowest
+        // shields + hull so far, nobody can win — stop and call it.
+        if (frame % FPS === 0) {
+            const hpA = stA.shields + stA.hull, hpB = stB.shields + stB.hull;
+            if (hpA < lowA - 1e-6 || hpB < lowB - 1e-6) { lowA = Math.min(lowA, hpA); lowB = Math.min(lowB, hpB); lastProgress = frame; }
+            if (frame - lastProgress > 120 * FPS) break;
+        }
         frame++;
     }
 

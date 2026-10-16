@@ -36,33 +36,53 @@ window.supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON
  *        with .eq()/.in()/etc. applied — e.g. filters: q => q.eq('plugin_id', id)
  */
 async function fetchAllRows(table, opts = {}) {
-    const { select = '*', filters, orderBy, pageSize = 1000 } = opts;
-    let from = 0;
-    let rows = [];
-    for (;;) {
-        let query = window.supabaseClient.from(table).select(select);
+    const { select = '*', filters, orderBy, pageSize = 1000, concurrency = 6 } = opts;
+    // The first page also asks how many rows there are in total; every other
+    // page is then fetched AT THE SAME TIME (a few at once) instead of one
+    // after another — with ~150 ms per round trip, 20 pages went from ~3 s to
+    // ~0.5 s.
+    const build = (from, withCount) => {
+        let query = window.supabaseClient.from(table).select(select, withCount ? { count: 'exact' } : undefined);
         if (orderBy) query = query.order(orderBy, { ascending: true });
         query = query.range(from, from + pageSize - 1);
         if (filters) query = filters(query);
-
-        // A timeout here is usually transient (a slow moment on shared
-        // compute), not a real failure — retry a couple of times before
-        // giving up, same idea as the parser's own retry logic.
-        let data, error;
+        return query;
+    };
+    // A timeout is usually transient (a slow moment on shared compute), not
+    // a real failure — retry a couple of times before giving up.
+    const run = async (from, withCount) => {
+        let res;
         for (let attempt = 1; attempt <= 3; attempt++) {
-            ({ data, error } = await query);
-            if (!error) break;
-            const isTimeout = /timeout/i.test(error.message ?? '');
+            res = await build(from, withCount);
+            if (!res.error) break;
+            const isTimeout = /timeout/i.test(res.error.message ?? '');
             if (!isTimeout || attempt === 3) break;
             console.warn(`[fetchAllRows] "${table}" page timed out, retrying (attempt ${attempt}/3)...`);
             await new Promise(r => setTimeout(r, 1000 * attempt));
         }
-        if (error) throw new Error(`Supabase fetch failed for "${table}": ${error.message}`);
+        if (res.error) throw new Error(`Supabase fetch failed for "${table}": ${res.error.message}`);
+        return res;
+    };
 
-        rows = rows.concat(data || []);
-        if (!data || data.length < pageSize) break;
-        from += pageSize;
+    const first = await run(0, true);
+    const rows = first.data || [];
+    if (rows.length < pageSize) return rows;
+    const total = Number.isFinite(first.count) ? first.count : null;
+    if (total == null) {
+        // no count available — fall back to one page after another
+        for (let from = pageSize; ; from += pageSize) {
+            const { data } = await run(from, false);
+            rows.push(...(data || []));
+            if (!data || data.length < pageSize) return rows;
+        }
     }
+    const starts = [];
+    for (let from = pageSize; from < total; from += pageSize) starts.push(from);
+    const pages = new Array(starts.length);
+    let next = 0;
+    const worker = async () => { while (next < starts.length) { const k = next++; pages[k] = (await run(starts[k], false)).data || []; } };
+    await Promise.all(Array.from({ length: Math.min(concurrency, starts.length) }, worker));
+    for (const p of pages) rows.push(...p);
     return rows;
 }
 

@@ -575,7 +575,7 @@ async function _fetchMissionBundleFresh(outputName, pluginRow) {
         return { sourceName: outputName, displayName: outputName, outputName, missions: [] };
     }
     const missionRows = await fetchAllRows('missions', {
-        filters: q => q.eq('plugin_id', pluginRow.plugin_id), orderBy: 'id', pageSize: 100,
+        filters: q => q.eq('plugin_id', pluginRow.plugin_id), orderBy: 'id', pageSize: 100, concurrency: 12,
     });
     return {
         sourceName: pluginRow.source_name,

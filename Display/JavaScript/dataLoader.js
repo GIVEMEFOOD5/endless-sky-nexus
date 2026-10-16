@@ -577,6 +577,21 @@ function reconstructEffect(row) {
  * outfits this plugin's ships/variants actually reference, wherever
  * they're defined, via one small extra by-id lookup.
  */
+// One request for a plugin's whole catalog, or null if the database function
+// isn't installed yet (then the caller fetches table by table, as before).
+let _rpcCatalogMissing = false;
+async function _rpcCatalog(pluginId) {
+    if (_rpcCatalogMissing) return null;
+    try {
+        const { data, error } = await window.supabaseClient.rpc('get_plugin_catalog', { p_plugin_id: pluginId });
+        if (error || !data || !Array.isArray(data.ships)) {
+            if (error && /function|does not exist|PGRST202/i.test(error.message || error.code || '')) _rpcCatalogMissing = true;
+            return null;
+        }
+        return data;
+    } catch (_) { return null; }
+}
+
 async function _fetchPluginBundleFresh(outputName, pluginRow) {
     const { fetchAllRows } = window.SupabaseHelpers;
     if (!pluginRow) {
@@ -584,7 +599,16 @@ async function _fetchPluginBundleFresh(outputName, pluginRow) {
     }
     const byPlugin = q => q.eq('plugin_id', pluginRow.plugin_id);
 
-    const [shipRows, variantRows, ownOutfitRows, effectRows] = await Promise.all([
+    // Fast path: the whole catalog in ONE request (supabase/performance.sql,
+    // get_plugin_catalog). If that function isn't installed, fall back to
+    // fetching table by table below.
+    let shipRows, variantRows, ownOutfitRows, effectRows, shipOutfitRows, variantOutfitRows, crossPluginOutfitRows;
+    const rpc = await _rpcCatalog(pluginRow.plugin_id);
+    if (rpc) {
+        ({ ships: shipRows, variants: variantRows, outfits: ownOutfitRows, effects: effectRows,
+           ship_outfits: shipOutfitRows, variant_outfits: variantOutfitRows, extra_outfits: crossPluginOutfitRows } = rpc);
+    } else {
+    [shipRows, variantRows, ownOutfitRows, effectRows] = await Promise.all([
         fetchAllRows('ships',    { filters: byPlugin, orderBy: 'id' }),
         fetchAllRows('variants', { filters: byPlugin, orderBy: 'id' }),
         fetchAllRows('outfits',  { filters: byPlugin, orderBy: 'id', pageSize: 200 }),
@@ -593,7 +617,7 @@ async function _fetchPluginBundleFresh(outputName, pluginRow) {
 
     const shipIds    = shipRows.map(s => s.id);
     const variantIds  = variantRows.map(v => v.id);
-    const [shipOutfitRows, variantOutfitRows] = await Promise.all([
+    [shipOutfitRows, variantOutfitRows] = await Promise.all([
         shipIds.length    ? fetchAllRows('ship_outfits',    { filters: q => q.in('ship_id', shipIds) })    : [],
         variantIds.length ? fetchAllRows('variant_outfits', { filters: q => q.in('variant_id', variantIds) }) : [],
     ]);
@@ -602,9 +626,10 @@ async function _fetchPluginBundleFresh(outputName, pluginRow) {
     const ownOutfitIds  = new Set(ownOutfitRows.map(o => o.id));
     const referencedIds = new Set([...shipOutfitRows.map(r => r.outfit_id), ...variantOutfitRows.map(r => r.outfit_id)]);
     const missingIds    = [...referencedIds].filter(id => !ownOutfitIds.has(id));
-    const crossPluginOutfitRows = missingIds.length
+    crossPluginOutfitRows = missingIds.length
         ? await fetchAllRows('outfits', { filters: q => q.in('id', missingIds), pageSize: 200 })
         : [];
+    }
 
     const outfitById = new Map([...ownOutfitRows, ...crossPluginOutfitRows].map(o => [o.id, o]));
     function buildOutfitMaps(junctionRows, ownerKey) {
@@ -644,8 +669,20 @@ async function _loadPluginBundle(outputName, pluginRow) {
 async function _backgroundFillRemainingPlugins(pluginRows, alreadyLoaded) {
     const remaining = pluginRows.filter(p => !alreadyLoaded.has(p.output_name));
     if (!remaining.length) return;
+    // This is only a head start for switching plugins later (a plugin you
+    // switch on is loaded on demand anyway), so it must never slow the page
+    // down: skip it on slow or data-saving connections, wait until the page
+    // has settled, and only work while the browser is idle.
+    const conn = navigator.connection || {};
+    if (conn.saveData || /(^|-)2g|3g/.test(conn.effectiveType || '')) {
+        console.log('[DataLoader] Background: skipped (slow or data-saving connection) — plugins load when you switch them on.');
+        return;
+    }
+    const idle = () => new Promise(r => (window.requestIdleCallback ? requestIdleCallback(() => r(), { timeout: 4000 }) : setTimeout(r, 300)));
+    await new Promise(r => setTimeout(r, 5000));
     console.log(`[DataLoader] Background: loading ${remaining.length} remaining plugin(s)...`);
     for (const pluginRow of remaining) {
+        await idle();
         try {
             const bundle = await _loadPluginBundle(pluginRow.output_name, pluginRow);
             window.allData[pluginRow.output_name] = bundle;
@@ -740,33 +777,35 @@ async function _doLoad() {
     _refreshLocalPlugin();
 
     try {
-        // 1 — Attribute definitions. Read from the relational attribute_*
-        // tables (written by attributeSync.js) and rebuilt into the same
-        // window.attrDefs shape every page already uses. Falls back to the
-        // legacy app_config blob if the tables are empty or unreachable.
-        try {
-            window.attrDefs = await _loadAttrDefsFromTables();
-            if (window.attrDefs) console.log(`[DataLoader] attrDefs loaded from attribute tables (${Object.keys(window.attrDefs.attributes).length} attributes)`);
-        } catch (err) {
-            console.warn('[DataLoader] Attribute tables unavailable, falling back to app_config:', err.message);
-            window.attrDefs = null;
-        }
-        if (!window.attrDefs) {
+        // 1 + 2 together — attribute definitions and the plugin list don't
+        // depend on each other, so ask for both at once. Attribute
+        // definitions only change when the parser runs, so they're cached in
+        // the browser (EsCache, checked against the data version).
+        const { fetchAllRows } = window.SupabaseHelpers;
+        const pluginRowsPromise = fetchAllRows('plugins', { orderBy: 'source_priority' });
+        const loadAttrDefs = async () => {
+            try {
+                const defs = await _loadAttrDefsFromTables();
+                if (defs) return defs;
+            } catch (err) {
+                console.warn('[DataLoader] Attribute tables unavailable, falling back to app_config:', err.message);
+            }
             try {
                 const { data, error } = await window.supabaseClient
                     .from('app_config').select('value').eq('key', 'attributeDefinitions').maybeSingle();
-                if (!error && data) window.attrDefs = data.value;
+                if (!error && data) return data.value;
             } catch (_) {
                 console.warn('[DataLoader] Could not load attributeDefinitions from app_config');
             }
-        }
-
-        const { fetchAllRows } = window.SupabaseHelpers;
+            return null;
+        };
+        window.attrDefs = window.EsCache ? await window.EsCache.loadWithCache('attrDefs', loadAttrDefs) : await loadAttrDefs();
+        if (window.attrDefs?.attributes) console.log(`[DataLoader] attrDefs ready (${Object.keys(window.attrDefs.attributes).length} attributes)`);
 
         // 2 — The plugin list itself is small (~110 rows, no heavy JSON
         // columns) — always cheap enough to fetch in full up front, so we
         // know what exists and can decide what Phase A actually needs.
-        const pluginRows = await fetchAllRows('plugins', { orderBy: 'source_priority' });
+        const pluginRows = await pluginRowsPromise;
         if (!pluginRows.length) throw new Error('No plugins found in Supabase');
 
         // The picker (generalPluginStuff.js) reads plugin names from

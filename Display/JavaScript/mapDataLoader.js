@@ -120,6 +120,20 @@ function _findPluginMeta(index, outputName) {
  * bandwidth win the slim files existed for, without needing a second
  * parser output format to maintain.
  */
+// The whole map for one plugin in one request, or null (function not installed).
+let _rpcMapMissing = false;
+async function _rpcMap(pluginId) {
+    if (_rpcMapMissing) return null;
+    try {
+        const { data, error } = await window.supabaseClient.rpc('get_plugin_map', { p_plugin_id: pluginId });
+        if (error || !data || !Array.isArray(data.systems)) {
+            if (error && /function|does not exist|PGRST202/i.test(error.message || error.code || '')) _rpcMapMissing = true;
+            return null;
+        }
+        return data;
+    } catch (_) { return null; }
+}
+
 async function _loadOnePlugin(outputName, meta) {
     async function buildFresh() {
     const { fetchAllRows, groupBy } = window.SupabaseHelpers;
@@ -130,42 +144,67 @@ async function _loadOnePlugin(outputName, meta) {
     const pluginId = pluginRows[0].plugin_id;
     const byPlugin = q => q.eq('plugin_id', pluginId);
 
-    const [systemRows, galaxyRows, wormholeRows, planetRows, missionRows, starRows, governmentRows] =
-        await Promise.all([
-            fetchAllRows('systems',     { filters: byPlugin, orderBy: 'id' }),
-            fetchAllRows('galaxies',    { filters: byPlugin, orderBy: 'id' }),
-            fetchAllRows('wormholes',   { filters: byPlugin, orderBy: 'id' }),
-            fetchAllRows('planets',     { filters: byPlugin, orderBy: 'id' }),
-            fetchAllRows('missions',    { filters: byPlugin, orderBy: 'id', pageSize: 100 }),
-            fetchAllRows('stars',       { filters: byPlugin, orderBy: 'id' }),
-            fetchAllRows('governments', { filters: byPlugin, orderBy: 'id' }),
-        ]);
+    // Fast path: the plugin's whole map in ONE request (supabase/performance.sql,
+    // get_plugin_map). Falls back to table-by-table requests if it isn't installed.
+    let systemRows, galaxyRows, wormholeRows, planetRows, missionRows, starRows, governmentRows,
+        fleetRows, hazardRows, asteroidRows, minableRows, linkRows, sysPlanetRows, tradeRows, whLinkRows;
+    const rpc = await _rpcMap(pluginId);
+    if (rpc) {
+        ({ systems: systemRows, galaxies: galaxyRows, wormholes: wormholeRows, planets: planetRows, missions: missionRows,
+           stars: starRows, governments: governmentRows, system_fleets: fleetRows, system_hazards: hazardRows,
+           system_asteroids: asteroidRows, system_minables: minableRows, system_links: linkRows,
+           system_planets: sysPlanetRows, system_trade: tradeRows, wormhole_links: whLinkRows } = rpc);
+        const rawById = new Map((rpc.mission_raws || []).map(r => [r.id, r.raw]));
+        for (const m of missionRows) m.raw = rawById.get(m.id) ?? null;
+    } else {
+        [systemRows, galaxyRows, wormholeRows, planetRows, missionRows, starRows, governmentRows] =
+            await Promise.all([
+                fetchAllRows('systems',     { filters: byPlugin, orderBy: 'id' }),
+                fetchAllRows('galaxies',    { filters: byPlugin, orderBy: 'id' }),
+                fetchAllRows('wormholes',   { filters: byPlugin, orderBy: 'id' }),
+                fetchAllRows('planets',     { filters: byPlugin, orderBy: 'id' }),
+                // The map only needs a few mission fields — not the big raw trees —
+                // so fetch a slim copy (raw trees follow below, only where needed).
+                fetchAllRows('missions',    { filters: byPlugin, orderBy: 'id', pageSize: 1000,
+                    select: 'id,name,display_name,source_plugin,source,destination,stopovers,waypoints,cargo,passengers,payment,rewards,deadline,illegal,repeatable,repeat_limit,npc_count,has_npc_objective,flags,event_triggers,locations,plugin_id,internal_id' }),
+                fetchAllRows('stars',       { filters: byPlugin, orderBy: 'id' }),
+                fetchAllRows('governments', { filters: byPlugin, orderBy: 'id' }),
+            ]);
 
-    const systemIds   = systemRows.map(s => s.id);
-    const wormholeIds = wormholeRows.map(w => w.id);
-    // Ask for a few hundred ids at a time: a list of every system id in one
-    // request makes the web address too long for big plugins (the request
-    // then fails and the map would have no jump links, fleets or trade).
-    const byIds = async (table, column, ids) => {
-        const out = [];
-        for (let i = 0; i < ids.length; i += 100) {
-            const part = ids.slice(i, i + 100);
-            // order by the parent id (every link table has it) so paging is stable
-            out.push(...await fetchAllRows(table, { filters: q => q.in(column, part), orderBy: column }));
-        }
-        return out;
-    };
-    const [fleetRows, hazardRows, asteroidRows, minableRows, linkRows, sysPlanetRows, tradeRows, whLinkRows] =
-        await Promise.all([
-            byIds('system_fleets',    'system_id', systemIds),
-            byIds('system_hazards',   'system_id', systemIds),
-            byIds('system_asteroids', 'system_id', systemIds),
-            byIds('system_minables',  'system_id', systemIds),
-            byIds('system_links',     'system_id', systemIds),
-            byIds('system_planets',   'system_id', systemIds),
-            byIds('system_trade',     'system_id', systemIds),
-            byIds('wormhole_links',   'wormhole_id', wormholeIds),
-        ]);
+        const systemIds   = systemRows.map(s => s.id);
+        const wormholeIds = wormholeRows.map(w => w.id);
+        // Ask for a few hundred ids at a time: a list of every system id in one
+        // request makes the web address too long for big plugins (the request
+        // then fails and the map would have no jump links, fleets or trade).
+        const byIds = async (table, column, ids, select) => {
+            const parts = [];
+            for (let i = 0; i < ids.length; i += 100) parts.push(ids.slice(i, i + 100));
+            // several groups at once; order by the parent id (every link table has it) so paging is stable
+            const out = new Array(parts.length);
+            let next = 0;
+            const worker = async () => { while (next < parts.length) { const k = next++;
+                out[k] = await fetchAllRows(table, { filters: q => q.in(column, parts[k]), orderBy: column, ...(select ? { select } : {}) }); } };
+            await Promise.all(Array.from({ length: Math.min(4, parts.length) }, worker));
+            return out.flat();
+        };
+        // the timeline needs raw mission trees, but only for missions that trigger events
+        const rawFor = missionRows.filter(m => Array.isArray(m.event_triggers) && m.event_triggers.length).map(m => m.id);
+        const rawRows = rawFor.length ? await byIds('missions', 'id', rawFor, 'id,raw') : [];
+        const rawById = new Map(rawRows.map(r => [r.id, r.raw]));
+        for (const m of missionRows) m.raw = rawById.get(m.id) ?? null;
+        [fleetRows, hazardRows, asteroidRows, minableRows, linkRows, sysPlanetRows, tradeRows, whLinkRows] =
+            await Promise.all([
+                byIds('system_fleets',    'system_id', systemIds),
+                byIds('system_hazards',   'system_id', systemIds),
+                byIds('system_asteroids', 'system_id', systemIds),
+                byIds('system_minables',  'system_id', systemIds),
+                byIds('system_links',     'system_id', systemIds),
+                byIds('system_planets',   'system_id', systemIds),
+                byIds('system_trade',     'system_id', systemIds),
+                byIds('wormhole_links',   'wormhole_id', wormholeIds),
+            ]);
+    }
+    const systemIds = systemRows.map(s => s.id);
     console.info(`[MapDataLoader] ${outputName}: ${systemIds.length} systems, ${linkRows.length} jump-link rows, ${whLinkRows.length} wormhole links`);
     if (systemIds.length > 20 && !linkRows.length)
         console.warn(`[MapDataLoader] "${outputName}" has ${systemIds.length} systems but no jump links in the database — run the Parse workflow with "full refresh" ticked.`);

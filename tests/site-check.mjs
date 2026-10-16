@@ -67,7 +67,7 @@ async function newContext(opts) {
     const fake = fs.readFileSync(process.env.FAKE_SUPABASE, 'utf8');
     await ctx.route('**/*', rt => {
       const u = rt.request().url();
-      if (u.includes('@supabase/supabase-js')) return rt.fulfill({ status: 200, contentType: 'application/javascript', body: fake });
+      if (u.includes('supabase-js')) return rt.fulfill({ status: 200, contentType: 'application/javascript', body: fake });
       return u.startsWith(BASE) ? rt.continue() : rt.abort();
     });
   }
@@ -184,15 +184,18 @@ await check('Systems Map: systems and jump lanes load, share link', async page =
   page.on('console', m => logs.push(m.text()));
   await page.goto(H('Systems.html'));
   await page.waitForFunction(() => window.MapView, null, { timeout: 60000 });
-  await page.waitForTimeout(12000);
-  const line = logs.reverse().find(t => /^\[Map\] \d+ systems, \d+ lanes drawn/.test(t)) || '';
+  // the live map can take a while to download — wait for its health report (up to 2 minutes)
+  const reported = () => [...logs].reverse().find(t => /^\[Map\] \d+ systems, \d+ lanes drawn/.test(t));
+  for (let waited = 0; !reported() && waited < 120000; waited += 1000) await page.waitForTimeout(1000);
+  await page.waitForTimeout(2000);   // a later report (more plugins) may follow
+  const line = reported() || '';
   const m = line.match(/\[Map\] (\d+) systems, (\d+) lanes drawn/);
   expect(m, 'map never reported loading');
   expect(+m[1] > 100, `only ${m[1]} systems loaded`);
   expect(+m[2] > 100, `only ${m[2]} hyperspace lanes drawn (jump links missing?)`);
   const other = await context.newPage(); const errs = watch(other);
   await other.goto(H('Systems.html') + '#system=Sol');
-  await other.waitForTimeout(12000);
+  await other.waitForFunction(() => /Sol/.test((document.getElementById('mapDetailsPanel') || {}).textContent || ''), null, { timeout: 120000 }).catch(() => {});
   const panel = await other.textContent('#mapDetailsPanel').catch(() => '');
   await other.close();
   expect(/Sol/.test(panel || ''), 'map link to Sol did not open Sol');
@@ -214,9 +217,15 @@ await check('Missions: list loads and a mission opens', async page => {
 // ── 8. Saves: open a save, see the fleet, open the editor ────────────────────
 await check('Saves: open a save file and the editor', async page => {
   await page.goto(H('UserManager.html'));
-  await page.waitForTimeout(3000);
+  // the page loads game data first; the upload box only appears once it's ready
+  await page.waitForSelector('#dropzone', { state: 'visible', timeout: 120000 });
+  await page.waitForTimeout(1000);
   await page.setInputFiles('#fileInput', path.resolve('tests/fixtures/sample-save.txt'));
-  await page.waitForSelector('#results:not(.hidden)', { timeout: 30000 });
+  try { await page.waitForSelector('#results:not(.hidden)', { timeout: 60000 }); }
+  catch (_) {
+    const why = await page.evaluate(() => [(document.getElementById('errorBox') || {}).innerText, (document.getElementById('toast') || {}).innerText].filter(Boolean).join(' / '));
+    throw new Error(`the save didn't open${why ? ` — the page said: ${why}` : ''}`);
+  }
   const fleet = await page.textContent('#results');
   expect(/Test Shuttle|Shuttle/.test(fleet || ''), 'the save\'s ship is not shown');
   await page.click('#resultTabs .tab[data-tab="edit"]');
