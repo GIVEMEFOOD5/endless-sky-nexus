@@ -149,6 +149,7 @@
       else if (act === 'run') run();
       else if (act === 'apply') apply();
       else if (act === 'battle') testInBattle();
+      else if (act === 'share') shareFit();
       else if (act === 'fac-all') { ui.factions = new Set(ui.ctx.factions.map(f => f.name)); render(); }
       else if (act === 'fac-none') { ui.factions = new Set(); render(); }
       else if (act === 'fac-visited') { ui.factions = new Set(ui.ctx.factions.filter(f => f.visited).map(f => f.name)); render(); }
@@ -338,6 +339,7 @@
         <button class="btn btn-primary" data-af="run"${ui.loading ? ' disabled' : ''}>${ui.running ? 'Working…' : ui.result ? 'Fit again' : 'Find the best fit'}</button>
         ${ui.result ? '<button class="btn btn-secondary" data-af="apply">Use this fit</button>' : ''}
         ${ui.result ? '<button class="btn btn-secondary" data-af="battle" title="Fight it in the Battle Simulator (opens a new tab)">⚔ Test in Battle Simulator</button>' : ''}
+        ${ui.result ? '<button class="btn btn-secondary" data-af="share" title="Copy a link that opens this fit — no account needed">🔗 Share this fit</button>' : ''}
       </div>
       ${ui.notice ? `<p style="color:var(--c-warn-text,#fbbf24);margin:8px 0 0;">${h(ui.notice)}</p>` : ''}
       <div id="af-result">${ui.result ? resultHtml() : ''}</div>`;
@@ -409,8 +411,8 @@
   }
 
   // Send the fit (and what it's up against) to the battle simulator.
-  function testInBattle() {
-    if (!ui || !ui.result) return;
+  // The design with this result's outfits (and weapons on the hardpoints)
+  function fitDesign() {
     const d = JSON.parse(JSON.stringify(ui.design));
     d.outfits = ui.result.outfits.map(([name, count]) => ({ name, count }));
     for (const hp of [...(d.guns || []), ...(d.turrets || [])]) hp.over = '';
@@ -420,6 +422,16 @@
       if (k > 0 && (a.weapon || o.weapon) && ((Number(a['turret mounts']) || 0) < 0) === isTurret) { hp.over = n; weaponsLeft.set(n, k - 1); break; } } };
     slot(d.guns, false); slot(d.turrets, true);
     d.name = `${d.name || 'Ship'} (auto-fit)`;
+    return d;
+  }
+  function shareFit() {
+    if (!ui || !ui.result || typeof window.sbShareShip !== 'function') return;
+    window.sbShareShip(fitDesign(), 'this auto-fit');
+  }
+
+  function testInBattle() {
+    if (!ui || !ui.result) return;
+    const d = fitDesign();
     let opponents, opponentLabel;
     if (ui.goal === 'counter' && ui.foe.profile) {
       const names = ui.foe.ships.length ? ui.foe.ships : ui.foe.profile.worst.map(w => w.name);

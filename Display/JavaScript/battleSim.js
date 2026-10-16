@@ -176,10 +176,76 @@ async function onPluginsChanged() {
         renderAllTeams();
         updateSimButton();
         loadPendingMatchup();
+        loadSharedBattle();
 
     } catch (err) {
         console.error('[battleSim] onPluginsChanged failed:', err);
     }
+}
+
+// Start a fight as soon as the page has everything it needs (opened from a
+// link or from auto-fit) — attribute and damage-type data load a little later.
+function runWhenReady(tries = 0) {
+    if ((!_attrDefs || !window.DamageTypes?.isReady()) && tries < 30) { setTimeout(() => runWhenReady(tries + 1), 1000); return; }
+    setTimeout(() => runSimulation(), 500);
+}
+
+// ── Share links: the whole battle set-up inside a link (no account) ──────
+// Game ships go by name; your own designs travel inside the link.
+function designFor(shipData) {
+    if (shipData._isLocalBuild && shipData._localId != null) {
+        try {
+            const fleet = JSON.parse(localStorage.getItem('es_ship_builder_v4') || '[]');
+            const d = fleet.find(s => s.id === shipData._localId);
+            if (d) { const c = { ...d }; delete c.id; delete c.description; delete c.extraLines; return c; }
+        } catch (_) {}
+    }
+    return null;
+}
+async function shareBattle() {
+    if (!window.ShareLinks) return;
+    const skipped = [];
+    const teams = _teams.map(t => ({
+        n: t.name,
+        s: t.ships.map(e => {
+            const isGame = !e.shipData._isLocalBuild && !String(e.shipData._pluginId || '').startsWith('__');
+            if (isGame) return [e.shipData.name, e.count, e.skilled ?? e.count];
+            const d = designFor(e.shipData) || e.shipData._design || null;
+            if (!d) { skipped.push(e.shipData.name); return null; }
+            return [{ design: d }, e.count, e.skilled ?? e.count];
+        }).filter(Boolean),
+    }));
+    const url = await ShareLinks.make('BattleSim.html', 'battle', { teams });
+    ShareLinks.show(url, 'this battle');
+    if (skipped.length) setStatus(`Not included in the link (can't be shared): ${skipped.join(', ')}`, true);
+}
+window.shareBattle = shareBattle;
+async function loadSharedBattle() {
+    if (!window.ShareLinks || !/[#&]battle=/.test(location.hash)) return;
+    const data = await ShareLinks.read('battle');
+    ShareLinks.clear();
+    if (!data || data._broken || !Array.isArray(data.teams)) { setStatus('That battle link is damaged or incomplete.', true); return; }
+    while (_teams.length < data.teams.length) createTeam('Team ' + (_teams.length + 1));
+    for (const t of _teams) t.ships = [];
+    const missing = [];
+    data.teams.forEach((td, i) => {
+        const team = _teams[i];
+        team.name = td.n || team.name;
+        for (const [ref, count, skilled] of td.s || []) {
+            let ship = null;
+            if (typeof ref === 'string') ship = _allShips.find(s => s.name === ref);
+            else if (ref && ref.design && window.DataLoader?.normaliseDesign)
+                ship = { ...window.DataLoader.normaliseDesign(ref.design), _pluginId: '__local_builds__', _design: ref.design };
+            if (!ship) { missing.push(typeof ref === 'string' ? ref : 'a custom design'); continue; }
+            addShipToTeam(team.id, ship, count || 1);
+            const e = team.ships[team.ships.length - 1];
+            if (e) e.skilled = Math.max(0, Math.min(e.count, skilled ?? e.count));
+        }
+    });
+    renderAllTeams(); syncSkillMaster(); updateSimButton();
+    if (missing.length) setStatus(`Some ships in this link aren't in your selected plugins: ${[...new Set(missing)].join(', ')}`, true);
+    // the page finishes loading plugins in a second pass — start the fight after that
+    if (_teams.filter(t => t.ships.length).length >= 2) runWhenReady();
 }
 
 // "⚔ Test in Battle Simulator" from the ship builder's auto-fit: the fit on
@@ -201,7 +267,7 @@ function loadPendingMatchup() {
         if (ship) addShipToTeam(_teams[1].id, ship, o.count || 1); else missing.push(o.name);
     }
     renderAllTeams(); updateSimButton();
-    if (_teams[1].ships.length) setTimeout(() => runSimulation(), 300);
+    if (_teams[1].ships.length) runWhenReady();
     else setStatus(`None of the opponent ships (${missing.join(', ')}) are in your selected plugins.`, true);
 }
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -418,3 +418,5 @@
     .map-details-title { font-size: 1.1rem; }
     .map-planet-row { flex-wrap: wrap; }
 }
+/* share-link button under the system search */
+.map-search .map-share-btn { display: block; margin-top: 6px; width: 100%; }

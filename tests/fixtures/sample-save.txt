@@ -1,0 +1,52 @@
+pilot Test Pilot
+date 16 11 3013
+system Rutilicus
+planet "New Boston"
+playtime 120
+"travel" "Rutilicus"
+reputation with
+	Republic 5
+	Pirate -10
+account
+	credits 250000
+	score 400
+	history
+licenses
+	Pilot's
+ship Shuttle
+	name "Test Shuttle"
+	uuid 11111111-2222-4333-8444-555555555555
+	attributes
+		category "Transport"
+		cost 180000
+		mass 70
+		bunks 6
+		"cargo space" 20
+		drag 1.7
+		"fuel capacity" 300
+		"heat dissipation" 0.8
+		hull 600
+		"outfit space" 120
+		"required crew" 1
+		shields 500
+		"weapon capacity" 0
+		"engine capacity" 40
+	outfits
+		Hyperdrive
+		"nGVF-AA Fuel Cell"
+		"X1700 Ion Thruster"
+		"X1200 Ion Steering"
+	crew 1
+	fuel 300
+	shields 500
+	hull 600
+	position 0 0
+	system Rutilicus
+	planet "New Boston"
+cargo
+	commodities
+		Food 5
+visited Rutilicus
+"visited planet" "New Boston"
+conditions
+	"test condition"

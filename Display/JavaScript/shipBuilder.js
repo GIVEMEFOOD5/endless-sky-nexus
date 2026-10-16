@@ -409,6 +409,7 @@ function renderFleet() {
         <div class="fleet-card__actions" onclick="event.stopPropagation()">
           <button class="btn btn-primary btn-sm"   onclick="sbEditFleetShip(${i})">✏️ Edit</button>
           <button class="btn btn-secondary btn-sm" onclick="sbDuplicate(${i})">⧉ Copy</button>
+          <button class="btn btn-secondary btn-sm" onclick="sbShareFleetShip(${i})" title="Copy a link that opens this ship — no account needed">🔗 Link</button>
           <button class="btn btn-secondary btn-sm" onclick="sbOpenCloudSaveModal(${i})" title="Share this ship — you choose whether other people can see it">🌐 Share</button>
           ${window.BuilderToSave ? `<button class="btn btn-secondary btn-sm" onclick="BuilderToSave.open(${i})" title="Add this ship to one of your saves, or refit a ship in it">➜ Save file</button>` : ''}
           <button class="btn btn-danger btn-sm"    onclick="sbConfirmDelete(${i})">🗑</button>
@@ -795,6 +796,66 @@ function sbFilterShipPicker(val) {
     g.style.display = [...g.querySelectorAll('.sb-picker-row')].some(r => r.style.display !== 'none') ? '' : 'none';
   });
 }
+
+// ═══════════════════════════════════════════════════════════
+//  SHARE LINKS — a ship inside a link (no account, nothing saved online)
+//  Only what differs from the game ship it's based on goes in the link,
+//  so most links stay short enough for Discord.
+// ═══════════════════════════════════════════════════════════
+function sbCompactDesign(s) {
+  const src = s._sourceShip ? sbAllShips.find(x => x.name === s._sourceShip) : null;
+  const base = src ? sbShipFromParsed(src) : sbBlank();
+  const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const out = { src: s._sourceShip || null, o: (s.outfits || []).map(o => [o.name, o.count || 1]) };
+  const diff = {};
+  for (const k of Object.keys(s)) {
+    if (['id', 'attributes', 'outfits', '_sourcePlugin', 'customName', '_fromSave', '_uuid'].includes(k) || k.startsWith('_')) continue;
+    if (!same(s[k], base[k])) diff[k] = s[k];
+  }
+  const ad = {};
+  const keys = new Set([...Object.keys(s.attributes || {}), ...Object.keys(base.attributes || {})]);
+  for (const k of keys) if (!same((s.attributes || {})[k], (base.attributes || {})[k])) ad[k] = (s.attributes || {})[k] ?? null;
+  if (Object.keys(diff).length) out.d = diff;
+  if (Object.keys(ad).length) out.a = ad;
+  return out;
+}
+function sbExpandDesign(c) {
+  const src = c.src ? sbAllShips.find(x => x.name === c.src) : null;
+  const s = src ? sbShipFromParsed(src) : sbBlank();
+  Object.assign(s, c.d || {});
+  for (const [k, v] of Object.entries(c.a || {})) { if (v === null) delete s.attributes[k]; else s.attributes[k] = v; }
+  s.outfits = (c.o || []).map(([name, count]) => ({ name, count }));
+  s.id = Date.now() + Math.random();
+  return { ship: s, missingHull: !!(c.src && !src) };
+}
+async function sbShareShip(design, what = 'this ship') {
+  if (!window.ShareLinks) return;
+  const url = await ShareLinks.make('shipBuilder.html', 'ship', { ship: sbCompactDesign(design) });
+  ShareLinks.show(url, what);
+}
+function sbShareCurrent() { onBuilderChange(); sbShareShip(sbCurrentShip, `“${sbCurrentShip.name || 'this ship'}”`); }
+function sbShareFleetShip(i) { const s = sbFleet[i]; if (s) sbShareShip(s, `“${s.name || 'this ship'}”`); }
+// Opening a shared link: show the ship as a new, unsaved design
+async function sbOpenSharedShip() {
+  if (!window.ShareLinks || !/[#&]ship=/.test(location.hash)) return;
+  const data = await ShareLinks.read('ship');
+  ShareLinks.clear();
+  if (!data || data._broken || !data.ship) { sbToast('That share link is damaged or incomplete.', 'danger'); return; }
+  sbRefreshLiveData();
+  const { ship, missingHull } = sbExpandDesign(data.ship);
+  sbMode = 'edit'; sbEditMode = 'built'; sbEditIdx = -1; sbSaveEditIdx = -1;
+  sbCurrentShip = ship;
+  sbPopulateBuilder();
+  showBuilderView();
+  sbToast(missingHull
+    ? `Shared ship opened — but its hull “${data.ship.src}” isn't in your selected plugins, so some stats are missing.`
+    : 'Shared ship opened — 💾 Save Ship to keep it in your fleet.', missingHull ? 'danger' : 'success');
+}
+window.sbShareShip = sbShareShip; window.sbShareCurrent = sbShareCurrent; window.sbShareFleetShip = sbShareFleetShip;
+window.sbCompactDesign = sbCompactDesign; window.sbExpandDesign = sbExpandDesign;
+document.addEventListener('DOMContentLoaded', () => {
+  if (window.DataLoader) window.DataLoader.onReady(() => setTimeout(sbOpenSharedShip, 150));
+});
 
 function sbPickShip(encoded) {
   closeModal('modal-sb-ship-picker');

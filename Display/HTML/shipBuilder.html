@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="../JavaScript/errorReporter.js"></script>
   <title>Ship Builder — Endless Sky Nexus</title>
     <meta name="description" content="Design and outfit Endless Sky ships with live stats and checks. Auto-fit for damage, speed, cargo or a specific enemy, then export to the game or your save.">
     <link rel="canonical" href="https://endless-sky-nexus.ravenslittlesis.workers.dev/Display/HTML/shipBuilder.html">
@@ -104,6 +105,7 @@
         <button class="btn btn-secondary" onclick="window.AfUI && AfUI.open()" title="Let the site pick outfits for a goal: damage, speed, tank, cargo …">⚡ Auto-fit</button>
         <button class="btn btn-secondary" id="sb-undo-btn" onclick="window.BuilderExtras && BuilderExtras.undo()" title="Undo the last change (Ctrl+Z)" disabled>↶ Undo</button>
         <button class="btn btn-secondary" onclick="window.BuilderToSave && BuilderToSave.open()" title="Add this ship to one of your saves, or refit a ship in it">➜ Put in a save</button>
+        <button class="btn btn-secondary" onclick="sbShareCurrent()" title="Copy a link that opens this ship — no account needed">🔗 Share link</button>
         <button class="btn btn-secondary" onclick="showFleetView()">← Back to Fleet</button>
       </div>
     </div>
@@ -529,6 +531,7 @@
 <script src="../JavaScript/saveVault.js"></script>
 <script src="../JavaScript/shipDefinition.js"></script>
 <script src="../JavaScript/uiKit.js"></script>
+<script src="../JavaScript/shareLinks.js"></script>
 <script src="../JavaScript/nameSearch.js"></script>
 <script src="../JavaScript/autoFitting/afStats.js"></script>
 <script src="../JavaScript/autoFitting/afPool.js"></script>

@@ -185,6 +185,7 @@ async function _loadAndRender(activeOutputNames, resetView) {
 
         systemsArr = [...systemsByName.values()];
         linkSegments = MapCalculations.buildLinkSegments(systemsByName);
+        setTimeout(_openSharedLocation, 0);
         {   // a short health report, to spot missing lanes
             let linkNames = 0, dangling = 0;
             for (const s of systemsByName.values()) for (const l of s.links) { linkNames++; if (!systemsByName.has(l)) dangling++; }
@@ -933,6 +934,28 @@ function _wireControls() {
         _draw();
     });
 }
+
+// ── Share links: Systems.html#system=Sol&planet=Earth (readable, no account) ──
+let _sharedOpened = false;
+function _openSharedLocation() {
+    if (_sharedOpened) return;
+    const p = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const sys = p.get('system');
+    if (!sys) { _sharedOpened = true; return; }
+    if (!systemsByName.size) return;                 // data not here yet — try again after the next load
+    _sharedOpened = true;
+    if (!window.MapView.selectSystem(sys)) { console.warn(`[Map] Shared system "${sys}" isn't in your selected plugins.`); return; }
+    const planet = p.get('planet');
+    if (planet) { selectedPlanet = planet; _renderDetailsPanel(); }
+}
+function _shareLocation() {
+    if (!selected) { alert('Click a system on the map first, then share it.'); return; }
+    const q = new URLSearchParams({ system: selected.name });
+    if (selectedPlanet) q.set('planet', selectedPlanet);
+    const url = `${window.location.href.split('#')[0]}#${q.toString()}`;
+    if (window.ShareLinks) window.ShareLinks.show(url, selectedPlanet ? `${selectedPlanet} (${selected.name})` : selected.name);
+}
+window.shareMapLocation = _shareLocation;
 
 // Lets other map add-ons (mapTradeHelper.js) point the map at a system.
 window.MapView = {

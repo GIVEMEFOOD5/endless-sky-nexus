@@ -1,0 +1,63 @@
+# Automatic site checks — opens every page and the main features in a real
+# browser and fails if anything errors (tests/site-check.mjs).
+name: Site checks
+
+on:
+  push:
+    branches: [main]
+    paths: ['Display/**', 'index.html', 'tests/**', '.github/workflows/site-checks.yml']
+  pull_request:
+    paths: ['Display/**', 'index.html', 'tests/**']
+  workflow_run:                       # after new data is parsed
+    workflows: ['Parse Endless Sky Data']
+    types: [completed]
+  schedule:
+    - cron: '0 6 * * 1'               # and every Monday morning
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the site only — skip the large data/ folder
+          sparse-checkout: |
+            Display
+            tests
+            index.html
+            _redirects
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install the browser
+        run: |
+          npm install --no-save --no-package-lock playwright@1.48.2
+          npx playwright install --with-deps chromium
+
+      - name: Serve the site
+        run: |
+          python3 -m http.server 8080 >/dev/null 2>&1 &
+          sleep 2
+
+      - name: Run the checks
+        run: node tests/site-check.mjs
+
+      - name: Keep screenshots of anything that failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-check-results
+          path: site-check-results/
+          retention-days: 14

@@ -56,7 +56,7 @@
     document.getElementById('ac-export').onclick = exportData;
     document.getElementById('ac-delete').onclick = openDelete;
     renderShips();
-    if (await A.isAdmin()) renderAdmin();
+    if (await A.isAdmin()) { renderAdmin(); renderSiteErrors(); }
   }
 
   // ── shared ships ─────────────────────────────────────────────────────────
@@ -173,6 +173,29 @@
   }
 
   // ── moderation (admins) ──────────────────────────────────────────────────
+  // Errors from visitors' browsers (errorReporter.js → client_errors), most common first
+  async function renderSiteErrors() {
+    const box = document.getElementById('ac-admin');
+    if (!box) return;
+    let el = document.getElementById('ac-site-errors');
+    if (!el) { el = document.createElement('div'); el.id = 'ac-site-errors'; box.after(el); }
+    const { data, error } = await sb().from('client_errors_summary').select('*').limit(25);
+    if (error) {
+      el.innerHTML = /does not exist|relation/i.test(error.message)
+        ? '<p style="font-size:0.84rem;color:var(--c-text-dim);">Site error reports: run <code>supabase/client_errors.sql</code> once to switch them on.</p>'
+        : `<p style="color:var(--c-danger-text);">Could not load site errors: ${h(error.message)}</p>`;
+      return;
+    }
+    el.innerHTML = `
+      <hr style="border-color:var(--c-border);margin:24px 0;">
+      <h3 style="margin:0 0 6px;">Site errors (last 7 days)</h3>
+      <p style="font-size:0.82rem;color:var(--c-text-dim);margin:0 0 8px;">Errors that happened in visitors' browsers, most frequent first. Full details (stack traces, browsers) are in the <code>client_errors</code> table in Supabase.</p>
+      ${(data || []).length ? (data || []).map(r => `<div class="list-row" style="margin-bottom:6px;flex-wrap:wrap;align-items:flex-start;">
+          <span class="list-row__label" style="flex:1 1 300px;"><code style="font-size:0.8rem;white-space:pre-wrap;word-break:break-word;">${h(r.message)}</code>
+            <span style="display:block;font-size:0.78rem;color:var(--c-text-dim);margin-top:2px;">${h(r.page || '')} · ${r.times}× · last ${h(new Date(r.last_seen).toLocaleString())}</span></span></div>`).join('')
+        : '<p style="font-size:0.84rem;">✅ No errors reported this week.</p>'}`;
+  }
+
   async function renderAdmin() {
     const box = document.getElementById('ac-admin');
     if (!box) return;

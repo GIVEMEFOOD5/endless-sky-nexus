@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="../JavaScript/errorReporter.js"></script>
     <title>Battle Simulator — Endless Sky Nexus</title>
     <meta name="description" content="Simulate Endless Sky battles between any ships and fleets: shields, hull, energy, heat, missiles, anti-missile and pilot skill — plugin ships included.">
     <link rel="canonical" href="https://endless-sky-nexus.ravenslittlesis.workers.dev/Display/HTML/BattleSim.html">
@@ -62,6 +63,7 @@
         <!-- Fight button -->
         <div class="fight-btn-wrap">
             <button class="fight-btn" id="fightBtn" disabled>⚔ SIMULATE BATTLE</button>
+            <div style="text-align:center;margin-top:8px;"><button class="btn btn-secondary btn-sm" type="button" onclick="shareBattle()" title="Copy a link that opens these teams — no account needed">🔗 Share this battle</button></div>
             <label class="sim-option" style="display:flex;gap:8px;align-items:center;justify-content:center;margin-top:10px;font-size:0.88rem;color:var(--c-text-mid);">
               <input type="checkbox" id="skilledPilots" checked onchange="setEveryoneSkilled(this.checked)">
               <span>✈ Every ship has a skilled pilot
@@ -143,6 +145,7 @@
 <script src="../JavaScript/computedMovementStats.js"></script>
 <script src="../JavaScript/computedStats.js"></script>
 <script src="../JavaScript/battleSimStatsDisplay.js"></script>
+<script src="../JavaScript/shareLinks.js"></script>
 <script src="../JavaScript/battleSimEngagement.js"></script>
 <script src="../JavaScript/battleSim.js"></script>
 

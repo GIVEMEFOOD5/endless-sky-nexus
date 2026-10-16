@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="../JavaScript/errorReporter.js"></script>
     <title>Systems Map — Endless Sky Nexus</title>
     <meta name="description" content="An interactive Endless Sky galaxy map: systems, planets, governments, jump links, trade runs, story events over time and what your own pilot has seen.">
     <link rel="canonical" href="https://endless-sky-nexus.ravenslittlesis.workers.dev/Display/HTML/Systems.html">
@@ -63,6 +64,7 @@
             <div class="map-search">
                 <input id="mapSearchInput" type="text" placeholder="Search systems…" autocomplete="off">
                 <div class="map-search-results" id="mapSearchResults"></div>
+                <button class="btn btn-secondary btn-sm map-share-btn" type="button" onclick="shareMapLocation()" title="Copy a link that opens the map on the selected system (and planet)">🔗 Share selected system</button>
             </div>
 
             <div class="map-legend">
@@ -122,6 +124,7 @@
     <script src="../JavaScript/mapSaveState.js"></script>
     <script src="../JavaScript/mapTradeHelper.js"></script>
     <script src="../JavaScript/mapTimeline.js"></script>
+    <script src="../JavaScript/shareLinks.js"></script>
     <script src="../JavaScript/mapDisplay.js"></script>
 
 </body>
