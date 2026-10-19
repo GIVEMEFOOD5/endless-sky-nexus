@@ -76,6 +76,10 @@ function _esc(str) {
 let systemsByName = new Map();  // FormattedSystem, keyed by name
 let systemsArr = [];            // same data, as an array (perf: avoid Map iteration in hot paths)
 let galaxies = [];
+let wormholeLinks = [];                 // [{from, to, name}] — one-way unless the reverse also exists
+let galaxyBackdrops = [];               // [{name, x, y, sprite, img}] — the game's galaxy pictures
+let showGalaxyImage = true, showWormholes = true;
+const _backdropCache = new Map();       // sprite path → Promise<HTMLImageElement|null>
 let linkSegments = [];
 let govPalette = { names: [], counts: {}, colors: {} };
 const activeGovFilters = new Set(); // governments currently hidden by the legend
@@ -109,6 +113,12 @@ function _grabDom() {
     detailsPanelEl = document.getElementById('mapDetailsPanel');
 }
 
+function _wireLayerToggles() {
+    const g = document.getElementById('mapGalaxyToggle'), wh = document.getElementById('mapWormholeToggle');
+    if (g) { g.checked = showGalaxyImage; g.addEventListener('change', () => { showGalaxyImage = g.checked; _draw(); }); }
+    if (wh) { wh.checked = showWormholes; wh.addEventListener('change', () => { showWormholes = wh.checked; _draw(); }); }
+}
+
 function _wireJobBoardToggle() {
     if (!jobBoardToggleEl) return;
     jobBoardToggleEl.checked = jobBoardOn;
@@ -126,6 +136,7 @@ function init() {
     _wireControls();
     _wireLoadProgress();
     _wireJobBoardToggle();
+    _wireLayerToggles();
     _wireDetailsPanel();
     window.addEventListener('resize', _resizeCanvas);
     _resizeCanvas();
@@ -173,11 +184,13 @@ async function _loadAndRender(activeOutputNames, resetView) {
         if (saveState) await saveState.prepare(activeOutputNames);
 
         systemsByName = MapDataFormatter.formatSystems(pluginDataMap, activeOutputNames);
-        const wormholeLinks = MapDataFormatter.formatWormholes(pluginDataMap);
+        wormholeLinks = MapDataFormatter.formatWormholes(pluginDataMap);
         MapDataFormatter.applyWormholeFlags(systemsByName, wormholeLinks);
         const planetsBySystem = MapDataFormatter.formatPlanets(pluginDataMap, activeOutputNames);
         MapDataFormatter.attachPlanets(systemsByName, planetsBySystem);
-        galaxies = MapDataFormatter.formatGalaxies(pluginDataMap).filter(g => !g.isLabel);
+        const allGalaxies = MapDataFormatter.formatGalaxies(pluginDataMap);
+        galaxies = allGalaxies.filter(g => !g.isLabel);
+        _loadBackdrops(allGalaxies.filter(g => g.sprite));
 
         const fetchedStars = MapDataFormatter.formatStars(pluginDataMap, activeOutputNames);
         starTable = MapCalculations.buildStarTable(fetchedStars);
@@ -299,6 +312,103 @@ function _resizeCanvas() {
 //  Drawing
 // ═══════════════════════════════════════════════════════════
 
+// ── Galaxy pictures ──────────────────────────────────────────
+// Each galaxy (and background label like "Core" or "Deep") names a sprite.
+// Look it up through the site's image index first (plugins have their own
+// pictures); for the base game, fall back to the game's own image files.
+function _loadBackdrops(list) {
+    galaxyBackdrops = list.map(g => ({ ...g, img: null, retina: false }));
+    for (const g of galaxyBackdrops) {
+        if (!_backdropCache.has(g.sprite)) _backdropCache.set(g.sprite, _loadBackdropImage(g.sprite));
+        _backdropCache.get(g.sprite).then(res => {
+            if (!res) return;
+            g.img = res.img; g.retina = !!res.retina; g.mapW = res.mapW || null; g.mapH = res.mapH || null;
+            _draw();
+        });
+    }
+}
+function _loadImg(src) {
+    return new Promise(resolve => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => resolve(img.naturalWidth ? img : null);
+        img.onerror = () => resolve(null);
+        img.src = src;
+    });
+}
+// The base game's pictures, shrunk and shipped with the site (the original
+// Milky Way is a 13 MB, 4096 × 4096 image) — with their size on the map.
+const LOCAL_BACKDROPS = {
+    'ui/milky way':     { src: '../Images/galaxy/milky-way.webp',     mapW: 4096, mapH: 4096 },
+    'ui/patir cluster': { src: '../Images/galaxy/patir-cluster.webp', mapW: 780,  mapH: 780 },
+};
+async function _loadBackdropImage(sprite) {
+    const local = LOCAL_BACKDROPS[sprite];
+    if (local) {
+        const img = await _loadImg(local.src);
+        if (img) return { img, mapW: local.mapW, mapH: local.mapH };
+    }
+    try {
+        if (typeof fetchSprite === 'function') {
+            const el = await fetchSprite(sprite, null);
+            const src = el && (el.src || (el.querySelector && el.querySelector('img') && el.querySelector('img').src));
+            if (src) {
+                const img = await _loadImg(src);
+                if (img) return { img, retina: /@2x/.test(src) };
+            }
+        }
+    } catch (_) { /* try the game's files below */ }
+    const base = 'https://raw.githubusercontent.com/endless-sky/endless-sky/master/images/';
+    const path = encodeURI(sprite);
+    for (const [suffix, retina] of [['.jpg', false], ['.png', false], ['@2x.jpg', true], ['@2x.png', true]]) {
+        const img = await _loadImg(base + path + suffix);
+        if (img) return { img, retina };
+    }
+    return null;
+}
+
+// ── Wormholes ───────────────────────────────────────────────
+function _drawWormholes(visibleNames, w, h, linkWidth) {
+    if (!wormholeLinks.length) return;
+    const pairKeys = new Set(wormholeLinks.map(l => `${l.from}→${l.to}`));
+    const drawn = new Set();
+    const arrow = (x, y, ang, size) => {
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x - size * Math.cos(ang - 0.45), y - size * Math.sin(ang - 0.45));
+        ctx.lineTo(x - size * Math.cos(ang + 0.45), y - size * Math.sin(ang + 0.45));
+        ctx.closePath();
+        ctx.fill();
+    };
+    ctx.save();
+    ctx.strokeStyle = 'rgba(200,120,255,0.9)';
+    ctx.fillStyle = 'rgba(220,150,255,0.95)';
+    ctx.lineWidth = Math.max(1.2, linkWidth * 1.8);
+    for (const l of wormholeLinks) {
+        const a = systemsByName.get(l.from), b = systemsByName.get(l.to);
+        if (!a || !b || !visibleNames.has(a.name) || !visibleNames.has(b.name)) continue;
+        const both = pairKeys.has(`${l.to}→${l.from}`);
+        const key = both ? [l.from, l.to].sort().join('↔') : `${l.from}→${l.to}`;
+        if (drawn.has(key)) continue;
+        drawn.add(key);
+        const p1 = MapCalculations.worldToScreen(cam, a.x, a.y, w, h);
+        const p2 = MapCalculations.worldToScreen(cam, b.x, b.y, w, h);
+        const len = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        if (len < 4) continue;
+        ctx.setLineDash([6, 5]);
+        ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+        ctx.setLineDash([]);
+        const ang = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+        const size = Math.max(7, Math.min(13, len / 6));
+        const back = Math.min(len * 0.25, 14);          // stop short of the system dot
+        arrow(p2.x - back * Math.cos(ang), p2.y - back * Math.sin(ang), ang, size);
+        // middle arrow too, so the direction is clear on long jumps
+        if (len > 80) arrow((p1.x + p2.x) / 2, (p1.y + p2.y) / 2, ang, size * 0.85);
+        if (both) arrow(p1.x + back * Math.cos(ang), p1.y + back * Math.sin(ang), ang + Math.PI, size);
+    }
+    ctx.restore();
+}
+
 function _visibleSet() {
     return systemsArr.filter(s => activeGovFilters.has(s.government));
 }
@@ -322,18 +432,44 @@ function _draw() {
     const visibleNames = new Set(visible.map(s => s.name));
     const { nodeRadius, linkWidth, showAllLabels } = MapCalculations.lod(cam);
 
-    // Links
-    ctx.lineWidth = linkWidth;
-    ctx.strokeStyle = 'rgba(60,78,110,0.45)';
-    ctx.beginPath();
-    for (const seg of linkSegments) {
-        if (!visibleNames.has(seg.a.name) || !visibleNames.has(seg.b.name)) continue;
-        const p1 = MapCalculations.worldToScreen(cam, seg.a.x, seg.a.y, w, h);
-        const p2 = MapCalculations.worldToScreen(cam, seg.b.x, seg.b.y, w, h);
-        ctx.moveTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
+    // The game's galaxy pictures, in the same place the game draws them:
+    // centred on the galaxy's position, one map unit per image pixel.
+    if (showGalaxyImage) {
+        for (const g of galaxyBackdrops) {
+            if (!g.img) continue;
+            const scale = g.retina ? 0.5 : 1;
+            const gw = (g.mapW || g.img.naturalWidth * scale) * cam.scale, gh = (g.mapH || g.img.naturalHeight * scale) * cam.scale;
+            const c = MapCalculations.worldToScreen(cam, g.x, g.y, w, h);
+            if (c.x + gw / 2 < 0 || c.x - gw / 2 > w || c.y + gh / 2 < 0 || c.y - gh / 2 > h) continue;
+            ctx.globalAlpha = g.isLabel ? 0.85 : 0.9;
+            ctx.drawImage(g.img, c.x - gw / 2, c.y - gh / 2, gw, gh);
+        }
+        ctx.globalAlpha = 1;
     }
+
+    // Hyperspace links — a soft glow underneath and a bright line on top, so
+    // they stand out from the galaxy picture
+    const linkPath = () => {
+        ctx.beginPath();
+        for (const seg of linkSegments) {
+            if (!visibleNames.has(seg.a.name) || !visibleNames.has(seg.b.name)) continue;
+            const p1 = MapCalculations.worldToScreen(cam, seg.a.x, seg.a.y, w, h);
+            const p2 = MapCalculations.worldToScreen(cam, seg.b.x, seg.b.y, w, h);
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+        }
+    };
+    linkPath();
+    ctx.lineCap = 'round';
+    ctx.lineWidth = linkWidth * 3.2;
+    ctx.strokeStyle = 'rgba(70,120,210,0.22)';
     ctx.stroke();
+    ctx.lineWidth = Math.max(0.9, linkWidth * 1.5);
+    ctx.strokeStyle = 'rgba(150,185,245,0.85)';
+    ctx.stroke();
+
+    // Wormholes — dashed purple, with arrows showing which way you travel
+    if (showWormholes) _drawWormholes(visibleNames, w, h, linkWidth);
 
     // Nodes
     for (const s of visible) {
