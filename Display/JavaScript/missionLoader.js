@@ -574,7 +574,9 @@ async function _fetchMissionBundleFresh(outputName, pluginRow, onFirst) {
     if (!pluginRow) {
         return { sourceName: outputName, displayName: outputName, outputName, missions: [] };
     }
-    const missionRows = await fetchAllRows('missions', {
+    // ready-made file first (one download), else from Supabase in pages
+    const ready = window.Bundles ? await window.Bundles.get('missions', outputName) : null;
+    const missionRows = Array.isArray(ready) ? ready : await fetchAllRows('missions', {
         filters: q => q.eq('plugin_id', pluginRow.plugin_id), orderBy: 'id', pageSize: 100, concurrency: 12,
         // show the first 100 missions while the rest download
         onFirstPage: onFirst ? (rows, total) => onFirst({

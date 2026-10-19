@@ -4,3 +4,10 @@ rawData/
 node_modules/
 *.js
 !Display/**
+# not part of the website
+build/
+tests/
+supabase/
+.github/
+fixture/
+site-check-results/

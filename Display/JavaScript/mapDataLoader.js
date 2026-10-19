@@ -152,7 +152,7 @@ async function _loadOnePlugin(outputName, meta) {
     // get_plugin_map). Falls back to table-by-table requests if it isn't installed.
     let systemRows, galaxyRows, wormholeRows, planetRows, missionRows, starRows, governmentRows,
         fleetRows, hazardRows, asteroidRows, minableRows, linkRows, sysPlanetRows, tradeRows, whLinkRows;
-    const rpc = await _rpcMap(pluginId);
+    const rpc = (window.Bundles && await window.Bundles.get('map', outputName)) || await _rpcMap(pluginId);
     if (rpc) {
         ({ systems: systemRows, galaxies: galaxyRows, wormholes: wormholeRows, planets: planetRows, missions: missionRows,
            stars: starRows, governments: governmentRows, system_fleets: fleetRows, system_hazards: hazardRows,

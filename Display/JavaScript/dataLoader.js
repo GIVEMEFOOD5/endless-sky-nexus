@@ -603,7 +603,7 @@ async function _fetchPluginBundleFresh(outputName, pluginRow) {
     // get_plugin_catalog). If that function isn't installed, fall back to
     // fetching table by table below.
     let shipRows, variantRows, ownOutfitRows, effectRows, shipOutfitRows, variantOutfitRows, crossPluginOutfitRows;
-    const rpc = await _rpcCatalog(pluginRow.plugin_id);
+    const rpc = (window.Bundles && await window.Bundles.get('catalog', outputName)) || await _rpcCatalog(pluginRow.plugin_id);
     if (rpc) {
         ({ ships: shipRows, variants: variantRows, outfits: ownOutfitRows, effects: effectRows,
            ship_outfits: shipOutfitRows, variant_outfits: variantOutfitRows, extra_outfits: crossPluginOutfitRows } = rpc);

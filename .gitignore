@@ -2,3 +2,6 @@ node_modules/
 .parse-cache/
 .tmp-*/
 *.patch
+
+# ready-made data files (made by build/makeBundles.mjs at deploy time)
+Display/bundles/

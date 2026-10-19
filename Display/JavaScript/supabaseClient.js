@@ -98,6 +98,63 @@ function groupBy(rows, key) {
     return map;
 }
 
+// ── Ready-made data files (build/makeBundles.mjs, made when Cloudflare deploys) ──
+// One plain file per plugin and kind ('catalog', 'map', 'missions'), served
+// from Cloudflare's network next to the pages. Used only if they belong to the
+// current data version; otherwise (or if anything fails) the caller loads from
+// Supabase as before.
+const Bundles = (() => {
+    const base = new URL('../bundles/', document.currentScript ? document.currentScript.src : location.href).href;
+    let manifestPromise = null;
+    async function manifest() {
+        if (!manifestPromise) manifestPromise = (async () => {
+            try {
+                const res = await fetch(base + 'manifest.json', { cache: 'no-cache' });
+                if (!res.ok) return null;
+                const m = await res.json();
+                // only if made from the data that's live right now
+                const live = window.EsCache ? await window.EsCache.getRemoteDataVersion() : null;
+                if (live && m.version && live !== m.version) {
+                    console.info('[Bundles] ready-made files are from an older parse — loading from Supabase instead.');
+                    return null;
+                }
+                return m;
+            } catch (_) { return null; }
+        })();
+        return manifestPromise;
+    }
+    /** The data for one plugin and kind, or null (then load it the usual way). */
+    async function get(kind, outputName) {
+        try {
+            const m = await manifest();
+            const files = m && m.plugins && m.plugins[outputName] && m.plugins[outputName][kind];
+            if (!files || !files.length) return null;
+            const parts = await Promise.all(files.map(async f => {
+                const res = await fetch(base + f);
+                if (!res.ok) throw new Error(`${f}: ${res.status}`);
+                return res.json();
+            }));
+            let data;
+            if (parts.length === 1) data = parts[0];
+            else if (Array.isArray(parts[0])) data = parts.flat();
+            else {   // split object: join each list back together
+                data = {};
+                for (const part of parts) for (const [k, v] of Object.entries(part)) {
+                    if (Array.isArray(v)) data[k] = (data[k] || []).concat(v);
+                    else if (v != null && data[k] === undefined) data[k] = v;
+                }
+            }
+            console.info(`[Bundles] loaded ${outputName} ${kind} from ready-made files`);
+            return data;
+        } catch (err) {
+            console.warn(`[Bundles] ${outputName} ${kind}: falling back to Supabase (${err.message})`);
+            return null;
+        }
+    }
+    return { manifest, get };
+})();
+window.Bundles = Bundles;
+
 window.SupabaseHelpers = { fetchAllRows, groupBy };
 
 })();
