@@ -3835,6 +3835,39 @@ async function main() {
       `${cleanup.flaggedShips} shared ship(s) and ${cleanup.flaggedFleets} fleet(s) flagged as needing a removed plugin (${secs(cleanupStart)})`);
     timings.push(['cleanup', (Date.now() - cleanupStart) / 1000]);
 
+    // A fingerprint per plugin of everything its ready-made data files contain
+    // (build/makeBundles.mjs). If a plugin's fingerprint hasn't changed, the
+    // Cloudflare build reuses its files from the live site instead of asking
+    // Supabase again — most deploys then take seconds, not minutes.
+    {
+      const crypto = require('crypto');
+      const pidOf = key => String(key).split('::')[0];
+      const outfitHash = new Map(dedupedOutfitRows.map(o => [o.internal_id, crypto.createHash('sha1').update(JSON.stringify(o)).digest('hex')]));
+      const parts = new Map();   // plugin_id → hash
+      const feed = (pid, label, value) => {
+        if (!pid) return;
+        let h = parts.get(pid);
+        if (!h) { h = crypto.createHash('sha1'); parts.set(pid, h); }
+        h.update(label); h.update(JSON.stringify(value));
+      };
+      const tables = { ships: dedupedShipRows, variants: dedupedVariantRows, outfits: dedupedOutfitRows, effects: allEffectRows,
+        systems: dedupedSystemRows, planets: dedupedPlanetRows, galaxies: dedupedGalaxyRows, wormholes: dedupedWormholeRows,
+        stars: dedupedStarRows, governments: allGovernmentRows, missions: dedupedMissionRows };
+      for (const [t, rows] of Object.entries(tables)) for (const r of rows) feed(r.plugin_id, t, r);
+      // children (outfit lists, jump links, shipyards …) — and the outfits a plugin's ships
+      // use from OTHER plugins, since those are copied into its catalog file too
+      const kids = { ship: shipChildren, variant: variantChildren, planet: planetChildren, system: systemChildren, wormhole: wormholeChildren };
+      for (const [label, map] of Object.entries(kids)) for (const [k, v] of map) {
+        feed(pidOf(k), label, v);
+        if (label === 'ship' || label === 'variant') for (const [oi] of v) feed(pidOf(k), 'uses', outfitHash.get(oi) || oi);
+      }
+      const fingerprints = Object.fromEntries([...parts].map(([pid, h]) => [pid, h.digest('hex')]));
+      await withRetry(async () => {
+        const { error } = await supabase.from('app_config').upsert({ key: 'pluginFingerprints', value: fingerprints }, { onConflict: 'key' });
+        if (error) throw new Error(`Supabase upsert failed for app_config: ${error.message}`);
+      }, { label: 'upsert pluginFingerprints' });
+    }
+
     // Display names for pages that don't load full ship/outfit data (e.g. Missions):
     // { pluginId: { ships: { internal: display }, outfits: { internal: display } } }
     {

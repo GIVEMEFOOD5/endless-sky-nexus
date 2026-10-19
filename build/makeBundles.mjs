@@ -23,7 +23,9 @@ import path from 'node:path';
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const OUT = path.join(ROOT, 'Display', 'bundles');
 const MAX_FILE = (Number(process.env.BUNDLE_MAX_MB) || 20) * 1024 * 1024;   // Cloudflare's limit is 25 MiB per file — keep well under
-const CONCURRENCY = 4;
+const CONCURRENCY = 10;
+// The live site — unchanged plugins' files are copied from here instead of rebuilt
+const SITE = (process.env.SITE_URL || 'https://endless-sky-nexus.ravenslittlesis.workers.dev').replace(/\/$/, '');
 
 // The public URL and key, read from the site's own config so they're never out of step
 const cfg = fs.readFileSync(path.join(ROOT, 'Display/JavaScript/supabaseClient.js'), 'utf8');
@@ -143,20 +145,49 @@ async function main() {
   fs.mkdirSync(OUT, { recursive: true });
   const started = Date.now();
 
-  const [plugins, versionRow] = await Promise.all([
+  const [plugins, versionRow, fpRow, live] = await Promise.all([
     request('plugins?select=plugin_id,output_name,source_name,display_name,source_priority&order=source_priority'),
     request('app_config?select=value&key=eq.dataVersion'),
+    request('app_config?select=value&key=eq.pluginFingerprints').catch(() => []),
+    fetch(`${SITE}/Display/bundles/manifest.json`, { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
   ]);
   const version = versionRow?.[0]?.value?.updatedAt || null;
-  log(`${plugins.length} plugins, data version ${version}`);
+  const fingerprints = fpRow?.[0]?.value || {};
+  log(`${plugins.length} plugins, data version ${version}${live ? `, live site has files from ${live.version}` : ', no files on the live site yet'}`);
+
+  // Copy a plugin's files from the live site when nothing in it has changed
+  async function reuse(p, entry, safe) {
+    const old = live && live.plugins && live.plugins[p.output_name];
+    const fp = fingerprints[p.plugin_id];
+    const same = old && (fp ? old.fingerprint === fp : live.version === version);
+    if (!same) return false;
+    for (const kind of ['catalog', 'map', 'missions']) if (!old[kind] || !old[kind].length) return false;
+    const copied = {};
+    for (const kind of ['catalog', 'map', 'missions']) {
+      copied[kind] = [];
+      for (const f of old[kind]) {
+        const res = await fetch(`${SITE}/Display/bundles/${encodeURIComponent(f)}`);
+        if (!res.ok) return false;
+        const buf = Buffer.from(await res.arrayBuffer());
+        fs.writeFileSync(path.join(OUT, f), buf);
+        copied[kind].push(f); totalBytes += buf.length;
+      }
+    }
+    Object.assign(entry, copied);
+    return true;
+  }
 
   const manifest = { version, built: new Date().toISOString(), plugins: {} };
-  let next = 0, totalBytes = 0, failures = 0;
+  let next = 0, totalBytes = 0, failures = 0, reused = 0;
   const work = async () => {
     while (next < plugins.length) {
       const p = plugins[next++];
-      const entry = { plugin_id: p.plugin_id };
+      const entry = { plugin_id: p.plugin_id, fingerprint: fingerprints[p.plugin_id] || null };
       const safe = p.output_name.replace(/[^A-Za-z0-9._-]+/g, '_');
+      if (await reuse(p, entry, safe).catch(() => false)) {
+        manifest.plugins[p.output_name] = entry; reused++;
+        continue;
+      }
       const kinds = {
         catalog:  () => viaRpcOrTables('get_plugin_catalog', { p_plugin_id: p.plugin_id }, () => catalogFromTables(p.plugin_id)),
         map:      () => viaRpcOrTables('get_plugin_map',     { p_plugin_id: p.plugin_id }, () => mapFromTables(p.plugin_id)),
@@ -182,7 +213,7 @@ async function main() {
   await Promise.all(Array.from({ length: CONCURRENCY }, work));
 
   fs.writeFileSync(path.join(OUT, 'manifest.json'), JSON.stringify(manifest));
-  log(`Done in ${((Date.now() - started) / 1000).toFixed(0)} s — ${Object.keys(manifest.plugins).length} plugins, ${mb(totalBytes)} total${failures ? `, ${failures} part(s) skipped` : ''}.`);
+  log(`Done in ${((Date.now() - started) / 1000).toFixed(0)} s — ${Object.keys(manifest.plugins).length} plugins (${reused} unchanged, copied from the live site), ${mb(totalBytes)} total${failures ? `, ${failures} part(s) skipped` : ''}.`);
 }
 
 main().catch(err => {
