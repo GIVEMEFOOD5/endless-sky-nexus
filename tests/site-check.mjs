@@ -136,7 +136,9 @@ await check('Ship Builder: outfit a ship, save, auto-fit, share link', async pag
   await page.click('text=💾 Save Ship'); await page.waitForTimeout(800);
   expect(await page.evaluate(() => sbFleet.length) >= 1, 'ship was not saved to the fleet');
   // auto-fit (all-round) must produce a result that passes its own checks
-  await page.click('text=⚡ Auto-fit'); await page.waitForTimeout(3000);
+  await page.click('text=⚡ Auto-fit');
+  // the window first loads where outfits can be bought (live data: can take a while)
+  await page.waitForSelector('[data-af="run"]:not([disabled])', { timeout: 120000 });
   await page.click('[data-af="goal"][data-goal="general"]');
   await page.click('[data-af="run"]');
   await page.waitForSelector('#af-result h3', { timeout: 120000 });

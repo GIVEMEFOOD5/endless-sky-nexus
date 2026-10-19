@@ -57,10 +57,20 @@
   async function worldData() {
     const key = [...(window.AfStats.activePluginIds() || [])].sort().join('|');
     if (cache && cache.key === key) return cache;
+    // Only the selected plugins, filtered by the database (not downloaded and
+    // thrown away here), and only the missions that can matter: ones that
+    // change a reputation or trigger an event. Pages arrive side by side.
+    const ids = [...(window.AfStats.activePluginIds() || [])];
+    const mine = q => (ids.length ? q.in('plugin_id', ids) : q);
+    const H = window.SupabaseHelpers;
+    const rows = (table, select, filter) => (H && H.fetchAllRows)
+      ? H.fetchAllRows(table, { select, orderBy: 'id', filters: q => filter(mine(q)) }).catch(() => [])
+      : fetchAll(table, select, q => filter(mine(q)));
     const [planets, missions, events] = await Promise.all([
-      fetchAll('planets', 'name, government'),
-      fetchAll('missions', 'name, display_name, plugin_id, condition_side_effects, event_triggers, repeatable'),
-      fetchAll('game_events', 'name, plugin_id, raw', q => q.ilike('raw', '%reputation: %')),
+      rows('planets', 'id, name, government', q => q),
+      rows('missions', 'id, name, display_name, plugin_id, condition_side_effects, event_triggers, repeatable',
+           q => q.or('condition_side_effects.not.is.null,event_triggers.not.is.null')),
+      rows('game_events', 'id, name, plugin_id, raw', q => q.ilike('raw', '%reputation: %')),
     ]);
     const planetGov = new Map(planets.map(p => [p.name, p.government || null]));
     // government → [{ kind, name, label, value, op }]
