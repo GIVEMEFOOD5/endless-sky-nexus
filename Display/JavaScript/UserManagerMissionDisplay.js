@@ -58,6 +58,19 @@ document.addEventListener('missionsLoaded', () => {
     if (statusEl) statusEl.remove();
     searchInput.disabled = false;
 });
+// While the first missions are showing and the rest are still downloading
+document.addEventListener('missionsProgress', (e) => {
+    const { loaded, total, done } = e.detail || {};
+    let note = document.getElementById('missionProgressNote');
+    if (done) { if (note) note.remove(); return; }
+    if (!note) {
+        note = document.createElement('p');
+        note.id = 'missionProgressNote';
+        note.style.cssText = 'font-size:0.85rem;color:var(--c-text-dim);margin:0 0 10px;';
+        (listEl && listEl.parentNode) ? listEl.parentNode.insertBefore(note, listEl) : document.body.appendChild(note);
+    }
+    note.textContent = `Showing the first ${loaded.toLocaleString()} of ${total.toLocaleString()} missions — the rest are loading…`;
+});
 document.addEventListener('missionsLoadError', (e) => {
     if (statusEl) statusEl.textContent = 'Could not load mission data: ' + e.detail.message;
 });
@@ -106,11 +119,18 @@ if (HAS_STATUS_HELPER) {
 }
 
 // ── Bootstrap ────────────────────────────────────────────────
+// Show the list as soon as the first missions are in ('missionsLoaded' fires
+// then) — MissionLoader re-renders again once the rest have arrived.
+let _missionsBooted = false;
+function _bootMissionList() {
+    if (_missionsBooted) return;
+    _missionsBooted = true;
+    window.PluginManager.ensurePickerOverlay();
+    return window.PluginManager.initDefaultPlugin();
+}
+document.addEventListener('missionsLoaded', _bootMissionList);
 MissionLoader.load()
-    .then(() => {
-        window.PluginManager.ensurePickerOverlay();
-        return window.PluginManager.initDefaultPlugin();
-    })
+    .then(_bootMissionList)
     .catch(() => { /* missionsLoadError already fired and shown */ });
 
 // Looked up by id when a card's raw-tree toggle is clicked, so we don't

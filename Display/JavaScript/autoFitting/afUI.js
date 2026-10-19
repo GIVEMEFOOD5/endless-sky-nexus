@@ -47,6 +47,11 @@
         border:0;border-radius:50%;background:transparent;color:var(--c-text-dim, #94a3b8);font-size:15px;line-height:1;cursor:pointer;}
       .af-chip__x:hover,.af-chip__x:focus-visible{background:rgba(239,68,68,.18);color:var(--c-danger-text, #f87171);outline:none;}
       @media (pointer: coarse){ .af-chip__x{width:28px;height:28px;min-width:28px;min-height:28px;} }
+      .af-progress{margin-top:12px;}
+      .af-progress__track{height:10px;border-radius:999px;background:var(--c-surface-2, rgba(51,65,85,.55));overflow:hidden;border:1px solid var(--c-border,#334155);}
+      .af-progress__bar{height:100%;width:3%;border-radius:999px;background:linear-gradient(90deg,var(--c-accent,#3b82f6),#60a5fa);transition:width .25s ease;}
+      .af-progress__row{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:6px;font-size:0.84rem;color:var(--c-text-dim);}
+      @media (prefers-reduced-motion: reduce){.af-progress__bar{transition:none;}}
       .af-excl-btn{border:0;background:transparent;color:var(--c-text-dim);cursor:pointer;font-size:0.76rem;padding:2px 6px;border-radius:6px;}
       .af-excl-btn:hover{color:var(--c-danger-text,#f87171);background:rgba(239,68,68,.12);}
     `;
@@ -149,6 +154,7 @@
       else if (act === 'run') run();
       else if (act === 'apply') apply();
       else if (act === 'battle') testInBattle();
+      else if (act === 'cancel') cancelRun();
       else if (act === 'share') shareFit();
       else if (act === 'fac-all') { ui.factions = new Set(ui.ctx.factions.map(f => f.name)); render(); }
       else if (act === 'fac-none') { ui.factions = new Set(); render(); }
@@ -197,7 +203,7 @@
     document.body.appendChild(m);
     return m;
   }
-  function close() { document.getElementById('af-modal')?.classList.remove('active'); ui = null; }
+  function close() { runId++; if (worker) { worker.terminate(); worker = null; } document.getElementById('af-modal')?.classList.remove('active'); ui = null; }
 
   async function open() {
     if (!S() || !P() || !O()) return;
@@ -341,8 +347,13 @@
         ${ui.result ? '<button class="btn btn-secondary" data-af="battle" title="Fight it in the Battle Simulator (opens a new tab)">⚔ Test in Battle Simulator</button>' : ''}
         ${ui.result ? '<button class="btn btn-secondary" data-af="share" title="Copy a link that opens this fit — no account needed">🔗 Share this fit</button>' : ''}
       </div>
+      ${ui.running ? `<div class="af-progress" role="progressbar" aria-label="Auto-fit progress" aria-valuemin="0" aria-valuemax="100">
+          <div class="af-progress__track"><div class="af-progress__bar" id="af-progress-bar" style="width:${ui.progressPct || 3}%"></div></div>
+          <div class="af-progress__row"><span id="af-progress-text">${h(ui.progressText || 'Starting…')}</span>
+            <button type="button" class="af-excl-btn" data-af="cancel">Cancel</button></div>
+        </div>` : ''}
       ${ui.notice ? `<p style="color:var(--c-warn-text,#fbbf24);margin:8px 0 0;">${h(ui.notice)}</p>` : ''}
-      <div id="af-result">${ui.result ? resultHtml() : ''}</div>`;
+      <div id="af-result">${ui.result && !ui.running ? resultHtml() : ''}</div>`;
     bindShipPickers();
   }
 
@@ -572,59 +583,121 @@
     ui.notice = null;
     const need = missingHull();
     if (need.length) { ui.notice = `This ship has no hull to fit yet — set ${need.join(', ')} in its Attributes (or start from an existing ship), then try again.`; render(); return; }
-    ui.running = true; render();
-    setTimeout(() => {
-      try {
-        const { list, access } = candidates();
-        // keep the jump drive / hyperdrive the ship already has (a fit that can't leave the system is no use)
-        const mine = designOutfits(ui.design);
-        const attrsOf = o => (o && (o.attributes || o)) || {};   // site outfits keep their attributes at the top level
-        const keep = mine.filter(([n]) => { const a = attrsOf(ui.idx.get(n)); return (a.hyperdrive || a['jump drive']) && !ui.prefs.exclude.includes(n); });
-        for (const [n] of keep) if (!access.has(n)) { access.set(n, { how: 'keep', note: 'Kept from your current fit' }); const o = ui.idx.get(n); if (o) list.push({ name: n, outfit: o }); }
-        if (!keep.length) {
-          const hd = list.find(c => attrsOf(c.outfit).hyperdrive);
-          if (hd) keep.push([hd.name, 1]);
-        }
-        const opts = { ...ui.opts };
-        if (ui.peers && ui.goal === 'general') opts.peerRef = ui.peers;   // only All-round is judged against similar ships
-        opts.targets = ui.targets.map((t, i) => ({ ...t,
-          // earlier targets matter a little more when priorities tie
-          priority: t.priority || 'normal', order: i, ref: S().statValue(ui.current, t.id) }));
-        if (ui.goal === 'custom' && !opts.targets.length) { ui.running = false; ui.notice = 'Add at least one target for “Just my targets”.'; render(); return; }
-        if (ui.prefs.noSecondary) opts.weapons = 'primary';
-        if (ui.goal === 'tank') opts.profile = enemyProfile(ui.enemies);
-        delete opts.minTurn; delete opts.minCargo; delete opts.minSpeed;
-        if (ui.goal === 'counter') {
-          if (!ui.foe.profile) { ui.running = false; ui.notice = 'Pick a government or some ships to fit against first.'; render(); return; }
-          opts.counter = window.AfThreat.makeCounter(ui.foe.profile, ui.foe.count);
-          if (ui.foe.matchSpeed) opts.minSpeed = Math.max(opts.minSpeed || 0, Math.round(ui.foe.profile.defence.speed));
-        }
-        let r = O().optimize({ base: ui.base, candidates: list, goal: ui.goal, options: opts, keep, reference: mine, referenceIndex: ui.idx });
-        // Check the result before showing it. If something basic fails (power,
-        // cooling, crew, fuel …), fit again with each failure made a must-have.
-        let checks = S().verify(r.derived);
-        let repaired = null;
-        const failing = checks.filter(c => !c.ok && c.fix);
-        if (failing.length) {
-          const opts2 = { ...opts, targets: [...(opts.targets || []), ...failing.map((c, i) => ({ ...c.fix, order: -1 - i, ref: S().statValue(r.derived, c.fix.id) }))] };
-          const r2 = O().optimize({ base: ui.base, candidates: list, goal: ui.goal, options: opts2, keep, reference: mine, referenceIndex: ui.idx });
-          const checks2 = S().verify(r2.derived);
-          if (checks2.filter(c => !c.ok).length < checks.filter(c => !c.ok).length) { repaired = failing.map(c => c.label); r = r2; checks = checks2; }
-        }
-        r.checks = checks; r.repaired = repaired;
-        r.access = access;
-        r.counterNotes = ui.goal === 'counter' ? window.AfThreat.explain(ui.current, r.derived, ui.foe.profile, ui.foe.count) : null;
-        r.suggestions = ui.goal === 'general' ? suggestions(r, list) : [];
-        if (ui.goal === 'tank') r.suggestions.unshift(`Damage it's built against: ${Math.round(opts.profile.shield * 100)}% shield damage, ${Math.round(opts.profile.hull * 100)}% hull damage${ui.enemies.length ? ` (${h(ui.enemies.map(shipLabel).join(', '))})` : ' (average of every armed ship)'}.`);
-        ui.result = r;
-      } catch (err) {
-        console.error(err);
-        ui.result = null;
-        ui.error = 'Auto-fit failed: ' + err.message;
+    ui.running = true; ui.progressPct = 3; ui.progressText = 'Starting…'; ui.result = null; render();
+    let job;
+    try {
+      const { list, access } = candidates();
+      // keep the jump drive / hyperdrive the ship already has (a fit that can't leave the system is no use)
+      const mine = designOutfits(ui.design);
+      const attrsOf = o => (o && (o.attributes || o)) || {};   // site outfits keep their attributes at the top level
+      const keep = mine.filter(([n]) => { const a = attrsOf(ui.idx.get(n)); return (a.hyperdrive || a['jump drive']) && !ui.prefs.exclude.includes(n); });
+      for (const [n] of keep) if (!access.has(n)) { access.set(n, { how: 'keep', note: 'Kept from your current fit' }); const o = ui.idx.get(n); if (o) list.push({ name: n, outfit: o }); }
+      if (!keep.length) {
+        const hd = list.find(c => attrsOf(c.outfit).hyperdrive);
+        if (hd) keep.push([hd.name, 1]);
       }
-      ui.running = false;
-      render();
-    }, 30);
+      const opts = { ...ui.opts };
+      if (ui.peers && ui.goal === 'general') opts.peerRef = ui.peers;   // only All-round is judged against similar ships
+      opts.targets = ui.targets.map((t, i) => ({ ...t,
+        // earlier targets matter a little more when priorities tie
+        priority: t.priority || 'normal', order: i, ref: S().statValue(ui.current, t.id) }));
+      if (ui.goal === 'custom' && !opts.targets.length) { ui.running = false; ui.notice = 'Add at least one target for “Just my targets”.'; render(); return; }
+      if (ui.prefs.noSecondary) opts.weapons = 'primary';
+      if (ui.goal === 'tank') opts.profile = enemyProfile(ui.enemies);
+      delete opts.minTurn; delete opts.minCargo; delete opts.minSpeed;
+      let counter = null;
+      if (ui.goal === 'counter') {
+        if (!ui.foe.profile) { ui.running = false; ui.notice = 'Pick a government or some ships to fit against first.'; render(); return; }
+        counter = { profile: ui.foe.profile, count: ui.foe.count };
+        if (ui.foe.matchSpeed) opts.minSpeed = Math.max(opts.minSpeed || 0, Math.round(ui.foe.profile.defence.speed));
+      }
+      job = { base: ui.base, list, goal: ui.goal, opts, keep, mine, idx: ui.idx, counter, access };
+    } catch (err) {
+      console.error(err); ui.running = false; ui.error = 'Auto-fit failed: ' + err.message; render(); return;
+    }
+    runJob(job);
+  }
+
+  // ── Running the search in the background (Web Worker) with a progress bar ──
+  let worker = null, runId = 0;
+  function setProgress(pct, text) {
+    ui.progressPct = Math.max(ui.progressPct || 0, Math.min(99, pct));
+    ui.progressText = text;
+    const bar = document.getElementById('af-progress-bar'), t = document.getElementById('af-progress-text');
+    if (bar) bar.style.width = ui.progressPct + '%';
+    if (t) t.textContent = text;
+    const box = bar && bar.closest('.af-progress'); if (box) box.setAttribute('aria-valuenow', String(Math.round(ui.progressPct)));
+  }
+  function onProgress(m) {
+    if (m.pass === 3) { setProgress(95, 'Looking for the best next upgrades…'); return; }
+    if (m.pass === 2) {
+      if (m.phase === 'repairing') setProgress(88, `Fixing: ${(m.fixing || []).join(', ')}…`);
+      else setProgress(88 + 10 * (1 - Math.exp(-(m.steps || 0) / 25)), 'Fitting again so every check passes…');
+      return;
+    }
+    if (m.phase === 'adding') setProgress(5 + 70 * (1 - Math.exp(-(m.steps || 0) / 25)), `Trying outfits… ${m.outfits} chosen so far`);
+    else if (m.phase === 'expanding') setProgress(78, 'Trying outfits that make more room…');
+    else if (m.phase === 'suggestions') setProgress(95, 'Looking for the best next upgrades…');
+    else if (m.phase === 'cleanup') setProgress(84, 'Fine-tuning — swapping and removing outfits that don\'t pull their weight…');
+  }
+  function finish(job, r) {
+    try {
+      setProgress(99, 'Checking the result…');
+      r.access = job.access;
+      r.counterNotes = ui.goal === 'counter' ? window.AfThreat.explain(ui.current, r.derived, ui.foe.profile, ui.foe.count) : null;
+      const unit = { 'more damage': ' dps', 'more speed': ' speed', 'faster turning': '°/s', 'more shields': ' shield (incl. 30 s regen)', 'more cargo': ' cargo' };
+      r.suggestions = ui.goal !== 'general' ? []
+        : r.suggestionsRaw ? r.suggestionsRaw.map(b => `For ${b.label}: ${b.rm ? `swap 1× ${h(b.rm)} for` : 'add'} 1× ${h(b.add)} (+${fmt(b.gain, 1)}${unit[b.label]}).`)
+        : suggestions(r, job.list);
+      if (r.workerMs) console.info(`[AfUI] auto-fit took ${(r.workerMs / 1000).toFixed(1)} s in the background`);
+      if (ui.goal === 'tank') r.suggestions.unshift(`Damage it's built against: ${Math.round(job.opts.profile.shield * 100)}% shield damage, ${Math.round(job.opts.profile.hull * 100)}% hull damage${ui.enemies.length ? ` (${h(ui.enemies.map(shipLabel).join(', '))})` : ' (average of every armed ship)'}.`);
+      ui.result = r;
+    } catch (err) {
+      console.error(err); ui.result = null; ui.error = 'Auto-fit failed: ' + err.message;
+    }
+    ui.running = false; render();
+  }
+  function runJob(job) {
+    const id = ++runId;
+    const { access, ...msg } = job;
+    let useWorker = typeof Worker === 'function';
+    if (useWorker) {
+      try {
+        if (worker) worker.terminate();
+        worker = new Worker(new URL('../JavaScript/autoFitting/afWorker.js', location.href));
+      } catch (_) { useWorker = false; }
+    }
+    if (!useWorker) {
+      // fallback: same work on the page itself (it may pause briefly)
+      setTimeout(() => {
+        try {
+          const opts = { ...msg.opts };
+          if (msg.counter) opts.counter = window.AfThreat.makeCounter(msg.counter.profile, msg.counter.count);
+          const r = O().optimize({ base: msg.base, candidates: msg.list, goal: msg.goal, options: opts, keep: msg.keep, reference: msg.mine, referenceIndex: msg.idx });
+          r.checks = S().verify(r.derived); r.repaired = null;
+          if (id === runId) finish(job, r);
+        } catch (err) { console.error(err); ui.running = false; ui.error = 'Auto-fit failed: ' + err.message; render(); }
+      }, 30);
+      return;
+    }
+    worker.onmessage = e => {
+      if (id !== runId) return;
+      const m = e.data;
+      if (m.type === 'progress') onProgress(m);
+      else if (m.type === 'done') { worker.terminate(); worker = null; finish(job, m.result); }
+      else if (m.type === 'error') { worker.terminate(); worker = null; ui.running = false; ui.error = 'Auto-fit failed: ' + m.message; render(); }
+    };
+    worker.onerror = err => {
+      if (id !== runId) return;
+      console.error('[AfUI] worker error', err.message);
+      worker = null; ui.running = false; ui.error = 'Auto-fit failed: ' + (err.message || 'the background search stopped'); render();
+    };
+    worker.postMessage(msg);
+  }
+  function cancelRun() {
+    runId++;
+    if (worker) { worker.terminate(); worker = null; }
+    ui.running = false; ui.notice = 'Auto-fit cancelled.'; render();
   }
 
   // For the all-round build: the single best swap or addition toward each feature.

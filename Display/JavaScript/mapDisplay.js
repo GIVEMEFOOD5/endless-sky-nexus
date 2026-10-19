@@ -141,6 +141,8 @@ function init() {
         window.PluginManager.initDefaultPlugin();
         if (typeof initImageIndex === 'function') initImageIndex(); // for planet/star art
     });
+    // Start the map download now, alongside the plugin list, instead of after it
+    if (window.MapDataLoader && window.MapDataLoader.prefetch) window.MapDataLoader.prefetch();
     window.DataLoader.load().catch(err => _showError(err.message));
 
     document.addEventListener('dataLoadError', e => {

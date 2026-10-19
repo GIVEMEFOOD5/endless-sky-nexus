@@ -99,7 +99,7 @@ async function discoverPlugins() {
     const index = {};
     for (const p of pluginRows) {
         if (!index[p.source_name]) index[p.source_name] = [];
-        index[p.source_name].push({ outputName: p.output_name, displayPluginName: p.display_name || p.output_name });
+        index[p.source_name].push({ outputName: p.output_name, displayPluginName: p.display_name || p.output_name, pluginId: p.plugin_id });
     }
     _pluginIndex = index;
     return _pluginIndex;
@@ -108,7 +108,7 @@ async function discoverPlugins() {
 function _findPluginMeta(index, outputName) {
     for (const [sourceName, list] of Object.entries(index)) {
         const hit = list.find(p => p.outputName === outputName);
-        if (hit) return { sourceName, displayName: hit.displayPluginName || outputName };
+        if (hit) return { sourceName, displayName: hit.displayPluginName || outputName, pluginId: hit.pluginId };
     }
     return { sourceName: outputName, displayName: outputName };
 }
@@ -138,10 +138,14 @@ async function _loadOnePlugin(outputName, meta) {
     async function buildFresh() {
     const { fetchAllRows, groupBy } = window.SupabaseHelpers;
 
-    const { data: pluginRows, error: pluginErr } = await window.supabaseClient
-        .from('plugins').select('plugin_id').eq('output_name', outputName);
-    if (pluginErr || !pluginRows?.length) throw new Error(`Unknown plugin "${outputName}"`);
-    const pluginId = pluginRows[0].plugin_id;
+    // plugin_id usually comes with the plugin list already (one less round trip)
+    let pluginId = meta && meta.pluginId;
+    if (!pluginId) {
+        const { data: pluginRows, error: pluginErr } = await window.supabaseClient
+            .from('plugins').select('plugin_id').eq('output_name', outputName);
+        if (pluginErr || !pluginRows?.length) throw new Error(`Unknown plugin "${outputName}"`);
+        pluginId = pluginRows[0].plugin_id;
+    }
     const byPlugin = q => q.eq('plugin_id', pluginId);
 
     // Fast path: the plugin's whole map in ONE request (supabase/performance.sql,
@@ -302,6 +306,21 @@ async function _loadOnePlugin(outputName, meta) {
  * loading UI — these files are large enough that progress matters,
  * especially on mobile connections.
  */
+// One in-flight load per plugin, shared by everyone who asks (e.g. the early
+// prefetch below and the real render) — never downloads the same map twice.
+const _inflight = new Map();
+function _loadShared(index, outputName) {
+    if (_cache.has(outputName)) return Promise.resolve(_cache.get(outputName));
+    if (_inflight.has(outputName)) return _inflight.get(outputName);
+    const p = (async () => {
+        const data = await _loadOnePlugin(outputName, _findPluginMeta(index, outputName));
+        _cache.set(outputName, data);
+        return data;
+    })().finally(() => _inflight.delete(outputName));
+    _inflight.set(outputName, p);
+    return p;
+}
+
 async function loadPlugins(outputNames) {
     const wanted = [...new Set(outputNames)].filter(Boolean);
     _fireEvent('mapDataLoadStart', { outputNames: wanted });
@@ -309,27 +328,43 @@ async function loadPlugins(outputNames) {
     const index = await discoverPlugins();
     const results = new Map();
 
-    for (let i = 0; i < wanted.length; i++) {
-        const outputName = wanted[i];
-        if (_cache.has(outputName)) {
-            results.set(outputName, _cache.get(outputName));
-            _fireEvent('mapPluginLoaded', { outputName, index: i, total: wanted.length, cached: true });
-            continue;
-        }
+    // all selected plugins at once (each is a single request)
+    await Promise.all(wanted.map(async (outputName, i) => {
+        const cached = _cache.has(outputName);
         try {
-            const meta = _findPluginMeta(index, outputName);
-            const data = await _loadOnePlugin(outputName, meta);
-            _cache.set(outputName, data);
+            const data = await _loadShared(index, outputName);
             results.set(outputName, data);
-            _fireEvent('mapPluginLoaded', { outputName, index: i, total: wanted.length, cached: false });
+            _fireEvent('mapPluginLoaded', { outputName, index: i, total: wanted.length, cached });
         } catch (err) {
             console.warn(`[MapDataLoader] Failed loading "${outputName}":`, err);
             _fireEvent('mapPluginLoadError', { outputName, message: err.message });
         }
-    }
+    }));
 
-    _fireEvent('mapDataLoadEnd', { loaded: [...results.keys()] });
-    return results;
+    // keep the caller's order (it decides which plugin wins on conflicts)
+    const ordered = new Map(wanted.filter(n => results.has(n)).map(n => [n, results.get(n)]));
+    _fireEvent('mapDataLoadEnd', { loaded: [...ordered.keys()] });
+    return ordered;
+}
+
+/**
+ * Start downloading the map straight away, before the rest of the page is
+ * ready — for the plugins the visitor had selected last time (or the base
+ * game). The real render picks up the same download when it gets there.
+ */
+async function prefetch() {
+    try {
+        let names = null;
+        try { names = JSON.parse(localStorage.getItem('es_sb_active_plugins') || 'null'); } catch (_) {}
+        const index = await discoverPlugins();
+        const all = Object.values(index).flat().map(p => p.outputName);
+        names = (Array.isArray(names) ? names : []).filter(n => all.includes(n));
+        if (!names.length) {
+            const base = (index['official-game'] || [])[0];
+            if (base) names = [base.outputName];
+        }
+        await Promise.all(names.map(n => _loadShared(index, n).catch(() => null)));
+    } catch (_) { /* the normal load will report any problem */ }
 }
 
 function getCached(outputName) { return _cache.get(outputName) || null; }
@@ -339,6 +374,7 @@ function clearCache() { _cache.clear(); }
 window.MapDataLoader = {
     discoverPlugins,
     loadPlugins,
+    prefetch,
     getCached,
     isCached,
     clearCache,

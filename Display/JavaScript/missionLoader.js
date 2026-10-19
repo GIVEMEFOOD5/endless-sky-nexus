@@ -569,13 +569,18 @@ function _reconstructMission(m) {
     };
 }
 
-async function _fetchMissionBundleFresh(outputName, pluginRow) {
+async function _fetchMissionBundleFresh(outputName, pluginRow, onFirst) {
     const { fetchAllRows } = window.SupabaseHelpers;
     if (!pluginRow) {
         return { sourceName: outputName, displayName: outputName, outputName, missions: [] };
     }
     const missionRows = await fetchAllRows('missions', {
         filters: q => q.eq('plugin_id', pluginRow.plugin_id), orderBy: 'id', pageSize: 100, concurrency: 12,
+        // show the first 100 missions while the rest download
+        onFirstPage: onFirst ? (rows, total) => onFirst({
+            sourceName: pluginRow.source_name, displayName: pluginRow.display_name || outputName, outputName,
+            missions: rows.map(_reconstructMission), _partial: { loaded: rows.length, total },
+        }) : undefined,
     });
     return {
         sourceName: pluginRow.source_name,
@@ -585,8 +590,8 @@ async function _fetchMissionBundleFresh(outputName, pluginRow) {
     };
 }
 
-async function _loadMissionBundle(outputName, pluginRow) {
-    const build = () => _fetchMissionBundleFresh(outputName, pluginRow);
+async function _loadMissionBundle(outputName, pluginRow, onFirst) {
+    const build = () => _fetchMissionBundleFresh(outputName, pluginRow, onFirst);
     return window.EsCache
         ? await window.EsCache.loadWithCache(`missionBundle:${outputName}`, build)
         : await build();
@@ -671,28 +676,47 @@ async function _doLoad() {
             if (def) phaseANames.add(def.output_name);
         }
 
+        // The page becomes usable as soon as the FIRST page of missions is in
+        // (partial) — the rest keep downloading and the list fills in.
+        let readyPromise = null;
+        const markReady = () => readyPromise || (readyPromise = (async () => {
+            _ready   = true;
+            _loading = false;
+            await window.MissionLoader.initDefaultPlugins();
+            for (const fn of _callbacks) {
+                try { fn(window.allMissionData); } catch (e) { console.error('[MissionLoader] callback error:', e); }
+            }
+            _callbacks = [];
+            _fireEvent('missionsLoaded', { allMissionData: window.allMissionData });
+            // Generic event generalPluginStuff.js listens for as a safety net
+            // (it double-checks a remote plugin is active once data is in).
+            _fireEvent('dataLoaded', { allData: window.allData });
+        })());
+        const progress = () => {
+            let loaded = 0, total = 0;
+            for (const n of phaseANames) { const b = window.allMissionData[n]; if (!b) continue;
+                loaded += b._partial ? b._partial.loaded : (b.missions || []).length;
+                total  += b._partial ? b._partial.total  : (b.missions || []).length; }
+            _fireEvent('missionsProgress', { loaded, total, done: loaded >= total });
+        };
+
         await Promise.all([...phaseANames].map(async outputName => {
             const pluginRow = pluginRows.find(p => p.output_name === outputName);
-            window.allMissionData[outputName] = await _loadMissionBundle(outputName, pluginRow);
+            const full = await _loadMissionBundle(outputName, pluginRow, partial => {
+                if (window.allMissionData[outputName] && !window.allMissionData[outputName]._placeholder && !window.allMissionData[outputName]._partial) return;
+                window.allMissionData[outputName] = partial;
+                progress();
+                if ((partial.missions || []).length) markReady();
+            });
+            window.allMissionData[outputName] = full;
+            progress();
+            // the list is already on screen with the first missions — fill in the rest
+            if (readyPromise) { await readyPromise; if (typeof window._renderCardsFromManager === 'function') window._renderCardsFromManager(); }
         }));
 
         const hasData = Object.values(window.allMissionData).some(p => (p.missions || []).length > 0);
         if (!hasData) throw new Error('No mission data could be loaded from Supabase');
-
-        _ready   = true;
-        _loading = false;
-
-        await window.MissionLoader.initDefaultPlugins();
-
-        for (const fn of _callbacks) {
-            try { fn(window.allMissionData); } catch (e) { console.error('[MissionLoader] callback error:', e); }
-        }
-        _callbacks = [];
-
-        _fireEvent('missionsLoaded', { allMissionData: window.allMissionData });
-        // Generic event generalPluginStuff.js listens for as a safety net
-        // (it double-checks a remote plugin is active once data is in).
-        _fireEvent('dataLoaded', { allData: window.allData });
+        await markReady();
 
         // Phase B: fill in everything else in the background, unawaited —
         // the page is already usable at this point.

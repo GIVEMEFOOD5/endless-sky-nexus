@@ -269,6 +269,16 @@
     let cur = score(derived(base, fit));
     const maxSteps = o.maxSteps || 400;
     const log = [];
+    // Progress for the loading bar: how many outfits added so far and which
+    // stage it's at (p.onProgress, called at most ~10 times a second).
+    let steps = 0, lastReport = 0;
+    const progress = (phase, force) => {
+      if (typeof p.onProgress !== 'function') return;
+      const now = Date.now();
+      if (!force && now - lastReport < 100) return;
+      lastReport = now;
+      p.onProgress({ phase, steps, outfits: fit ? [...fit.counts.values()].reduce((a, b) => a + b, 0) : 0 });
+    };
     const can = c => (fit.counts.get(c.name) || 0) < (c.unique ? 1 : c.maxCount);
     const PAIR_POOL = 100;
     const growStep = (pool = usable, pairs = true) => {
@@ -353,7 +363,8 @@
       let any = false;
       for (let round = 0; round < 50; round++) {
         let grew = false;
-        for (let step = 0; step < maxSteps && growStep(); step++) grew = true;
+        for (let step = 0; step < maxSteps && growStep(); step++) { grew = true; steps++; progress('adding'); }
+        progress('expanding', true);
         if (expandStep()) grew = true;
         if (!grew) break;
         any = true;
@@ -363,6 +374,7 @@
     growAll();
 
     // clean-up: drop anything that doesn't pull its weight, then refill
+    progress('cleanup', true);
     for (let round = 0; round < 3; round++) {
       let changed = false;
       for (const [name] of [...fit.counts.entries()]) {

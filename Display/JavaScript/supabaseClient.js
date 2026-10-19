@@ -36,7 +36,7 @@ window.supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON
  *        with .eq()/.in()/etc. applied — e.g. filters: q => q.eq('plugin_id', id)
  */
 async function fetchAllRows(table, opts = {}) {
-    const { select = '*', filters, orderBy, pageSize = 1000, concurrency = 6 } = opts;
+    const { select = '*', filters, orderBy, pageSize = 1000, concurrency = 6, onFirstPage } = opts;
     // The first page also asks how many rows there are in total; every other
     // page is then fetched AT THE SAME TIME (a few at once) instead of one
     // after another — with ~150 ms per round trip, 20 pages went from ~3 s to
@@ -66,6 +66,8 @@ async function fetchAllRows(table, opts = {}) {
 
     const first = await run(0, true);
     const rows = first.data || [];
+    // lets a page show the first rows straight away while the rest arrive
+    if (typeof onFirstPage === 'function') { try { onFirstPage(rows.slice(), Number.isFinite(first.count) ? first.count : rows.length); } catch (_) {} }
     if (rows.length < pageSize) return rows;
     const total = Number.isFinite(first.count) ? first.count : null;
     if (total == null) {
