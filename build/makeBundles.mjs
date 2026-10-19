@@ -60,6 +60,60 @@ async function allRows(table, query) {
   }
 }
 
+// ── Table-by-table fallback ──────────────────────────────────────────────
+// Visitors' requests are limited to a few seconds by Supabase. Big plugins
+// can need longer than that to package in one go (error 57014, "canceling
+// statement due to statement timeout"), so if the one-request function
+// fails, build exactly the same answer from ordinary page-by-page requests.
+const eqPlugin = id => `plugin_id=eq.${encodeURIComponent(id)}`;
+async function byIds(table, column, ids, select = '*') {
+  const out = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const list = ids.slice(i, i + 100).join(',');
+    out.push(...await allRows(table, `select=${select}&${column}=in.(${list})&order=${column}`));
+  }
+  return out;
+}
+async function catalogFromTables(pluginId) {
+  const [ships, variants, outfits, effects] = await Promise.all(
+    ['ships', 'variants', 'outfits', 'effects'].map(t => allRows(t, `select=*&${eqPlugin(pluginId)}&order=id`)));
+  const [ship_outfits, variant_outfits] = await Promise.all([
+    byIds('ship_outfits', 'ship_id', ships.map(r => r.id)),
+    byIds('variant_outfits', 'variant_id', variants.map(r => r.id)),
+  ]);
+  const own = new Set(outfits.map(o => o.id));
+  const missing = [...new Set([...ship_outfits, ...variant_outfits].map(r => r.outfit_id))].filter(id => !own.has(id));
+  const extra_outfits = missing.length ? await byIds('outfits', 'id', missing) : [];
+  return { ships, variants, outfits, effects, ship_outfits, variant_outfits, extra_outfits };
+}
+const MAP_MISSION_COLUMNS = 'id,name,display_name,source_plugin,source,destination,stopovers,waypoints,cargo,passengers,payment,rewards,deadline,illegal,repeatable,repeat_limit,npc_count,has_npc_objective,flags,event_triggers,locations,plugin_id,internal_id';
+async function mapFromTables(pluginId) {
+  const [systems, galaxies, wormholes, planets, stars, governments, missions] = await Promise.all([
+    ...['systems', 'galaxies', 'wormholes', 'planets', 'stars', 'governments'].map(t => allRows(t, `select=*&${eqPlugin(pluginId)}&order=id`)),
+    allRows('missions', `select=${MAP_MISSION_COLUMNS}&${eqPlugin(pluginId)}&order=id`),
+  ]);
+  const sysIds = systems.map(r => r.id);
+  const SYS = ['system_links', 'system_fleets', 'system_hazards', 'system_asteroids', 'system_minables', 'system_planets', 'system_trade'];
+  const parts = await Promise.all(SYS.map(t => byIds(t, 'system_id', sysIds)));
+  const wormhole_links = await byIds('wormhole_links', 'wormhole_id', wormholes.map(r => r.id));
+  const withEvents = missions.filter(m => Array.isArray(m.event_triggers) && m.event_triggers.length).map(m => m.id);
+  const mission_raws = withEvents.length ? await byIds('missions', 'id', withEvents, 'id,raw') : [];
+  const out = { systems, galaxies, wormholes, planets, stars, governments, missions, mission_raws, wormhole_links };
+  SYS.forEach((t, i) => { out[t] = parts[i]; });
+  return out;
+}
+let rpcMissing = false;   // functions not installed: don't keep asking for every plugin
+async function viaRpcOrTables(fn, args, fallback) {
+  if (!rpcMissing) {
+    try { return await request(`rpc/${fn}`, args, 1); }
+    catch (err) {
+      if (/PGRST202|Could not find the function/i.test(err.message)) rpcMissing = true;
+      // timeouts and everything else: build it the slower way below
+    }
+  }
+  return fallback();
+}
+
 // Write one file, or several parts if it would be too big for Cloudflare.
 // Every part has the same keys; the site joins the arrays back together.
 function writeBundle(name, data) {
@@ -104,8 +158,8 @@ async function main() {
       const entry = { plugin_id: p.plugin_id };
       const safe = p.output_name.replace(/[^A-Za-z0-9._-]+/g, '_');
       const kinds = {
-        catalog:  () => request('rpc/get_plugin_catalog', { p_plugin_id: p.plugin_id }),
-        map:      () => request('rpc/get_plugin_map',     { p_plugin_id: p.plugin_id }),
+        catalog:  () => viaRpcOrTables('get_plugin_catalog', { p_plugin_id: p.plugin_id }, () => catalogFromTables(p.plugin_id)),
+        map:      () => viaRpcOrTables('get_plugin_map',     { p_plugin_id: p.plugin_id }, () => mapFromTables(p.plugin_id)),
         missions: () => allRows('missions', `select=*&plugin_id=eq.${encodeURIComponent(p.plugin_id)}&order=id`),
       };
       const notes = [];
