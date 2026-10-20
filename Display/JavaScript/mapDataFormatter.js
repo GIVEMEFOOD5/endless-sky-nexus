@@ -262,7 +262,7 @@ function formatWormholes(pluginDataMap) {
                 const key = `${l.from}→${l.to}`;
                 if (seen.has(key)) continue;
                 seen.add(key);
-                out.push({ from: l.from, to: l.to, name: w.name || null });
+                out.push({ from: l.from, to: l.to, name: w.name || null, mappable: !!w.mappable });
             }
         }
     }

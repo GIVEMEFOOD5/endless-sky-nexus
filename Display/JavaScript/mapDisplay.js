@@ -368,9 +368,27 @@ async function _loadBackdropImage(sprite) {
 }
 
 // ── Wormholes ───────────────────────────────────────────────
+// A wormhole only exists once its planet is actually in the system — the
+// game adds many of them later through story events (e.g. "The Eye" only
+// appears when the Wanderers' story opens it). So a link counts only while
+// the system it starts from holds a planet that is that wormhole. Like the
+// game's own map, only "mappable" wormholes are drawn.
+function _activeWormholeLinks() {
+    const inSystem = (sys, name) => (sys.planets || []).some(p => p.wormhole === name || p.name === name);
+    return wormholeLinks.filter(l => {
+        if (!l.mappable) return false;
+        const a = systemsByName.get(l.from);
+        return !!a && (!l.name || inSystem(a, l.name));
+    });
+}
+
 function _drawWormholes(visibleNames, w, h, linkWidth) {
     if (!wormholeLinks.length) return;
-    const pairKeys = new Set(wormholeLinks.map(l => `${l.from}→${l.to}`));
+    const activeLinks = _activeWormholeLinks();
+    // the wormhole marker on systems follows what's actually open right now
+    for (const s of systemsByName.values()) s.wormhole = false;
+    for (const l of activeLinks) { const a = systemsByName.get(l.from), b = systemsByName.get(l.to); if (a) a.wormhole = true; if (b) b.wormhole = true; }
+    const pairKeys = new Set(activeLinks.map(l => `${l.from}→${l.to}`));
     const drawn = new Set();
     const arrow = (x, y, ang, size) => {
         ctx.beginPath();
@@ -384,7 +402,7 @@ function _drawWormholes(visibleNames, w, h, linkWidth) {
     ctx.strokeStyle = 'rgba(200,120,255,0.9)';
     ctx.fillStyle = 'rgba(220,150,255,0.95)';
     ctx.lineWidth = Math.max(1.2, linkWidth * 1.8);
-    for (const l of wormholeLinks) {
+    for (const l of activeLinks) {
         const a = systemsByName.get(l.from), b = systemsByName.get(l.to);
         if (!a || !b || !visibleNames.has(a.name) || !visibleNames.has(b.name)) continue;
         const both = pairKeys.has(`${l.to}→${l.from}`);
@@ -1097,6 +1115,8 @@ window.shareMapLocation = _shareLocation;
 
 // Lets other map add-ons (mapTradeHelper.js) point the map at a system.
 window.MapView = {
+    /** Wormhole links open right now (after story events / your save), for checks and debugging. */
+    activeWormholes: () => _activeWormholeLinks().map(l => `${l.name}: ${l.from} → ${l.to}`),
     selectSystem(name, { center = true } = {}) {
         const s = systemsByName.get(name);
         if (!s) return false;
