@@ -200,6 +200,11 @@ function statusBadgeHtml(m) {
     const badgeTitle = overridden
         ? `Recorded as "${m.status.label}" in the save, but ${overrideReason(m)} Shown as Completed based on that.`
         : m.status.label;
+    // background helpers that have run: a plain "Ran" badge and no warning sign —
+    // nothing is wrong with them
+    if (m.status.backgroundHelper && overridden) {
+        return `<span class="mission-status-badge mission-status-badge--done" title="${esc(m.status.unreachableCompletePathReason || '')}">Ran</span>`;
+    }
     const badgeHtml = badge
         ? `<span class="mission-status-badge mission-status-badge--${badge.cls}" title="${esc(badgeTitle)}">${esc(badge.text)}</span>`
         : '';
@@ -487,17 +492,23 @@ document.addEventListener('missionModalAction', (e) => {
 if (HAS_STATUS_HELPER) {
     MissionModal.registerNote(m => {
         if (!m.offer || m.offer.state === 'active') return '';
+        // a background helper that has already run: say so plainly
+        const helperRan = m.status && m.status.backgroundHelper && m.offer.state === 'used_up';
+        const label = helperRan ? 'Already ran — background missions only run once' : m.offer.label;
         const list = m.offer.missing && m.offer.missing.length
             ? `<ul style="margin:6px 0 0;padding-left:18px;">${m.offer.missing.map(x => `<li><code>${esc(x)}</code></li>`).join('')}</ul>` : '';
         const lead = m.offer.state === 'almost' ? 'Still needed:' : m.offer.state === 'not_yet' ? 'Not met yet:' : m.offer.state === 'unknown' ? 'Can’t check from the save:' : '';
-        return `<div class="mission-warning-banner" style="border-color:var(--c-border);">🧭 <strong>${esc(m.offer.label)}</strong>${lead ? ` — ${lead}` : ''}${list}
-          <div style="font-size:0.8rem;color:var(--c-text-dim);margin-top:4px;">You also need to be where the mission is offered.</div></div>`;
+        // "be where it's offered" only matters if it can still be offered
+        const stillOfferable = !['used_up', 'done', 'never'].includes(m.offer.state);
+        return `<div class="mission-warning-banner" style="border-color:var(--c-border);">🧭 <strong>${esc(label)}</strong>${lead ? ` — ${lead}` : ''}${list}
+          ${stillOfferable ? '<div style="font-size:0.8rem;color:var(--c-text-dim);margin-top:4px;">You also need to be where the mission is offered.</div>' : ''}</div>`;
     });
 }
 
 if (HAS_STATUS_HELPER) {
     MissionModal.registerNote(m => {
         if (!m.status || !m.status.unreachableCompletePath) return '';
+        if (m.status.backgroundHelper) return `<div class="mission-warning-banner" style="border-color:var(--c-border);">ℹ️ ${esc(m.status.unreachableCompletePathReason || '')}</div>`;
         const overridden = effectiveStatus(m) !== m.status.status;
         const followUp = overridden
             ? `Already shown as Completed above based on this — no action needed unless you disagree.`

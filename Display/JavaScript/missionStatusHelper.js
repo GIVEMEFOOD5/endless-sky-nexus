@@ -146,6 +146,12 @@ function _rewardThenSelfResolve(rawEntries) {
     const kids = entry.children || [];
     const resolveAction = kids.find(c => SELF_RESOLVE_KEYS.has(c.key) && (!c.values || c.values.length === 0));
     if (!resolveAction) continue;
+    // Background helper: ends itself the moment it's offered, after doing its
+    // work (starting an event, setting conditions …). Common for plugin
+    // "compatibility" missions — "failed" there just means it has run.
+    const trigger = entry.values && entry.values[0];
+    if (trigger === 'offer') return { trigger, resolveAction: resolveAction.key, helper: true,
+      actions: kids.filter(c => !SELF_RESOLVE_KEYS.has(c.key)).map(c => c.key) };
     const hasReward = kids.some(c => REWARD_ACTION_KEYS.has(c.key));
     if (hasReward) {
       return { trigger: entry.values && entry.values[0], resolveAction: resolveAction.key };
@@ -165,6 +171,10 @@ function detectQuestionableResolution(rawEntries) {
   }
 
   const b = _rewardThenSelfResolve(rawEntries);
+  if (b && b.helper) {
+    const did = b.actions.includes('event') ? 'starts its story event' : b.actions.length ? 'makes its changes' : 'is checked';
+    return { flagged: true, helper: true, reason: `A background mission: as soon as it's offered it ${did} and then ends itself with "${b.resolveAction}". So "${b.resolveAction === 'fail' ? 'failed' : 'declined'}" just means it has run — nothing went wrong.` };
+  }
   if (b) {
     return { flagged: true, reason: `Its "on ${b.trigger}" block grants a reward and then calls "${b.resolveAction}" right after — that looks like a deliberate way to end the mission after a one-time payout, not a real ${b.resolveAction === 'fail' ? 'failure' : 'decline'}.` };
   }
@@ -517,7 +527,7 @@ function decorateMissions(missions, save) {
     if (!status.unreachableCompletePath && !status.isHeld && m.raw) {
       const detected = detectQuestionableResolution(m.raw);
       if (detected.flagged) {
-        status = { ...status, unreachableCompletePath: true, unreachableCompletePathReason: detected.reason };
+        status = { ...status, unreachableCompletePath: true, unreachableCompletePathReason: detected.reason, backgroundHelper: !!detected.helper };
       }
     }
     // Resolved as failed/declined/mixed, but the mission's own "to complete"
