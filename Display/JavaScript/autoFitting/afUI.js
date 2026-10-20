@@ -69,7 +69,7 @@
   }
   function allShips() {
     const m = new Map();
-    for (const p of Object.values(window.AfStats.activeData())) for (const s of [...(p.ships || []), ...(p.variants || [])]) if (s && s.name && !m.has(s.name)) m.set(s.name, s);
+    for (const p of Object.values(window.AfStats.gameData())) for (const s of [...(p.ships || []), ...(p.variants || [])]) if (s && s.name && !m.has(s.name)) m.set(s.name, s);
     return m;
   }
   function shipLoadout(s, ships) {
@@ -97,7 +97,7 @@
   // Type-ahead for ships: matches the display name or the internal name, and
   // lists the display name first with the internal name dimmed underneath.
   function shipSearch(q) {
-    if (window.NameSearch) return window.NameSearch.search('ships', q);
+    if (window.NameSearch) { const game = allShips(); return window.NameSearch.search('ships', q).filter(it => game.has(it.value)); }
     const SNs = SN(), out = [];
     for (const s of allShips().values()) {
       const label = SNs ? SNs.label(s) : s.name, internal = SNs ? SNs.internal(s) : '';
@@ -286,7 +286,7 @@
     body.innerHTML = `
       <p style="margin:0 0 10px;font-size:0.86rem;color:var(--c-text-mid);">Fitting <strong>${h(d.name || 'this ship')}</strong>${d._sourceShip ? ` (${h(shipLabel(d._sourceShip))} hull)` : ''}.
         ${save ? `Using <strong>${h(save.pilot)}</strong>'s save for what you can reach.` : 'Open a save on Saves &amp; Account and it will use where you\'ve been, your licences and reputations.'}
-        <span style="display:block;font-size:0.78rem;color:var(--c-text-dim);">Only outfits and ships from your selected plugins are used (${Object.keys(window.AfStats.activeData()).filter(k => k !== '__local_builds__').map(h).join(', ') || 'none'}) — change them with ☰ Select Plugins.</span></p>
+        <span style="display:block;font-size:0.78rem;color:var(--c-text-dim);">Only outfits and ships from your selected plugins are used (${Object.keys(window.AfStats.gameData()).map(h).join(', ') || 'none'}) — change them with ☰ Select Plugins.</span></p>
       ${missingHull().length ? `<p style="margin:0 0 10px;padding:8px 10px;border:1px solid var(--c-warn-text,#fbbf24);border-radius:8px;font-size:0.84rem;">
         ⚠ Auto-fit needs a hull to work with. This ship is missing: <strong>${missingHull().map(h).join(', ')}</strong>.
         Set them in the Attributes section, or use ✏️ Edit Existing / 🔧 Outfit Existing to start from a game ship.</p>` : ''}

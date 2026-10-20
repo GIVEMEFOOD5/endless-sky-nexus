@@ -260,6 +260,13 @@
     return Object.fromEntries(Object.entries(all).filter(([k]) => on.has(k)));
   }
 
+  /** The selected plugins' game data only — without "Local Builds" (your own designs). */
+  function gameData() {
+    const out = {};
+    for (const [k, v] of Object.entries(activeData())) if (k !== '__local_builds__' && !(v && v._isLocal)) out[k] = v;
+    return out;
+  }
+
   /** Ids the selected plugins go by (output names and "Source/folder" plugin ids). null = no filter. */
   function activePluginIds() {
     const DL = typeof window !== 'undefined' && window.DataLoader;
@@ -341,5 +348,5 @@
   function statLabel(id) { return id.startsWith('attr:') ? `${id.slice(5)} (attribute)` : (STAT_BY_ID.get(id) || { label: id }).label; }
 
   return { derive, fromTotals, totals, weaponStats, warnings, isSecondary, hullAttrs, fmtTime, activeData, activePluginIds, activeLocations,
-           STATS, statValue, statLabel, verify, DAMAGE_KEYS };
+           STATS, statValue, statLabel, verify, gameData, DAMAGE_KEYS };
 });

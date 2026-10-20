@@ -53,8 +53,14 @@
     // the user's own designs, from every builder fleet
     const fleets = window.FleetStore && typeof window.FleetStore.list === 'function' ? window.FleetStore.list() : [];
     const designs = fleets.length ? fleets.flatMap(f => f.ships || []) : (typeof sbFleet !== 'undefined' ? sbFleet : []);
+    const outfitNames = new Set();
+    for (const p of Object.values(window.AfStats.gameData())) for (const o of p.outfits || []) if (o && o.name) outfitNames.add(o.name);
+    const allHulls = new Set(seen);
     for (const d of designs) {
       if (!d || (excludeId != null && d.id === excludeId)) continue;
+      // a design built with a plugin you've since switched off isn't a fair comparison
+      if (d._sourceShip && !allHulls.has(d._sourceShip)) continue;
+      if (outfitList(d.outfits).some(([n]) => !outfitNames.has(n))) continue;
       const base = S.hullAttrs(d);
       if (!num(base.mass)) continue;
       out.push({ name: d.name || 'Unnamed design', source: 'yours', category: base.category || null, hullMass: num(base.mass), base, outs: outfitList(d.outfits) });
