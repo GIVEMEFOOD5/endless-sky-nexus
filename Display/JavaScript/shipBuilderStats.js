@@ -62,6 +62,11 @@ const SBS = (() => {
     //  TAB DEFINITIONS
     // ─────────────────────────────────────────────────────────────────────────
 
+    // Each card takes the shared ItemStats rows (raw attributes AND the game's
+    // computed stats) whose section — decided by AttributeSections from the
+    // attribute definitions — is one of `canonical`. `subFilter` only splits a
+    // section into smaller cards by the row's own name; `only` picks raw
+    // attributes ('raw') or calculated stats ('computed').
     const TAB_DEFS = [
         {
             id: 'combat',
@@ -69,7 +74,6 @@ const SBS = (() => {
             sections: [
                 { title: '🛡 Shields',            canonical: ['Shields & Hull'], subFilter: /shield/i },
                 { title: '🔧 Hull',               canonical: ['Shields & Hull'], subFilter: /hull/i },
-                { title: '🔥 Heat & Cooling',     canonical: ['Energy'], subFilter: /heat|cool|temperature/i },
                 { title: '⚡ Damage Protections', canonical: ['Protection'] },
                 { title: '🧪 Status Resistances', canonical: ['Resistance'] },
                 { title: '⏱ Regen Delays',        canonical: ['Shields & Hull'], subFilter: /delay/i },
@@ -80,22 +84,21 @@ const SBS = (() => {
             id: 'movement',
             label: '🚀 Movement',
             sections: [
-                { title: '⚖ Mass & Inertia',   canonical: ['General', 'Engines'], subFilter: /mass|drag|inertia/i },
-                { title: '🔹 Thrust',            canonical: ['Engines'], subFilter: /thrust/i },
-                { title: '🔁 Reverse Thrust',    canonical: ['Engines'], subFilter: /reverse/i },
-                { title: '🔥 Afterburner',       canonical: ['Engines'], subFilter: /afterburner/i },
-                { title: '↪ Turning',            canonical: ['Engines'], subFilter: /turn/i },
+                { title: '📈 Performance',      canonical: ['Engines'], only: 'computed' },
+                { title: '⚖ Mass & Inertia',   canonical: ['General', 'Engines'], subFilter: /mass|drag|inertia/i, only: 'raw' },
+                { title: '🔹 Thrust',            canonical: ['Engines'], subFilter: /^(?!.*(reverse|afterburner)).*thrust/i, only: 'raw' },
+                { title: '🔁 Reverse Thrust',    canonical: ['Engines'], subFilter: /reverse/i, only: 'raw' },
+                { title: '🔥 Afterburner',       canonical: ['Engines'], subFilter: /afterburner/i, only: 'raw' },
+                { title: '↪ Turning',            canonical: ['Engines'], subFilter: /turn/i, only: 'raw' },
             ],
         },
         {
             id: 'power',
             label: '⚡ Power',
             sections: [
-                { title: '⚡ Energy',   canonical: ['Energy'], subFilter: /(^|\s)energy(\s|$)/i },
-                { title: '⛽ Fuel',     canonical: ['Energy'], subFilter: /fuel/i },
-                { title: '☀ Solar',    canonical: ['Energy'], subFilter: /solar/i },
-                { title: '🌀 Ramscoop', canonical: ['Energy'], subFilter: /ramscoop/i },
-                { title: '🔥 Heat',    canonical: ['Energy'], subFilter: /heat|cool|temperature/i },
+                { title: '⚡ Energy', canonical: ['Energy'] },
+                { title: '🔥 Heat',   canonical: ['Heat'] },
+                { title: '⛽ Fuel',   canonical: ['Jump'], subFilter: /fuel|ramscoop/i },
             ],
         },
         {
@@ -104,7 +107,7 @@ const SBS = (() => {
             // weapon tab uses custom renderer (_tabWeapons) — sections here
             // are only used for the Capacity card; see capSec below.
             sections: [
-                { title: '📦 Capacity',        canonical: ['Cargo', 'Engines', 'Hardpoints'], subFilter: /capacity|outfit space|gun port|turret/i },
+                { title: '📦 Capacity',        canonical: ['Cargo', 'Engines', 'Hardpoints'], subFilter: /capacity|outfit space|gun port|turret/i, only: 'raw' },
                 { title: '💥 Damage & Firing', canonical: ['Weapon DPS'], subFilter: /damage|firing/i },
                 { title: '🎯 Tracking',        canonical: ['Weapon DPS'], subFilter: /tracking/i },
                 { title: '💥 Piercing',        canonical: ['Weapon DPS'], subFilter: /piercing/i },
@@ -115,12 +118,13 @@ const SBS = (() => {
             id: 'crew',
             label: '👤 Misc',
             sections: [
+                { title: '💰 General',     canonical: ['General'] },
                 { title: '👥 Crew',        canonical: ['Crew'] },
-                { title: '📦 Cargo',       canonical: ['Cargo'], subFilter: /cargo/i },
-                { title: '📦 Capacity',    canonical: ['Cargo', 'Engines', 'Hardpoints', 'Crew'], subFilter: /capacity|outfit space|gun port|turret|bunks/i },
+                { title: '📦 Cargo',       canonical: ['Cargo'] },
                 { title: '🛸 Cloaking',    canonical: ['Cloaking'] },
                 { title: '🧭 Navigation',  canonical: ['Jump'] },
                 { title: '🔭 Scanning',    canonical: ['Scanning'] },
+                { title: '✨ Special',     canonical: ['Special'] },
             ],
         },
     ];
@@ -259,17 +263,28 @@ const SBS = (() => {
         catch (e) { console.warn('[SBS] WeaponStats error:', e); return null; }
     }
 
-    // Total heat capacity / max sustainable heat production. Delegates to
-    // ItemStats.getHeatDerivedRows and reshapes the row list back into the
-    // {totalHeatCapacity, maxSustainableHeatProd} pair this file's render
-    // functions already expect, so nothing downstream needs to change.
-    function _computeHeatDerived(eff, ship, outfitIdx) {
-        const rows  = window.ItemStats.getHeatDerivedRows(_normalizedShipItem(ship), eff, outfitIdx);
-        const byKey = Object.fromEntries(rows.map(r => [r.key, r.raw]));
-        return {
-            totalHeatCapacity:      byKey['_hd_totalHeatCap'] ?? null,
-            maxSustainableHeatProd: byKey['_hd_maxSustHeat']  ?? null,
-        };
+    // The shared rows for this ship (raw + computed), tidied — see _renderContent.
+    function _shipRows(ship, eff, ad, outfitIdx) {
+        const IS = window.ItemStats;
+        const all = [
+            ...IS.getRawAttributeRows(ad, eff),
+            ...IS.getHeatDerivedRows(_normalizedShipItem(ship), eff, outfitIdx),
+            ...IS.getUniqueDerivedRows(ad, eff),
+        ];
+        return IS.tidyRows ? IS.tidyRows(ad, all) : all;
+    }
+    const _isComputed = r => r.source !== window.ItemStats.SOURCE.RAW && r.source !== window.ItemStats.SOURCE.HARDPOINT;
+    function _rowCard(r) {
+        const raw = Number(r.raw);
+        if (!r.value || (isFinite(raw) && raw === 0)) return '';
+        return _card(r.label, window.ItemStats.formatRowDisplay(r), r.unit || '', _isComputed(r));
+    }
+    function _rowsFor(rows, sec) {
+        const wanted = new Set(sec.canonical);
+        return rows.filter(r => wanted.has(r.section)
+            && (!sec.subFilter || sec.subFilter.test(`${r.key || ''} ${r.label || ''}`))
+            && (sec.only !== 'raw' || !_isComputed(r))
+            && (sec.only !== 'computed' || _isComputed(r)));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -334,18 +349,22 @@ const SBS = (() => {
         const eff          = _buildEffectiveAttrs(ship, outfitIdx);
         const wData         = _computeWeaponStats(ship, outfitIdx);
         const ad           = window.attrDefs || null;
-        const heatDerived  = _computeHeatDerived(eff, ship, outfitIdx);
+        // The same rows the Data Viewer, Compare and outfit expander show: raw
+        // attributes, the game's computed stats (max speed, acceleration, turn
+        // rate, afterburner …), heat figures — sorted into sections and tidied
+        // by ItemStats/AttributeSections.
+        const rows = _shipRows(ship, eff, ad, outfitIdx);
 
         let html = '';
         if (_activeTab === 'other') {
-            html = _tabOther(eff, ad, ship);
+            html = _tabOther(rows, ship, ad);
         } else if (_activeTab === 'everything') {
-            html = _tabEverything(eff, ad, ship, wData, heatDerived);
+            html = _tabEverything(rows, ship, wData);
         } else if (_activeTab === 'weapons') {
-            html = _tabWeapons(wData, eff, ad, outfitIdx);
+            html = _tabWeapons(wData, eff, ad, outfitIdx, rows);
         } else {
             const tabDef = TAB_DEFS.find(t => t.id === _activeTab);
-            if (tabDef) html = _tabKeyword(eff, ad, tabDef, heatDerived);
+            if (tabDef) html = _tabKeyword(rows, tabDef);
         }
 
         el.innerHTML = html || `<div class="sbs-empty">No data available.</div>`;
@@ -362,37 +381,12 @@ const SBS = (() => {
     //  here; it's always AttributeSections.classify()'s call.
     // ─────────────────────────────────────────────────────────────────────────
 
-    function _tabKeyword(eff, ad, tabDef, heatDerived) {
+    function _tabKeyword(rows, tabDef) {
         let html = '';
-
         for (const sec of tabDef.sections) {
-            let matchedKeys = window.AttributeSections.keysInSections(ad, eff, sec.canonical);
-            if (sec.subFilter) matchedKeys = matchedKeys.filter(k => sec.subFilter.test(k));
-            matchedKeys.sort((a, b) => a.localeCompare(b));
-
-            let cards = '';
-            for (const key of matchedKeys) {
-                const raw = eff[key];
-                if (typeof raw !== 'number' || raw === 0) continue;
-                const rec  = window.ItemStats.getAttrRecord(ad, key);
-                const mult = rec?.displayMultiplier ?? 1;
-                const unit = rec?.displayUnit        ?? '';
-                cards += _card(window.ItemStats.labelForKey(key), raw * mult, unit);
-            }
-
-            // Inject derived heat values into any heat/cooling/temperature card
-            const isHeatSection = sec.canonical.includes('Energy') &&
-                sec.subFilter && /heat|cool/i.test(sec.subFilter.source);
-            if (isHeatSection && heatDerived) {
-                if (heatDerived.totalHeatCapacity != null)
-                    cards += _card('Total Heat Capacity (calc)', heatDerived.totalHeatCapacity, '', true);
-                if (heatDerived.maxSustainableHeatProd != null)
-                    cards += _card('Max Sustainable Heat/s (calc)', heatDerived.maxSustainableHeatProd, '/s', true);
-            }
-
+            const cards = _rowsFor(rows, sec).map(_rowCard).join('');
             if (cards) html += _section(sec.title, cards);
         }
-
         return html || `<div class="sbs-empty">No ${tabDef.label} attributes found.</div>`;
     }
 
@@ -478,21 +472,12 @@ const SBS = (() => {
 </div>`;
     }
 
-    function _tabWeapons(wData, eff, ad, outfitIdx) {
+    function _tabWeapons(wData, eff, ad, outfitIdx, rows) {
         // ── Capacity section — same canonical sections + subFilter used by
         // the "weapons" tab definition above, so this stays in sync
         // automatically if that definition changes.
         const capSec = TAB_DEFS.find(t => t.id === 'weapons').sections[0];
-        let capKeys = window.AttributeSections.keysInSections(ad, eff, capSec.canonical);
-        if (capSec.subFilter) capKeys = capKeys.filter(k => capSec.subFilter.test(k));
-        capKeys.sort();
-        let capCards = '';
-        for (const key of capKeys) {
-            const raw = eff[key];
-            if (typeof raw !== 'number' || raw === 0) continue;
-            const rec = window.ItemStats.getAttrRecord(ad, key);
-            capCards += _card(window.ItemStats.labelForKey(key), raw * (rec?.displayMultiplier ?? 1), rec?.displayUnit ?? '');
-        }
+        const capCards = _rowsFor(rows || [], capSec).map(_rowCard).join('');
         const capSection = capCards ? _section('📦 Capacity', capCards) : '';
 
         if (!wData || !wData.weaponCount)
@@ -539,64 +524,26 @@ const SBS = (() => {
     //  ship that don't match any covered section.
     // ─────────────────────────────────────────────────────────────────────────
 
-    function _tabOther(eff, ad, ship) {
-        const uncoveredKeys = Object.keys(eff)
-            .filter(key => !_isCovered(ad, key) && !key.startsWith('_'))
-            .sort();
-
-        let cards = '';
-        for (const key of uncoveredKeys) {
-            const raw = eff[key];
-            if (typeof raw !== 'number' || raw === 0) continue;
-            const rec = window.ItemStats.getAttrRecord(ad, key);
-            cards += _card(window.ItemStats.labelForKey(key), raw * (rec?.displayMultiplier ?? 1), rec?.displayUnit ?? '');
-        }
-
-        // String attrs from base ship not covered
-        const strEntries = Object.entries(ship.attributes || {})
-            .filter(([key, val]) => typeof val === 'string' && val && !_isCovered(ad, key))
-            .sort((a, b) => a[0].localeCompare(b[0]));
-
-        for (const [key, val] of strEntries)
-            cards += `<div class="sbs-card"><div class="sbs-label">${_esc(window.ItemStats.labelForKey(key))}</div><div class="sbs-value" style="font-size:.78rem">${_esc(val)}</div></div>`;
-
-        if (!cards)
-            return `<div class="sbs-empty">No additional attributes found.</div>`;
-
-        return `<div class="sbs-section"><div class="sbs-section-title">📋 Uncategorised Attributes</div><div class="sbs-cards">${cards}</div></div>`;
+    function _tabOther(rows, ship, ad) {
+        let cards = rows.filter(r => !_coveredCanonicalSections.has(r.section)).map(_rowCard).join('');
+        // text attributes from the base ship that no tab shows
+        for (const [key, val] of Object.entries(ship.attributes || {}).sort((a, b) => a[0].localeCompare(b[0])))
+            if (typeof val === 'string' && val && isNaN(Number(val)) && !_isCovered(ad, key) && !rows.some(r => r.key === key))
+                cards += `<div class="sbs-card"><div class="sbs-label">${_esc(window.ItemStats.labelForKey(key))}</div><div class="sbs-value" style="font-size:.78rem">${_esc(val)}</div></div>`;
+        if (!cards) return `<div class="sbs-empty">No additional attributes found.</div>`;
+        return _section('📋 Uncategorised Attributes', cards);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  TAB: EVERYTHING
-    //
-    //  Shows ALL numeric attributes in eff (with displayMultiplier applied),
-    //  PLUS weapon DPS data, sorted alphabetically.
-    //  Excludes the raw 'weapon' object on the ship itself (non-numeric anyway).
-    //  Internal keys (_*) are excluded.
+    //  TAB: EVERYTHING — every row, grouped by section (same order everywhere)
     // ─────────────────────────────────────────────────────────────────────────
 
-    function _tabEverything(eff, ad, ship, wData, heatDerived) {
-        // All numeric keys sorted
-        const allKeys = Object.keys(eff)
-            .filter(key => !key.startsWith('_') && typeof eff[key] === 'number' && eff[key] !== 0)
-            .sort();
-
-        let cards = '';
-        for (const key of allKeys) {
-            const raw = eff[key];
-            const rec = window.ItemStats.getAttrRecord(ad, key);
-            cards += _card(window.ItemStats.labelForKey(key), raw * (rec?.displayMultiplier ?? 1), rec?.displayUnit ?? '');
-        }
-
-        // String attributes
-        const strEntries = Object.entries(ship.attributes || {})
-            .filter(([key, val]) => typeof val === 'string' && val && !key.startsWith('_'))
-            .sort((a, b) => a[0].localeCompare(b[0]));
-
-        for (const [key, val] of strEntries)
-            cards += `<div class="sbs-card"><div class="sbs-label">${_esc(window.ItemStats.labelForKey(key))}</div><div class="sbs-value" style="font-size:.78rem">${_esc(val)}</div></div>`;
-
-        // Weapon DPS block
+    function _tabEverything(rows, ship, wData) {
+        const bySection = {};
+        for (const r of rows) (bySection[r.section] = bySection[r.section] || []).push(r);
+        let html = '';
+        for (const sec of window.AttributeSections.orderSections(Object.keys(bySection)))
+            html += _section(sec, bySection[sec].map(_rowCard).join(''));
         let wCards = '';
         if (wData && wData.weaponCount) {
             wCards += _card('Total DPS',    wData.totalDps,          'dps');
@@ -604,25 +551,9 @@ const SBS = (() => {
             wCards += _card('Hull DPS',     wData.hullDps,           'dps');
             wCards += _card('Weapon Types', wData.weaponCount,       '');
             wCards += _card('Total Mounts', wData.totalWeaponMounts, '');
-            for (const [key, val] of Object.entries(wData.dpsByType || {}))
-                if (val) wCards += _card(window.ItemStats.labelForKey(key.replace(/ damage$/, '')) + ' DPS', val, 'dps');
         }
-
-        // Derived heat values
-        let hCards = '';
-        if (heatDerived) {
-            if (heatDerived.totalHeatCapacity != null)
-                hCards += _card('Total Heat Capacity (calc)', heatDerived.totalHeatCapacity, '', true);
-            if (heatDerived.maxSustainableHeatProd != null)
-                hCards += _card('Max Sustainable Heat/s (calc)', heatDerived.maxSustainableHeatProd, '/s', true);
-        }
-
-        if (!cards && !wCards && !hCards)
-            return `<div class="sbs-empty">No attributes found.</div>`;
-
-        return (cards  ? `<div class="sbs-section"><div class="sbs-section-title">🌐 All Attributes</div><div class="sbs-cards">${cards}</div></div>` : '')
-             + (hCards ? `<div class="sbs-section"><div class="sbs-section-title">🔥 Derived Heat</div><div class="sbs-cards">${hCards}</div></div>` : '')
-             + (wCards ? `<div class="sbs-section"><div class="sbs-section-title">🔫 Weapon DPS</div><div class="sbs-cards">${wCards}</div></div>` : '');
+        html += _section('🔫 Weapon DPS', wCards);
+        return html || `<div class="sbs-empty">No attributes found.</div>`;
     }
 
     // ─────────────────────────────────────────────────────────────────────────

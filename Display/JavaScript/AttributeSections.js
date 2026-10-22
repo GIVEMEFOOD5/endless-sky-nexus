@@ -77,14 +77,15 @@ window.AttributeSections = (() => {
     const DOMAIN_WORDS = [
         ['Cloaking',       /cloak/i],
         ['Shields & Hull', /shield|hull/i],
-        ['Jump',           /jump|hyperdrive|hyperspace|scram|warp/i], // fallback only — usedInNavFunctions is checked first
-        ['Scanning',       /scan/i],
-        ['Crew',           /crew|bunk/i],
-        ['Heat',           /heat|cool/i],
-        ['Energy',         /energy|solar|fuel|ramscoop|generation/i],
-        ['Engines',        /thrust|turn|veloc|drag|inertia|reverse|afterburner/i],
-        ['Cargo',          /cargo/i],
+        ['Jump',           /jump|hyperdrive|hyperspace|scram|warp|\bfuel\b|ramscoop/i],
+        ['Cargo',          /cargo|passenger/i],
+        ['Scanning',       /scan|jamming|interference|tactical|atmosphere|asteroid/i],
+        ['Crew',           /crew|bunk|capture|boarding/i],
+        ['Heat',           /heat|cool|dissipation/i],
+        ['Energy',         /energy|solar|battery|generation|consumption/i],
+        ['Engines',        /thrust|turn|steer|veloc|drag|inertia|reverse|afterburner|acceleration|engine/i],
     ];
+
 
     function _matchDomain(text) {
         if (!text) return null;
@@ -92,25 +93,11 @@ window.AttributeSections = (() => {
         return null;
     }
 
-    // ── The only other hardcoded table: the 5 capacity keys ShipInfoDisplay
-    // itself groups together (shipDisplay.capacityDisplay in attrDefs.json).
-    // Given directly by the game's own display code — we're not inventing
-    // this grouping, just routing it to the right section name. Needed
-    // ahead of the usedInShipFunctions check because e.g. "outfit space" is
-    // also read by Scan() (for scan-time calc), which would otherwise
-    // misroute it to Scanning instead of its true home, Cargo.
-    const CAPACITY_SECTION = {
-        'outfit space':    'Cargo',
-        'weapon capacity': 'Cargo',
-        'engine capacity': 'Engines',
-        'gun ports':       'Hardpoints',
-        'turret mounts':   'Hardpoints',
-    };
 
     // Ship/outfit identity & economy fields with no dedicated engine
     // subsystem of their own — everything else that doesn't match falls
     // through to 'Other' rather than being force-fit here.
-    const GENERAL_RE = /^(mass|cost|category|series|index)\b/i;
+    const GENERAL_RE = /\b(mass|cost|category|series|index)\b/i;
 
     // rec.area → this file's canonical section, for the last-resort
     // fallback (see v3 note above). Only areas this file has NO existing
@@ -140,48 +127,76 @@ window.AttributeSections = (() => {
      *   for the rare attribute nothing else can resolve. Keep this short —
      *   it's a pressure release, not the primary mechanism.
      */
+    // Lists the parser read out of the game's own source, cached per attrDefs.
+    let _structCache = { defs: null };
+    function _structure(attrDefs) {
+        if (_structCache.defs === attrDefs) return _structCache;
+        const refs = text => new Set([...String(text || '').matchAll(/\[([^\]]+)\]/g)].map(m => m[1]));
+        const energy = new Set(), heat = new Set();
+        for (const row of attrDefs?.shipDisplay?.energyHeatTable || []) {
+            for (const k of refs(row.energyFormula)) energy.add(k);
+            for (const k of refs(row.heatFormula)) heat.add(k);
+        }
+        _structCache = {
+            defs: attrDefs,
+            movement: new Set(attrDefs?.movementSystem?.attributes || []),            // the game's motion physics
+            capacity: new Set((attrDefs?.shipDisplay?.capacityDisplay || []).map(c => c.attributeKey)), // the game's "space" list
+            energy, heat,                                                             // the game's energy/heat table
+        };
+        return _structCache;
+    }
+
     function classify(attrDefs, key, overrides) {
         if (overrides && overrides[key]) return overrides[key];
-
+        const k = String(key || '').toLowerCase();
         const rec = _getAttrRecord(attrDefs, key);
-        if (!rec) return _matchDomain(key) || 'Other';
+        const st = _structure(attrDefs);
 
-        // 1. Explicit capacity grouping straight from ShipInfoDisplay's own table.
-        if (CAPACITY_SECTION[key]) return CAPACITY_SECTION[key];
+        // 1. Where the GAME uses it, from the attribute definitions:
+        //    its motion physics, its jump navigation.
+        if (st.movement.has(k)) return 'Engines';
+        if (rec?.usedInNavFunctions?.length) return 'Jump';
 
-        // 2. Jump navigation — a real ShipJumpNavigation:: method reads this key.
-        if (rec.usedInNavFunctions?.length) return 'Jump';
+        // 2. What KIND of attribute it is (parser flags).
+        if (rec) {
+            if (rec.isStatusResistance || rec.isStatusResistanceCost) return 'Resistance';
+            if (rec.isProtection || rec.isStatusProtection)           return 'Protection';
+            if (rec.isBoolean || rec.area === 'Special / Flags')       return 'Special';
+        }
+        if (/ resistance$/.test(k)) return 'Resistance';
+        if (/ protection$/.test(k)) return 'Protection';
+        if (/ damage$/.test(k)) return 'Weapon DPS';                    // what weapons deal
+        if (rec?.isWeaponStat) return 'Weapon DPS';
 
-        // 3. Real Ship:: engine functions reading this key — match on the
-        //    FUNCTION's name, which already encodes its subsystem.
+        // 3. Its own name, read with a general vocabulary (shield…, cargo…,
+        //    scan…, heat…). This comes before "which code reads it": the
+        //    cloaking code reads shield generation, the scan code reads cargo
+        //    space — but the name says what they are.
+        const nameHit = _matchDomain(k);
+        if (nameHit) return nameHit;
+        if (GENERAL_RE.test(k)) return 'General';
+        if (/\bmounts?\b|\bports?\b|\banchor\b|\bbays?\b/.test(k)) return 'Hardpoints';
+        // "sidewinder capacity", "torpedo capacity" … — how much a launcher holds
+        if (/ capacity$/.test(k) && !st.capacity.has(k)) return 'Ammo Consumption';
+
+        // 4. The game's own display tables: its capacity list, its energy/heat table.
+        if (st.capacity.has(k)) return 'Cargo';
+        if (st.heat.has(k)) return 'Heat';
+        if (st.energy.has(k)) return 'Energy';
+
+        if (!rec) return 'Other';
+
+        // 5. What its description says, then the names of the game functions that read it.
+        const purposeHit = _matchDomain(rec.tooltip || rec.description);
+        if (purposeHit) return purposeHit;
         if (rec.usedInShipFunctions?.length) {
             for (const fnName of rec.usedInShipFunctions) {
                 const hit = _matchDomain(fnName);
                 if (hit) return hit;
             }
         }
+        if (rec.isWeaponDataKey) return 'Weapon DPS';
 
-        // 4. Semantic flags computed by the parser from real damage/status data.
-        if (rec.isStatusResistance || rec.isStatusResistanceCost) return 'Resistance';
-        if (rec.isProtection || rec.isStatusProtection)           return 'Protection';
-        if (rec.isWeaponStat || rec.isWeaponDataKey)               return 'Weapon DPS';
-
-        // 5. Fall back to the key's own name, then its stated purpose (tooltip).
-        const nameHit = _matchDomain(key);
-        if (nameHit) return nameHit;
-
-        const purposeHit = _matchDomain(rec.tooltip || rec.description);
-        if (purposeHit) return purposeHit;
-
-        if (GENERAL_RE.test(key)) return 'General';
-
-        // 6. Last resort: the parser's own coarse area classification
-        // (attribute-area-classification.md §3), for the two real
-        // categories nothing above has any coverage for at all —
-        // Economy (income/maintenance/operating costs) and Special/Flags
-        // (boolean ship-behaviour permissions) — without guessing from
-        // the key's name. See AREA_FALLBACK above for why only these two
-        // are mapped.
         const areaHit = AREA_FALLBACK[rec.area];
         if (areaHit) return areaHit;
 

@@ -48,6 +48,7 @@ const SOURCE = {
     SHIP_FN:        'shipFn',         // a real Ship:: function formula
     ENERGY_HEAT:    'energyHeat',     // an energy/heat table row
     LABEL_PAIR:     'labelPair',      // a ShipInfoDisplay label/value pair
+    FN_VARIANT:     'fnVariant',      // a game function shown both ways (e.g. with afterburner)
     TIME_TO_FULL:   'timeToFull',     // time-to-full shields/hull
     SCAN_RANGE:     'scanRange',      // scan range from scan power
     SCAN_EVASION:   'scanEvasion',    // scan evasion from scan interference
@@ -121,8 +122,8 @@ function labelForKey(key) {
         s = s.slice('_ws_dps_'.length).replace(/_/g, ' ');
         s = s.replace(/\s*damage\s*$/, '').trim() + ' DPS';
     }
-    return s.replace(/([A-Z])/g, ' $1').replace(/_/g, ' ')
-            .replace(/\s+/g, ' ').replace(/^./, c => c.toUpperCase()).trim();
+    return s.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')   // "hullDPS" → "hull DPS", not "hull D P S"
+            .replace(/_/g, ' ').replace(/\s+/g, ' ').replace(/^./, c => c.toUpperCase()).trim();
 }
 
 // Returns the value STRING to display for a row, honouring the enhanced-
@@ -136,7 +137,15 @@ function labelForKey(key) {
 // stored number is appended after the normal value. Rows with no such
 // distinction (rawUnscaled missing, non-numeric, or equal to raw) are
 // returned unchanged — nothing to add.
+// Yes/no attributes (marked in the attribute definitions): the game only checks
+// whether they're there, so a total like "Unplunderable 900" means nothing.
+function isFlagAttribute(key) {
+    const rec = window.attrDefs?.attributes?.[String(key || '').toLowerCase()];
+    return !!(rec && (rec.isBoolean || rec.area === 'Special / Flags'));
+}
+
 function formatRowDisplay(row, opts) {
+    if (row && isFlagAttribute(row.key) && Number(row.raw) > 0) return 'Yes';
     const base = (opts && opts.baseValue !== undefined) ? opts.baseValue : row?.value;
     if (!row || !isEnhancedDetailsEnabled()) return base;
     const rawU = row.rawUnscaled;
@@ -580,6 +589,15 @@ function buildFnResolver(attrDefs, attrs) {
         const fn = fns[fnName];
         if (!fn?.formulas?.length) return 0;
         const formula   = fn.formulas[fn.formulas.length - 1].formula;
+        // first work out every other game function this formula calls, so e.g.
+        // Drag() can use InertialMass() — whatever order they were listed in
+        cache[fnName] = 0;   // guards against a function that (indirectly) calls itself
+        for (const m of formula.matchAll(/\b([A-Z][A-Za-z]+)\s*\(\s*\)/g)) {
+            if (m[1] !== fnName && fns[m[1]]) resolve(m[1], depth + 1);
+        }
+        delete cache[fnName];
+        for (const v of Object.values(fn.attributeVariables || {}))
+            for (const m of String(v).matchAll(/\b([A-Z][A-Za-z]+)\s*\(\s*\)/g)) if (m[1] !== fnName && fns[m[1]]) resolve(m[1], depth + 1);
         const localVars = {};
         for (const [varName, varFormula] of Object.entries(fn.attributeVariables || {})) {
             const vv = evalFormulaDisplay(varFormula, attrs, cache);
@@ -660,10 +678,59 @@ function calcDerivedStats(attrDefs, item, pluginId) {
         });
     }
 
+    // 1b. Game functions with a single on/off setting — e.g. MaxVelocity(bool
+    //     withAfterburner) — shown both ways, labelled from the setting's own
+    //     name ("with afterburner"). Then any other movement function that
+    //     reads everything that setting switches on gets the same "with …"
+    //     version, scaled by how much the setting adds (straight from the game's
+    //     formula): that's how "acceleration with afterburner" is worked out.
+    const humanise = p => p.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+    for (const [fnName, fnData] of Object.entries(fns)) {
+        const pm = String(fnData.params || '').trim().match(/^bool\s+(\w+)$/);
+        if (!pm || !fnData.formulas?.length || /^bool|void/.test(fnData.returnType || '')) continue;
+        const param = pm[1];
+        const formula = fnData.formulas[fnData.formulas.length - 1].formula;
+        if (!new RegExp('\\b' + param + '\\b').test(formula)) continue;
+        const withOn  = evalFormulaDisplay(formula.replace(new RegExp('\\b' + param + '\\b', 'g'), '1'), attrs, fnResolver);
+        const withOff = evalFormulaDisplay(formula.replace(new RegExp('\\b' + param + '\\b', 'g'), '0'), attrs, fnResolver);
+        if (!isFinite(withOn) || !isFinite(withOff) || withOn === 0) continue;
+        const scale  = fnData.displayScale ?? 1, unit = fnData.displayUnit ?? '';
+        const base   = fnName.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase()).trim();
+        const section = window.AttributeSections.classifyComputedKey(attrDefs, `_fn_${fnName}`);
+        if (withOff) push(base, withOff, scale, unit, formula, false, section, SOURCE.FN_VARIANT);
+        if (withOn === withOff) continue;
+        push(`${base} (${humanise(param)})`, withOn, scale, unit, formula, false, section, SOURCE.FN_VARIANT);
+        // the attributes that only count when the setting is on
+        const switched = [...formula.matchAll(new RegExp('\\[([^\\]]+)\\]\\)*\\s*\\*\\s*' + param + '\\b', 'g'))].map(m => m[1]);
+        const readsAll = new Set(fnData.attributesRead || []);
+        if (!switched.length || !withOff) continue;
+        const ratio = withOn / withOff;
+        for (const [otherName, other] of Object.entries(fns)) {
+            if (otherName === fnName || other.params || !other.formulas?.length) continue;
+            const reads = new Set(other.attributesRead || []);
+            if (!switched.every(a => reads.has(a)) || ![...readsAll].every(a => reads.has(a))) continue;
+            const v = fnCache[otherName];
+            if (!v || !isFinite(v)) continue;
+            const oLabel = otherName.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase()).trim();
+            push(`${oLabel} (${humanise(param)})`, v * ratio, other.displayScale ?? 1, other.displayUnit ?? '',
+                 `${oLabel} × ${base} ${humanise(param)} ÷ ${base}`, false,
+                 window.AttributeSections.classifyComputedKey(attrDefs, `_fn_${otherName}`), SOURCE.FN_VARIANT);
+        }
+    }
+
     // 1. Ship function formulas
+    const present = k => { const v = parseFloat(attrs[k]); return isFinite(v) && v !== 0; };
     for (const [fnName, fnData] of Object.entries(fns)) {
         if (shouldSuppressFn(fnName, fnData, knownDisplayFns)) continue;
         const formula = fnData.formulas[fnData.formulas.length - 1].formula;
+        // Not relevant to this ship: it only reads attributes the ship doesn't have
+        // (e.g. turret turn multiplier, inertia reduction)
+        const reads = fnData.attributesRead || [];
+        if (reads.length && !reads.some(present)) continue;
+        // A wrapper that only re-states another game function (e.g. TrueAcceleration
+        // = Acceleration() adjusted for status effects): the same number again
+        const calls = [...new Set([...formula.matchAll(/\b([A-Z][A-Za-z]+)\s*\(\s*\)/g)].map(m => m[1]).filter(n => fns[n]))];
+        if (!reads.length && calls.length === 1) continue;
         const rawVal  = fnCache[fnName] ?? evalFormulaDisplay(formula, attrs, fnResolver);
         if (isNaN(rawVal) || rawVal === 0) continue;
         const scale   = fnData.displayScale  ?? 1;
@@ -678,10 +745,10 @@ function calcDerivedStats(attrDefs, item, pluginId) {
                 const heatPct = rawVal / maxHeat * 100;
                 push('Idle Heat %', heatPct, 1, '%', formula, false, section, SOURCE.SHIP_FN);
             }
-            push(label, rawVal, scale, '', formula, false, section, SOURCE.SHIP_FN);
+            push(label, rawVal, scale, unit, formula, false, section, SOURCE.SHIP_FN);
             continue;
         }
-        push(label, rawVal, scale, '', formula, false, section, SOURCE.SHIP_FN);
+        push(label, rawVal, scale, unit, formula, false, section, SOURCE.SHIP_FN);
         renderedFnKeys.add(`_fn_${fnName}`);
     }
 
@@ -788,7 +855,9 @@ function calcDerivedStats(attrDefs, item, pluginId) {
 // Just the rows that ONLY this function computes (nothing else in the app
 // produces label/value pairs, time-to-full, scan range, or scan evasion).
 function getUniqueDerivedRows(attrDefs, attrsObj) {
-    const UNIQUE = new Set([SOURCE.LABEL_PAIR, SOURCE.TIME_TO_FULL, SOURCE.SCAN_RANGE, SOURCE.SCAN_EVASION]);
+    // game functions too (acceleration, turn rate, max speed …): worked out here in the order
+    // their formulas need, so they don't depend on a fixed list elsewhere
+    const UNIQUE = new Set([SOURCE.LABEL_PAIR, SOURCE.TIME_TO_FULL, SOURCE.SCAN_RANGE, SOURCE.SCAN_EVASION, SOURCE.FN_VARIANT, SOURCE.SHIP_FN]);
     return calcDerivedStats(attrDefs, { attributes: attrsObj }).filter(r => UNIQUE.has(r.source));
 }
 
@@ -1460,9 +1529,38 @@ function getShipStats(item, attrDefs, pluginId, opts) {
     const outfitContribRows = includeOutfits ? getOutfitContributionRows(attrDefs, item, pluginId) : [];
 
     return {
-        isShip: true, rows, outfitDetailSections, outfitContribRows,
+        isShip: true, rows: tidyRows(attrDefs, rows), outfitDetailSections, outfitContribRows,
         effectiveAttrs: eff, weaponData, includeOutfits,
     };
+}
+
+// One pass shared by everything that shows ship stats:
+//  • a computed row that landed in a catch-all section ("Special", "Derived
+//    Stats", "Other") goes where an attribute of the same name would;
+//  • the same stat arriving twice (raw + computed copy, "Required crew" /
+//    "Required Crew", "Hull DPS" twice) is shown once — the first wins, and raw
+//    attributes come first;
+//  • a computed row with exactly the same value as another computed row in its
+//    section is the same thing under another name ("Max Heat" = "Total Heat
+//    Capacity").
+function tidyRows(attrDefs, rows) {
+    const norm = l => String(l).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const seen = new Set(), seenValue = new Set(), out = [];
+    for (let row of rows) {
+        const computed = row.source !== SOURCE.RAW && row.source !== SOURCE.HARDPOINT;
+        if (computed && ['Special', 'Derived Stats', 'Other'].includes(row.section)) {
+            const s = window.AttributeSections.classify(attrDefs, String(row.label).toLowerCase());
+            if (s && s !== 'Other') row = { ...row, section: s };
+        }
+        const k = norm(row.label);
+        if (seen.has(k)) continue;
+        const vk = `${row.section}|${row.value}|${row.unit || ''}`;
+        if (computed && seenValue.has(vk)) continue;
+        seen.add(k);
+        seenValue.add(vk);
+        out.push(row);
+    }
+    return out;
 }
 
 // Full stat resolution for a standalone outfit.
@@ -1584,7 +1682,9 @@ window.ItemStats = {
     getOutfitDetailRows, getWeaponDetailRows,
     filterComputedStats, getComputedStatRows, _resolveComputedKeyDependencies,
     getEfficiencyRatioRows, getStackingNotes,
-    getShipStats, getOutfitStats, getEffectStats,
+    getShipStats,
+    tidyRows,
+    isFlagAttribute, getOutfitStats, getEffectStats,
 };
 
 })();

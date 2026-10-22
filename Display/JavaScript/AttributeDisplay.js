@@ -139,8 +139,33 @@ function renderAttributesTabEnhanced(item, attrDefs, currentTab, pluginId) {
         // Base sections: raw/hardpoint/heat rows render plainly; everything
         // else (ship-fn, energy/heat, label-pair, time-to-full, scan, system-
         // aware, ComputedStats-merged) is "derived" and gets the ⚡ styling.
+        // The same stat can arrive twice (a raw attribute and a computed copy,
+        // e.g. "Drag", "Required crew" / "Required Crew", "Hull DPS"): keep
+        // the first one in each section — raw attributes come first.
+        const seenLabel = new Set();
+        const norm = l => String(l).toLowerCase().replace(/[^a-z0-9]/g, '');
+        // Computed rows that landed in a catch-all section ("Special", "Derived
+        // Stats", "Other") go where an attribute of the same name would.
+        const home = row => {
+            if (!['Special', 'Derived Stats', 'Other'].includes(row.section)) return row;
+            const s = window.AttributeSections.classify(attrDefs, String(row.label).toLowerCase());
+            return s && s !== 'Other' ? { ...row, section: s } : row;
+        };
+        const firstOnly = (row, prefix) => {
+            const key = prefix + '|' + norm(row.label);
+            if (seenLabel.has(key)) return false;
+            // a computed stat with exactly the same value as one already shown in
+            // its section is the same thing under another name (e.g. "Max Heat" =
+            // "Total Heat Capacity", "Base Max Velocity" = "Max Velocity")
+            const isComputed = row.source !== window.ItemStats.SOURCE.RAW && row.source !== window.ItemStats.SOURCE.HARDPOINT;
+            const vkey = prefix + '|v|' + row.section + '|' + row.value + '|' + (row.unit || '');
+            if (isComputed && seenLabel.has(vkey)) return false;
+            seenLabel.add(key); seenLabel.add(vkey); return true;
+        };
         const baseSections = {};
-        for (const row of stats.rows) {
+        for (let row of stats.rows) {
+            row = home(row);
+            if (!firstOnly(row, 'base')) continue;
             const isDerived = row.source !== window.ItemStats.SOURCE.RAW && row.source !== window.ItemStats.SOURCE.HARDPOINT;
             const html_ = rowToHtml(row, isDerived ? 'derived' : null);
             (baseSections[row.section] = baseSections[row.section] || []).push(html_);
@@ -149,12 +174,19 @@ function renderAttributesTabEnhanced(item, attrDefs, currentTab, pluginId) {
         // "(with outfits)" sections: derived + outfit-contribution rows only
         // present once outfits are included.
         const withOutfitsSections = {};
-        for (const row of withOutfitsStats.rows) {
-            if (!row.isComputedOutfit) continue; // only rows that change because of outfits
+        // computed stats (max speed, acceleration, turn rate, energy/heat …)
+        // count as "with outfits" when installing the outfits changes them
+        const baseValue = new Map(stats.rows.map(r => [norm(r.label), String(r.value)]));
+        const isRaw = r => r.source === window.ItemStats.SOURCE.RAW || r.source === window.ItemStats.SOURCE.HARDPOINT;
+        for (let row of withOutfitsStats.rows) {
+            const changedComputed = !isRaw(row) && baseValue.get(norm(row.label)) !== String(row.value);
+            if (!row.isComputedOutfit && !changedComputed) continue; // only rows that change because of outfits
+            row = home(row);
+            if (!firstOnly(row, 'with')) continue;
             (withOutfitsSections[row.section] = withOutfitsSections[row.section] || []).push(rowToHtml(row, 'derived'));
         }
-        for (const row of withOutfitsStats.outfitContribRows)
-            (withOutfitsSections[row.section] = withOutfitsSections[row.section] || []).push(rowToHtml(row, 'derived'));
+        for (let row of withOutfitsStats.outfitContribRows)
+            if ((row = home(row)) && firstOnly(row, 'with')) (withOutfitsSections[row.section] = withOutfitsSections[row.section] || []).push(rowToHtml(row, 'derived'));
 
         const allSectionNames = window.AttributeSections.orderSections(
             [...new Set([...Object.keys(baseSections), ...Object.keys(withOutfitsSections)])]

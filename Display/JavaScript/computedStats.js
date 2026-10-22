@@ -507,43 +507,32 @@ function _resolveShipFunctions(attrs, solarPower) {
         return _evalFormula(formula, attrs, cache, localVars, solar);
     }
 
-    const PRIORITY = [
-        'Mass', 'Drag', 'DragForce', 'InertialMass',
-        'CoolingEfficiency', 'HeatDissipation', 'MaximumHeat',
-        'MaxShields', 'MaxHull', 'MinimumHull',
-        'TurnRate', 'Acceleration', 'MaxVelocity',
-        'ReverseAcceleration', 'MaxReverseVelocity',
-        'IdleHeat',
-        'CloakingSpeed', 'RequiredCrew', 'CrewValue',
-    ];
-
-    for (const fnName of PRIORITY) {
+    // Work each function out after the functions it calls — read from its
+    // own formula — instead of a fixed list. (A fixed order had Drag() run
+    // before InertialMass(), so Drag came out as 0 and max speed was missing.)
+    const callsIn = fnName => {
+        const fn = fns[fnName];
+        if (!fn?.formulas?.length) return [];
+        const text = fn.formulas[fn.formulas.length - 1].formula + ' ' + Object.values(fn.attributeVariables || {}).join(' ');
+        return [...new Set([...text.matchAll(/\b([A-Z][A-Za-z]+)\s*\(\s*\)/g)].map(m => m[1]))].filter(n => n !== fnName && fns[n]);
+    };
+    const inProgress = new Set();
+    function ensure(fnName, depth) {
+        if (done.has(fnName) || inProgress.has(fnName) || depth > 12) return;
+        inProgress.add(fnName);
+        for (const dep of callsIn(fnName)) ensure(dep, depth + 1);
         const val = resolveOne(fnName);
+        // the game keeps this one in a hidden cache; use the game's own curve for it
         if (fnName === 'CoolingEfficiency' && (isNaN(val) || val < 0 || val > 2.5)) {
             const x = parseFloat((attrs || {})['cooling inefficiency'] ?? 0);
             cache['CoolingEfficiency'] = 2 + 2 / (1 + Math.exp(x / -2)) - 4 / (1 + Math.exp(x / -4));
         } else if (!isNaN(val)) {
             cache[fnName] = val;
         }
+        inProgress.delete(fnName);
         done.add(fnName);
     }
-
-    let madeProgress = true;
-    while (madeProgress) {
-        madeProgress = false;
-        for (const fnName of Object.keys(fns)) {
-            if (done.has(fnName)) continue;
-            const fn = fns[fnName];
-            if (!fn?.formulas?.length) { done.add(fnName); continue; }
-            const val = resolveOne(fnName);
-            if (!isNaN(val)) {
-                const prev = cache[fnName];
-                cache[fnName] = val;
-                done.add(fnName);
-                if (prev !== val) madeProgress = true;
-            }
-        }
-    }
+    for (const fnName of Object.keys(fns)) ensure(fnName, 0);
 
     return cache;
 }
