@@ -157,7 +157,8 @@ function renderAttributesTabEnhanced(item, attrDefs, currentTab, pluginId) {
             // a computed stat with exactly the same value as one already shown in
             // its section is the same thing under another name (e.g. "Max Heat" =
             // "Total Heat Capacity", "Base Max Velocity" = "Max Velocity")
-            const isComputed = row.source !== window.ItemStats.SOURCE.RAW && row.source !== window.ItemStats.SOURCE.HARDPOINT;
+            const S = window.ItemStats.SOURCE;
+            const isComputed = [S.SHIP_FN, S.FN_VARIANT, S.HEAT_DERIVED, S.COMPUTED_STATS].includes(row.source);
             const vkey = prefix + '|v|' + row.section + '|' + row.value + '|' + (row.unit || '');
             if (isComputed && seenLabel.has(vkey)) return false;
             seenLabel.add(key); seenLabel.add(vkey); return true;
@@ -206,8 +207,7 @@ function renderAttributesTabEnhanced(item, attrDefs, currentTab, pluginId) {
                 });
             html += buildSection('Outfits', outfitRows);
         }
-
-        html += renderEffectWearOff(attrs);
+        // (wear-off times are already in the Resistance section — see ItemStats.getShipStats)
 
     } else if (currentTab === 'effects') {
         const effStats = window.ItemStats.getEffectStats(item, attrDefs);

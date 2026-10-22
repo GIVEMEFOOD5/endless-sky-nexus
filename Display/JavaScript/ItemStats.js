@@ -1554,8 +1554,11 @@ function tidyRows(attrDefs, rows) {
         }
         const k = norm(row.label);
         if (seen.has(k)) continue;
+        // only for game-formula results (two names for one formula) — not e.g.
+        // "Ion wear-off" and "Scrambling wear-off", which can simply be equal
+        const formulaRow = [SOURCE.SHIP_FN, SOURCE.FN_VARIANT, SOURCE.HEAT_DERIVED, SOURCE.COMPUTED_STATS].includes(row.source);
         const vk = `${row.section}|${row.value}|${row.unit || ''}`;
-        if (computed && seenValue.has(vk)) continue;
+        if (formulaRow && seenValue.has(vk)) continue;
         seen.add(k);
         seenValue.add(vk);
         out.push(row);
