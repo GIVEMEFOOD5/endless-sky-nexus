@@ -37,7 +37,14 @@ function rowToHtml(row, extra) {
     // value when the enhanced-details toggle is on and this row actually
     // has one worth showing — see ItemStats.formatRowDisplay.
     const displayValue = window.ItemStats.formatRowDisplay(row);
-    return attrRow(label, displayValue, row.unit, tooltipAttr(row.tooltip), extra);
+    // With enhanced details on, the tooltip also says WHY the row is in its
+    // section (game code, parser flag, game display table, or name fallback).
+    let tip = row.tooltip;
+    if (row.key && !String(row.key).startsWith('_') && window.ItemStats.isEnhancedDetailsEnabled?.() && window.AttributeSections.explain) {
+        const why = window.AttributeSections.explain(window.attrDefs, row.key);
+        tip = `${tip ? tip + ' | ' : ''}Section: ${why.section} — decided by ${why.reason}`;
+    }
+    return attrRow(label, displayValue, row.unit, tooltipAttr(tip), extra);
 }
 
 // Group a flat ItemStats row list into { sectionName: [htmlRow, ...] },

@@ -131,76 +131,98 @@ window.AttributeSections = (() => {
     let _structCache = { defs: null };
     function _structure(attrDefs) {
         if (_structCache.defs === attrDefs) return _structCache;
-        const refs = text => new Set([...String(text || '').matchAll(/\[([^\]]+)\]/g)].map(m => m[1]));
-        const energy = new Set(), heat = new Set();
+        const refs = text => [...String(text || '').matchAll(/\[([^\]]+)\]/g)].map(m => m[1]);
+        // the game's energy/heat table: for each attribute, the row it's in and
+        // the column (energy or heat) — e.g. "thrusting" / energy
+        const table = new Map();
         for (const row of attrDefs?.shipDisplay?.energyHeatTable || []) {
-            for (const k of refs(row.energyFormula)) energy.add(k);
-            for (const k of refs(row.heatFormula)) heat.add(k);
+            for (const k of refs(row.energyFormula)) if (!table.has(k)) table.set(k, { row: row.label, column: 'energy' });
+            for (const k of refs(row.heatFormula))   if (!table.has(k) || table.get(k).column !== 'energy') table.set(k, { row: row.label, column: 'heat' });
         }
         _structCache = {
             defs: attrDefs,
-            movement: new Set(attrDefs?.movementSystem?.attributes || []),            // the game's motion physics
-            capacity: new Set((attrDefs?.shipDisplay?.capacityDisplay || []).map(c => c.attributeKey)), // the game's "space" list
-            energy, heat,                                                             // the game's energy/heat table
+            movement: new Set(attrDefs?.movementSystem?.attributes || []),             // the game's motion physics
+            capacity: new Map((attrDefs?.shipDisplay?.capacityDisplay || []).map(c => [c.attributeKey, c.displayLabel])), // the game's "space" list
+            table,                                                                     // the game's energy/heat table
         };
         return _structCache;
     }
 
-    function classify(attrDefs, key, overrides) {
-        if (overrides && overrides[key]) return overrides[key];
+    /**
+     * Which section an attribute belongs in, and WHY — evidence from the game
+     * first, the attribute's name only as a fallback:
+     *
+     *   1. the game's motion physics / jump navigation code
+     *   2. the parser's flags (resistance, protection, yes/no, weapon stat)
+     *   3. the game's own display tables — its energy/heat table (the row it
+     *      sits in and its energy/heat column, read with the section vocabulary)
+     *      and its capacity list (likewise, by the game's own label)
+     *   4. fallback: the attribute's name, then its tooltip, then the game
+     *      functions that read it, then the parser's rough area
+     *
+     * → { section, reason }
+     */
+    function explain(attrDefs, key, overrides) {
+        if (overrides && overrides[key]) return { section: overrides[key], reason: 'override' };
         const k = String(key || '').toLowerCase();
         const rec = _getAttrRecord(attrDefs, key);
         const st = _structure(attrDefs);
+        const is = (section, reason) => ({ section, reason });
 
-        // 1. Where the GAME uses it, from the attribute definitions:
-        //    its motion physics, its jump navigation.
-        if (st.movement.has(k)) return 'Engines';
-        if (rec?.usedInNavFunctions?.length) return 'Jump';
+        // 1. game code: motion physics, jump navigation
+        if (st.movement.has(k)) return is('Engines', 'game code: motion physics (movementSystem)');
+        if (rec?.usedInNavFunctions?.length) return is('Jump', `game code: jump navigation (${rec.usedInNavFunctions.join(', ')})`);
 
-        // 2. What KIND of attribute it is (parser flags).
+        // 2. parser flags
         if (rec) {
-            if (rec.isStatusResistance || rec.isStatusResistanceCost) return 'Resistance';
-            if (rec.isProtection || rec.isStatusProtection)           return 'Protection';
-            if (rec.isBoolean || rec.area === 'Special / Flags')       return 'Special';
+            if (rec.isStatusResistance || rec.isStatusResistanceCost) return is('Resistance', 'parser flag: status resistance');
+            if (rec.isProtection || rec.isStatusProtection)           return is('Protection', 'parser flag: protection');
+            if (rec.isBoolean || rec.area === 'Special / Flags')       return is('Special', 'parser flag: yes/no attribute');
+            if (rec.isWeaponStat)                                      return is('Weapon DPS', 'parser flag: weapon stat');
         }
-        if (/ resistance$/.test(k)) return 'Resistance';
-        if (/ protection$/.test(k)) return 'Protection';
-        if (/ damage$/.test(k)) return 'Weapon DPS';                    // what weapons deal
-        if (rec?.isWeaponStat) return 'Weapon DPS';
 
-        // 3. Its own name, read with a general vocabulary (shield…, cargo…,
-        //    scan…, heat…). This comes before "which code reads it": the
-        //    cloaking code reads shield generation, the scan code reads cargo
-        //    space — but the name says what they are.
+        // 3. the game's own display tables
+        const cell = st.table.get(k);
+        if (cell) {
+            // the row's own label decides first ("shields / hull / …" → Shields & Hull),
+            // otherwise the column ("thrusting" + energy → Energy)
+            const s = _matchDomain(`${cell.row} ${cell.column}`);
+            if (s) return is(s, `game display: energy/heat table, row "${cell.row}", ${cell.column} column`);
+        }
+        if (st.capacity.has(k)) {
+            const label = st.capacity.get(k) || k;
+            const s = _matchDomain(label) || (/\bmounts?\b|\bports?\b/.test(label) ? 'Hardpoints' : 'Cargo');
+            return is(s, `game display: capacity list ("${label}")`);
+        }
+
+        // 4. fallback: the attribute's name …
+        if (/ resistance$/.test(k)) return is('Resistance', 'name');
+        if (/ protection$/.test(k)) return is('Protection', 'name');
+        if (/ damage$/.test(k)) return is('Weapon DPS', 'name: damage a weapon deals');
         const nameHit = _matchDomain(k);
-        if (nameHit) return nameHit;
-        if (GENERAL_RE.test(k)) return 'General';
-        if (/\bmounts?\b|\bports?\b|\banchor\b|\bbays?\b/.test(k)) return 'Hardpoints';
+        if (nameHit) return is(nameHit, 'name');
+        if (GENERAL_RE.test(k)) return is('General', 'name');
+        if (/\bmounts?\b|\bports?\b|\banchor\b|\bbays?\b/.test(k)) return is('Hardpoints', 'name');
         // "sidewinder capacity", "torpedo capacity" … — how much a launcher holds
-        if (/ capacity$/.test(k) && !st.capacity.has(k)) return 'Ammo Consumption';
+        if (/ capacity$/.test(k)) return is('Ammo Consumption', 'name: launcher capacity');
 
-        // 4. The game's own display tables: its capacity list, its energy/heat table.
-        if (st.capacity.has(k)) return 'Cargo';
-        if (st.heat.has(k)) return 'Heat';
-        if (st.energy.has(k)) return 'Energy';
+        if (!rec) return is('Other', 'no information');
 
-        if (!rec) return 'Other';
-
-        // 5. What its description says, then the names of the game functions that read it.
+        // … then its tooltip, the game functions that read it, the parser's area
         const purposeHit = _matchDomain(rec.tooltip || rec.description);
-        if (purposeHit) return purposeHit;
-        if (rec.usedInShipFunctions?.length) {
-            for (const fnName of rec.usedInShipFunctions) {
-                const hit = _matchDomain(fnName);
-                if (hit) return hit;
-            }
+        if (purposeHit) return is(purposeHit, 'tooltip');
+        for (const fnName of rec.usedInShipFunctions || []) {
+            const hit = _matchDomain(fnName);
+            if (hit) return is(hit, `game function name (${fnName})`);
         }
-        if (rec.isWeaponDataKey) return 'Weapon DPS';
-
+        if (rec.isWeaponDataKey) return is('Weapon DPS', 'parser flag: weapon data key');
         const areaHit = AREA_FALLBACK[rec.area];
-        if (areaHit) return areaHit;
+        if (areaHit) return is(areaHit, `parser area (${rec.area})`);
+        return is('Other', 'no information');
+    }
 
-        return 'Other';
+    function classify(attrDefs, key, overrides) {
+        return explain(attrDefs, key, overrides).section;
     }
 
     /**
@@ -316,7 +338,7 @@ window.AttributeSections = (() => {
     }
 
     return {
-        SECTION_ORDER, classify, groupKeys, orderSections, keysInSections,
+        SECTION_ORDER, classify, explain, groupKeys, orderSections, keysInSections,
         matchDomainWord, classifyComputedKey, getFrontendArea,
     };
 })();
