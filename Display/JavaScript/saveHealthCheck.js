@@ -1,22 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  saveHealthCheck.js — "🩺 Health check" panel on the Saves page
-//
-//  Lists everything a save refers to by name — ship models, outfits
-//  (installed, mounted, in cargo, in storage), systems, planets, missions,
-//  events, governments — and checks each against what the plugins this
-//  save uses actually define. Anything the game can't find is usually
-//  why ships, outfits or missions quietly disappear after a plugin is
-//  removed or renamed.
-//
-//  For each missing name it also says whether another known plugin
-//  defines it ("comes from X, which this save doesn't list"), so the fix
-//  is usually obvious.
-//
-//  Reads the save's original text (saveVault.js + esSaveFile.js). Name
-//  lists come from Supabase and are fetched once per page.
-// ═══════════════════════════════════════════════════════════════════════════
+// 🩺 Save health check: ships, outfits and places your save uses that your selected plugins don't have.
 
 (function () {
   if (!window.EsSaveFile) return;
@@ -35,7 +19,7 @@
   let catalogPromise = null;
   const resultsBySave = new Map();
 
-  // ── what the game would look up ──────────────────────────────────────────
+  // ── everything the game would look up ──
   function collectReferences(doc) {
     const refs = new Map(KINDS.map(k => [k.key, new Map()]));   // kind → name → Set(where)
     const add = (kind, name, where) => {
@@ -84,7 +68,7 @@
     return refs;
   }
 
-  // ── catalogue of names per plugin ────────────────────────────────────────
+  // ── names each plugin defines ──
   function loadCatalog() {
     if (catalogPromise) return catalogPromise;
     catalogPromise = (async () => {
@@ -108,7 +92,7 @@
     return catalogPromise;
   }
 
-  // ── run ──────────────────────────────────────────────────────────────────
+  // ── run the check ──
   async function check(saveId) {
     const text = window.SaveVault ? await window.SaveVault.text(saveId).catch(() => null) : null;
     if (!text) return { noText: true };
@@ -146,7 +130,7 @@
              eventsSkipped: !cat.event || cat.event.size === 0 };
   }
 
-  // ── panel ────────────────────────────────────────────────────────────────
+  // ── the panel ──
   function ensurePanel() {
     let p = document.getElementById('sh-panel');
     if (p) return p;
@@ -158,6 +142,7 @@
     return p;
   }
 
+  // draw the results
   function render(saveId, result, running) {
     const p = ensurePanel();
     if (!p) return;
@@ -193,6 +178,7 @@
     document.getElementById('sh-run').onclick = () => run(saveId);
   }
 
+  // run it (button)
   async function run(saveId) {
     render(saveId, resultsBySave.get(saveId), true);
     try {

@@ -1,10 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  profilePage.js — Profile.html?u=<username>
-//  Lists ONLY the ships this user marked public (hidden ones are excluded by
-//  the database policy). Nothing else about the account is shown.
-// ═══════════════════════════════════════════════════════════════════════════
+// A pilot's public profile page and their shared ships.
 
 (async function () {
   const h = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

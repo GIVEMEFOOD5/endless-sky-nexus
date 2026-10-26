@@ -1,51 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  esSaveFile.js — lossless Endless Sky save-file reader / writer
-//
-//  WHY THIS EXISTS
-//  esSaveParser.js turns a save into a convenient JSON view, but that view
-//  is one-way: lines it doesn't model are dropped or moved, so an edited
-//  save can never be written back to a .txt the game will load. This file
-//  keeps the save as the same node tree the game itself builds
-//  (DataFile::LoadData), edits that tree in place, and writes it back with
-//  the same quoting rules as DataWriter::Quote. Anything this file doesn't
-//  understand is carried through untouched.
-//
-//  FORMAT (from endless-sky/source/DataFile.cpp + DataWriter.cpp)
-//   - One node per line. Depth = number of leading whitespace characters
-//     (the game writes tabs). A line deeper than the previous one is its
-//     child; the game compares separator COUNTS, not "+1 levels".
-//   - Tokens are separated by whitespace. A token that starts with " runs
-//     to the next ", one that starts with ` runs to the next `. There are
-//     NO escape characters.
-//   - The writer quotes a token with `...` if it contains ", otherwise with
-//     "..." if it contains whitespace or a backtick or is empty, otherwise
-//     writes it bare. A token containing BOTH " and ` cannot be written.
-//   - '#' starts a comment at the start of a line or between tokens (never
-//     inside a token). A UTF-8 BOM at the start is skipped.
-//   - Numbers are plain tokens. The game writes doubles with C++ ostream
-//     defaults (6 significant digits, e.g. 1.23457e+06), so readers must
-//     accept exponents. Token strings are kept verbatim here, so values
-//     are never re-rounded unless you edit them.
-//
-//  SAVE LAYOUT (PlayerInfo::Save) — top-level keys, in the order written:
-//   pilot, original name, date, marked event changes today, system entry
-//   method, previous system/planet, system, planet, clearance, playtime,
-//   launching, cloaked, travel*, travel destination, flagship index, map
-//   coloring, map zoom, collapsed*, reputation with, tribute received, max
-//   escort count/crew, admin cap, (ship + optional groups)*, storage,
-//   licenses, account, cargo, basis, stock, fleet depreciation, stock
-//   depreciation, mission*, mission cargo, mission passengers, available
-//   job*, available mission*, sort type, sort descending, separate deadline,
-//   separate possible, conditions, gifted ships, event*, changes, economy,
-//   destroyed*, visited*, visited planet*, harvested, logbook, start,
-//   plugins, message log.
-//   NOTE: `groups N` is written AFTER the ship it belongs to and applies to
-//   the previous ship on load (PlayerInfo::Load: groups[ships.back()]).
-//
-//  Works in the browser (window.EsSaveFile) and in Node (module.exports).
-// ═══════════════════════════════════════════════════════════════════════════
+// Edits a save file exactly like the game would write it — untouched lines come back byte for byte. Used by the save editor.
 
 (function (root, factory) {
   const api = factory();
@@ -53,23 +8,17 @@
   else root.EsSaveFile = api;
 })(typeof self !== 'undefined' ? self : this, function () {
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  Node tree
-  //    data node:    { tokens: string[], children: Node[], line }
-  //    comment node: { comment: string, children: [], line }   (text after '#')
-  //    blank node:   { blank: true, children: [] }
-  // ───────────────────────────────────────────────────────────────────────
+  // ── the tree: { key, values, children } (+ how the line was written) ──
 
   const isData = n => Array.isArray(n.tokens);
   const key    = n => (isData(n) ? n.tokens[0] : undefined);
 
+  // a new node
   function makeNode(tokens, children) {
     return { tokens: tokens.map(String), children: children || [] };
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  PARSE — mirrors DataFile::LoadData token-for-token
-  // ───────────────────────────────────────────────────────────────────────
+  // text → tree (same rules as the game's DataFile)
   function parse(text) {
     const root = { tokens: [], children: [], line: 0 };
     const warnings = [];
@@ -105,9 +54,7 @@
         if (ln < lines.length - 1) pendingBlanks++;
         continue;
       }
-      // Blank lines go just before the next real line, inside whatever block
-      // that line belongs to — the game ignores them, but keeping them means
-      // an unedited save is written back byte-for-byte.
+      // blank lines belong just before the next real line
       if (pendingBlanks) {
         let s = stack.length - 1;
         while (seps[s] >= sepCount) s--;
@@ -151,18 +98,14 @@
         while (i < line.length && isWs(line[i])) i++;
         if (line[i] === '#') break;              // trailing comment
       }
-      // Remember how the line was written (quotes, spacing, indentation) so
-      // an untouched line is written back exactly as it was — some tools and
-      // older game versions quote more than today's writer does.
+      // remember how a line was written, so unchanged lines stay identical
       Object.defineProperty(node, 'src', { value: { lead: line.slice(0, lineStart), text: line.slice(lineStart).replace(/\r$/, ''),
         tokens: node.tokens.join('\u0000'), depth }, writable: true, enumerable: false, configurable: true });
     }
     return { root, warnings };
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  WRITE — mirrors DataWriter::Quote and tab indentation
-  // ───────────────────────────────────────────────────────────────────────
+  // ── writing (same rules as the game's DataWriter) ──
   function quote(tok) {
     tok = String(tok);
     const hasQuote = tok.includes('"');
@@ -175,8 +118,10 @@
     return tok;
   }
 
+  // tree → text
   function stringify(root) {
     const out = [];
+    // visit every node
     const walk = (nodes, depth) => {
       const indent = '\t'.repeat(depth);
       for (const n of nodes) {
@@ -193,31 +138,33 @@
     return out.join(eol) + eol;
   }
 
-  // Number → token. Integers stay integers; everything else uses the
-  // shortest round-trippable form (the game's parser accepts exponents).
+  // number → token (whole numbers stay whole)
   function num(v) {
     const n = Number(v);
     if (!Number.isFinite(n)) throw new Error(`Not a finite number: ${v}`);
     return String(Object.is(n, -0) ? 0 : n);
   }
+  // token → number
   const toNum = (tok, fallback = 0) => {
     if (tok === undefined || tok === null || tok === '') return fallback;
     const n = Number(tok);
     return Number.isFinite(n) ? n : fallback;
   };
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  Tree helpers
-  // ───────────────────────────────────────────────────────────────────────
+  // ── tree helpers ──
   const kids    = (n, k) => n.children.filter(c => isData(c) && c.tokens[0] === k);
+  // first child with this key
   const kid     = (n, k) => n.children.find(c => isData(c) && c.tokens[0] === k) || null;
+  // its first value
   const val     = (n, k, i = 1) => { const c = kid(n, k); return c ? c.tokens[i] : undefined; };
+  // set it (create if missing)
   function setVal(n, k, ...values) {
     let c = kid(n, k);
     if (!c) { c = makeNode([k]); n.children.push(c); }
     c.tokens = [k, ...values.map(String)];
     return c;
   }
+  // remove children with this key
   function removeKid(n, k) {
     const before = n.children.length;
     n.children = n.children.filter(c => !(isData(c) && c.tokens[0] === k));
@@ -225,6 +172,7 @@
   }
   const clone = n => JSON.parse(JSON.stringify(n));
 
+  // new uuid
   function uuidV4() {
     if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
     const b = [];
@@ -254,14 +202,10 @@
   const SHIP_TAIL_KEYS = ['crew', 'fuel', 'shields', 'hull', 'position', 'formation', 'system', 'planet',
     'destination system', 'parked'];
   const SHIP_STATE_KEYS = [...SHIP_HEAD_KEYS, ...SHIP_TAIL_KEYS];
-  // Part of the ship's DESIGN rather than its state: when a ship is added or
-  // refitted, these come from the new design (a refit to another model must
-  // not keep the old model's "display name").
+  // these belong to the ship's design and get replaced on refit
   const SHIP_DESIGN_KEYS = ['display name', 'plural', 'noun'];
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  SaveFile — typed view + edits over the tree
-  // ───────────────────────────────────────────────────────────────────────
+  // ── SaveFile: typed access to a save ──
   class SaveFile {
     constructor(text) {
       const { root, warnings } = parse(text);
@@ -271,12 +215,12 @@
     static fromText(text) { return new SaveFile(text); }
     toString() { return stringify(this.root); }
 
-    // ── generic access ───────────────────────────────────────────────────
+    // ── generic ──
     top(k)     { return kid(this.root, k); }
     topAll(k)  { return kids(this.root, k); }
     topKeys()  { return [...new Set(this.root.children.filter(isData).map(key))]; }
 
-    /** Find or create a top-level node, inserted at its canonical position. */
+    // find or create a top-level node in its usual place
     ensureTop(k, tokens) {
       let n = this.top(k);
       if (n) return n;
@@ -295,7 +239,7 @@
       return n;
     }
 
-    // ── pilot / location / time ──────────────────────────────────────────
+    // ── pilot, location, time ──
     get pilot() {
       const n = this.top('pilot');
       return { first: n ? n.tokens[1] || '' : '', last: n ? n.tokens[2] || '' : '' };
@@ -318,8 +262,7 @@
     get flagshipIndex() { const v = val(this.root, 'flagship index'); return v === undefined ? null : toNum(v, -1); }
     setFlagshipIndex(i) { this._setTopValue('flagship index', num(i)); }
 
-    // ── account ──────────────────────────────────────────────────────────
-    // Credits are int64 in the game; kept as BigInt-safe strings.
+    // ── account (credits) ──
     get credits() { const a = this.top('account'); return a ? BigInt(val(a, 'credits') || '0') : 0n; }
     setCredits(amount) {
       const a = this.ensureTop('account');
@@ -350,12 +293,7 @@
       };
     }
 
-    // ── conditions ───────────────────────────────────────────────────────
-    // Game rule (ConditionsStore::Save): value 0 is not written, value 1
-    // is written as the bare name, anything else as `name value`.
-    // A damaged save can contain more than one `conditions` block; the game
-    // loads them in order, so later values win — the same is done here, and
-    // a change is written to every block so a later copy can't undo it.
+    // ── conditions ──
     get conditions() {
       const out = {};
       for (const c of this.topAll('conditions'))
@@ -376,7 +314,7 @@
     }
     deleteCondition(name) { this.setCondition(name, 0); }
 
-    // ── reputation ───────────────────────────────────────────────────────
+    // ── reputation ──
     get reputations() {
       const r = this.top('reputation with');
       return r ? Object.fromEntries(r.children.filter(isData).map(n => [n.tokens[0], toNum(n.tokens[1])])) : {};
@@ -387,7 +325,7 @@
       if (n) n.tokens = [government, num(value)]; else r.children.push(makeNode([government, num(value)]));
     }
 
-    // ── licenses ─────────────────────────────────────────────────────────
+    // ── licences ──
     get licenses() { return (this.top('licenses')?.children || []).filter(isData).map(n => n.tokens[0]); }
     addLicense(name) {
       const l = this.ensureTop('licenses');
@@ -400,12 +338,12 @@
       if (!l.children.some(isData)) this.root.children = this.root.children.filter(c => c !== l);
     }
 
-    // ── player cargo (commodities + outfits) ─────────────────────────────
+    // ── cargo ──
     get cargo() { return readCargoHold(this.top('cargo')); }
     setCargoCommodity(name, tons)  { writeCargoItem(this.ensureTop('cargo'), 'commodities', name, tons); }
     setCargoOutfit(name, count)    { writeCargoItem(this.ensureTop('cargo'), 'outfits', name, count); }
 
-    // ── planetary storage ────────────────────────────────────────────────
+    // ── planet storage ──
     get storage() {
       const s = this.top('storage');
       return (s?.children || []).filter(n => isData(n) && n.tokens[0] === 'planet').map(p => ({
@@ -423,8 +361,7 @@
       if (!p.children.some(isData)) s.children = s.children.filter(x => x !== p);
     }
 
-    // ── ships ────────────────────────────────────────────────────────────
-    /** Ship views, in save order. `index` is what "flagship index" refers to. */
+    // ── ships ──
     get ships() {
       const nodes = this.root.children;
       const out = [];
@@ -448,7 +385,7 @@
     }
     get flagship() { const i = this.flagshipIndex; return i === null || i < 0 ? null : this.ship(i); }
 
-    /** Remove a ship, its `groups` line, its mission-cargo allocations, and fix flagship index. */
+    // remove a ship (and its groups line, mission cargo, flags)
     removeShip(indexOrUuid) {
       const s = this.ship(indexOrUuid);
       if (!s) return false;
@@ -468,7 +405,7 @@
       return true;
     }
 
-    /** Copy a ship with a fresh uuid. Returns the new ShipView. */
+    // copy a ship with a new uuid
     duplicateShip(indexOrUuid, newName) {
       const s = this.ship(indexOrUuid);
       if (!s) return null;
@@ -483,14 +420,7 @@
       return this.ships[this.ships.length - 1];
     }
 
-    /**
-     * Swap a save ship's design for a ship definition (e.g. the ship
-     * builder's sbGenerateES() output) while keeping everything that makes
-     * it THIS player's ship: its name, uuid, crew/fuel/shields/hull,
-     * position, location, parked flag, formation and similar state.
-     * The definition's `ship "Model" "Variant"` line becomes `ship "Model"`
-     * — save ships never carry a variant name.
-     */
+    // replace a ship's design (e.g. with a builder design)
     replaceShipDefinition(indexOrUuid, definition, { levels } = {}) {
       const s = this.ship(indexOrUuid);
       if (!s) throw new Error('Ship not found');
@@ -505,20 +435,14 @@
       const body = def.children.filter(n => !(isData(n) && SHIP_STATE_KEYS.includes(n.tokens[0])));
       const head = [...SHIP_HEAD_KEYS.filter(k => kept.has(k)).map(k => kept.get(k)), ...design];
       const tail = SHIP_TAIL_KEYS.filter(k => kept.has(k)).map(k => kept.get(k));
-      // A 3-token `ship "Model" "Variant"` block is kept as-is: the game then
-      // copies whatever the block leaves out from the model and mounts any
-      // unmounted weapons (Ship::Load sets `base` only in that form).
+      // ship "Model" "Variant" stays as it is
       old.tokens = def.tokens.length >= 3 ? ['ship', def.tokens[1], def.tokens[2]] : ['ship', def.tokens[1] || s.model];
       old.children = [...head, ...body, ...tail];
       if (levels) this._setLevels(old, levels);
       return this.ship(s.index);
     }
 
-    /**
-     * Add a new ship (from ShipDefinition.fromBuild / fromGameShip, or text).
-     * It gets a fresh uuid and starts at `system`/`planet` (default: where
-     * the pilot is), with full `levels` if given.
-     */
+    // add a new ship (gets a fresh uuid and sits at the flagship's planet)
     addShip(definition, { name, system, planet, levels, parked = false } = {}) {
       const def = typeof definition === 'string'
         ? parse(definition).root.children.find(n => isData(n) && n.tokens[0] === 'ship')
@@ -563,8 +487,7 @@
       }
     }
 
-    // ── missions ─────────────────────────────────────────────────────────
-    /** kind: 'mission' (held/accepted), 'available job', 'available mission' */
+    // ── missions ──
     get missions() {
       return this.root.children.filter(n => isData(n) && MISSION_KEYS.includes(n.tokens[0])).map(n => ({
         kind: n.tokens[0],
@@ -578,11 +501,7 @@
       }));
     }
 
-    /**
-     * Remove a mission by internal name.
-     *   kinds:       which lists to remove from (default all three)
-     *   conditions:  also clear "<name>: offered/active/done/failed/declined"
-     */
+    // remove a mission by name
     removeMission(id, { kinds = MISSION_KEYS, conditions = false } = {}) {
       const gone = this.missions.filter(m => m.id === id && kinds.includes(m.kind));
       if (!gone.length && !conditions) return 0;
@@ -594,7 +513,7 @@
       return gone.length;
     }
 
-    // `mission cargo` / `mission passengers` > `player ships` > `<missionUUID> <shipUUID> <count>`
+    // drop its mission cargo / passengers
     _dropCargoAllocations(match) {
       for (const k of ['mission cargo', 'mission passengers']) {
         const block = this.top(k);
@@ -605,11 +524,7 @@
       }
     }
 
-    // ── scheduled events ─────────────────────────────────────────────────
-    // `event "Name"` + child `date` = scheduled, not yet happened. Anything
-    // with a date <= today fires on the NEXT day advance (PlayerInfo::
-    // AdvanceDate), so it is pending, not stale. `event` with no name is a
-    // full inline event block (GameEvent::Save).
+    // ── scheduled events ──
     get events() {
       return this.topAll('event').map(n => {
         const d = kid(n, 'date');
@@ -621,10 +536,7 @@
         };
       });
     }
-    /**
-     * Schedule an event the way the game does (`event "name"` + `date d m y`,
-     * kept before the `changes` block). The game applies it when that day comes.
-     */
+    // schedule an event like the game does
     scheduleEvent(name, date) {
       const n = makeNode(['event', name], [makeNode(['date', num(date.day), num(date.month), num(date.year)])]);
       const nodes = this.root.children;
@@ -638,7 +550,7 @@
 
     removeEvent(node) { const before = this.root.children.length; this.root.children = this.root.children.filter(n => n !== node); return before !== this.root.children.length; }
 
-    // ── map knowledge ────────────────────────────────────────────────────
+    // ── map knowledge ──
     get visitedSystems() { return this.topAll('visited').map(n => n.tokens[1]).filter(Boolean); }
     get visitedPlanets() { return this.topAll('visited planet').map(n => n.tokens[1]).filter(Boolean); }
     setVisitedSystem(name, visited = true) { this._setFlagLine('visited', name, visited); }
@@ -661,24 +573,17 @@
         this.root.children = this.root.children.filter(n => !(isData(n) && n.tokens[0] === k && n.tokens[1] === name));
       }
     }
-    /** harvested: [{ system, outfit }] */
+    // harvested: [{ system, outfit }]
     get harvested() {
       return (this.top('harvested')?.children || []).filter(isData).map(n => ({ system: n.tokens[0], outfit: n.tokens[1] }));
     }
 
     get plugins() { return (this.top('plugins')?.children || []).filter(isData).map(n => n.tokens[0]); }
 
-    // ── sanity checks before download ────────────────────────────────────
-    /** Story changes in load order (all `changes` blocks, as the game reads them). */
+    // ── checks before download ──
     get changes() { return this.topAll('changes').flatMap(c => c.children.filter(isData)); }
 
-    /**
-     * Leftovers after the end of the save. The game always writes `plugins`
-     * (and optionally `message log`) last; anything after that comes from an
-     * earlier, longer version of the file that wasn't cleared when the file
-     * was overwritten. The game still loads those stale blocks — older
-     * conditions, story changes and prices — on top of the real save.
-     */
+    // anything after the end of the save (the game always ends with plugins)
     trailingJunk() {
       const nodes = this.root.children;
       const at = nodes.findIndex(n => key(n) === 'plugins');
@@ -728,9 +633,7 @@
     }
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  Cargo helpers (CargoHold::Save: cargo > commodities|outfits > name count)
-  // ───────────────────────────────────────────────────────────────────────
+  // ── cargo hold helpers ──
   function readCargoHold(cargoNode) {
     const out = { commodities: {}, outfits: {} };
     if (!cargoNode) return out;
@@ -740,6 +643,7 @@
     }
     return out;
   }
+  // set one cargo line
   function writeCargoItem(cargoNode, section, name, count) {
     let s = kid(cargoNode, section);
     const c = Math.trunc(Number(count) || 0);
@@ -751,9 +655,7 @@
     if (!s.children.some(isData)) cargoNode.children = cargoNode.children.filter(x => x !== s);
   }
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  ShipView — live view onto one `ship` node (Ship::Save layout)
-  // ───────────────────────────────────────────────────────────────────────
+  // ── ShipView: live access to one ship ──
   class ShipView {
     constructor(save, node, index, groups) { this.save = save; this.node = node; this.index = index; this.groups = groups; }
     get model()  { return this.node.tokens[1]; }
@@ -780,7 +682,7 @@
       if (on && !this.parked) this.node.children.push(makeNode(['parked']));
       if (!on) removeKid(this.node, 'parked');
     }
-    /** Base attributes as { key: number|string } (first value of each line). */
+    // base attributes
     get attributes() {
       const a = kid(this.node, 'attributes');
       const out = {};
@@ -794,7 +696,7 @@
       const tok = typeof v === 'number' ? num(v) : String(v);
       if (n) n.tokens = [k, tok]; else a.children.push(makeNode([k, tok]));
     }
-    /** Installed outfits as { name: count } (Ship::Save writes count only when > 1). */
+    // installed outfits { name: count }
     get outfits() {
       const o = kid(this.node, 'outfits');
       const out = {};
@@ -814,7 +716,7 @@
       o.children = o.children.filter(n => !(isData(n) && n.tokens[0] === name));
       if (c > 0) o.children.splice(first === -1 ? o.children.length : first, 0, makeNode(c === 1 ? [name] : [name, String(c)]));
     }
-    /** Hardpoints in save order: [{ type:'gun'|'turret', x, y, outfit|null }] */
+    // guns and turrets in save order
     get hardpoints() {
       return this.node.children.filter(n => isData(n) && (n.tokens[0] === 'gun' || n.tokens[0] === 'turret'))
         .map(n => ({ type: n.tokens[0], x: toNum(n.tokens[1]), y: toNum(n.tokens[2]), outfit: n.tokens[3] || null, node: n }));
@@ -825,7 +727,7 @@
       hp.node.tokens = outfitName ? [hp.type, hp.node.tokens[1], hp.node.tokens[2], outfitName] : hp.node.tokens.slice(0, 3);
       return true;
     }
-    /** Bays: [{ category, x, y }] — category is free text (Fighter, Drone, or plugin-defined). */
+    // bays
     get bays() {
       return kids(this.node, 'bay').map(n => ({ category: n.tokens[1], x: toNum(n.tokens[2]), y: toNum(n.tokens[3]), node: n }));
     }

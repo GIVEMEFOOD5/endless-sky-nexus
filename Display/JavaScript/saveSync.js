@@ -1,33 +1,19 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  saveSync.js — no more re-uploading saves (Saves & Account page)
-//
-//  • Saves always come back after a reload: parsed data that didn't fit in
-//    localStorage is rebuilt from the stored .txt (saveCache.js).
-//  • 🔄 Re-scan — runs the stored save through the importer again (parser,
-//    plugin matching, health check) without choosing the file.
-//  • Uploading a save for a pilot you already have asks whether to UPDATE
-//    that save instead of adding a duplicate, so its account copy, links
-//    and settings carry on.
-//  • 🔗 Link to game file (Chrome / Edge): remember the save's file on
-//    disk, then ⟳ Reload from game after playing, and 💾 Save into game
-//    file from the editor — no downloading and replacing by hand.
-//
-//  Load after saveManager.js, saveVault.js, saveCache.js, saveEditor.js.
-// ═══════════════════════════════════════════════════════════════════════════
+// Keeps saves up to date with the game: update an existing save instead of duplicating, re-read or write the game's file (Chrome / Edge).
 
 (function () {
   const V = window.SaveVault, C = window.EsSaveCache;
   if (!V || !C) return;
   const $ = id => document.getElementById(id);
+  // message
   const say = (m, t) => (typeof toast === 'function' ? toast(m, t) : console.log(m));
   const supported = typeof window.showOpenFilePicker === 'function';
   const PICKER = { types: [{ description: 'Endless Sky save', accept: { 'text/plain': ['.txt'] } }], excludeAcceptAllOption: false, multiple: false };
   const readJSON = k => { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : null; } catch (_) { return null; } };
   const startCurrent = readJSON('ES_SM_CURRENT');
 
-  // ── parsed data never "disappears" ───────────────────────────────────────
+  // ── parsed data is always kept ──
   const origGet = window.smGetSaveData, origSet = window.smSetSaveData;
   window.smGetSaveData = function (id) { return origGet.apply(this, arguments) || C.get(id); };
   window.smSetSaveData = function (id, data) {
@@ -50,7 +36,7 @@
     renderSavesLibrary(); renderResults();
   });
 
-  // ── update an existing save with newer text ──────────────────────────────
+  // ── update a save with newer text ──
   async function updateExisting(id, text, { handle, parsed } = {}) {
     parsed = parsed || parseESSaveFile(text);
     const rec = await V.get(id);
@@ -68,7 +54,7 @@
     return true;
   }
 
-  // ── uploads: offer to update instead of duplicating ──────────────────────
+  // ── uploads: offer to update instead of making a copy ──
   let handleForNextUpload = null;
   const innerHandleFile = window.handleFile;
   window.handleFile = async function (file) {
@@ -97,17 +83,19 @@
     return result;
   };
 
-  // ── file handles (Chrome / Edge) ─────────────────────────────────────────
+  // ── the game's file (Chrome / Edge) ──
   async function permitted(handle, mode) {
     const opts = { mode };
     if ((await handle.queryPermission(opts)) === 'granted') return true;
     return (await handle.requestPermission(opts)) === 'granted';
   }
+  // choose a file
   async function pickFile() {
     try { const [h] = await window.showOpenFilePicker(PICKER); return h; }
     catch (err) { if (err && err.name !== 'AbortError') say(err.message, 'danger'); return null; }
   }
 
+  // open a save and remember its file
   async function openAndRemember() {
     const h = await pickFile();
     if (!h) return;
@@ -115,6 +103,7 @@
     await window.handleFile(await h.getFile());
   }
 
+  // link the open save to its file
   async function linkCurrent() {
     const id = currentSaveId; if (!id) return;
     const h = await pickFile(); if (!h) return;
@@ -131,6 +120,7 @@
     renderButtons();
   }
 
+  // re-read from the game
   async function reloadFromGame() {
     const id = currentSaveId; if (!id) return;
     const h = await V.getHandle(id);
@@ -147,6 +137,7 @@
     }
   }
 
+  // re-read without asking
   async function rescan() {
     const id = currentSaveId; if (!id) return;
     const text = await V.text(id);
@@ -159,7 +150,7 @@
     say('Re-scanned the save.', 'success');
   }
 
-  /** Write text straight into the linked game save (used by the editor). */
+  // write into the linked game save. Called by: saveEditor
   async function writeToGameFile(id, text) {
     const h = await V.getHandle(id);
     if (!h) { say('Link this save to its file first (🔗 Link to game file).', 'danger'); return false; }
@@ -173,7 +164,7 @@
     } catch (err) { say(err.message, 'danger'); return false; }
   }
 
-  // ── buttons ──────────────────────────────────────────────────────────────
+  // ── buttons ──
   async function renderButtons() {
     const group = $('resultButtons');
     if (!group) return;
@@ -194,6 +185,7 @@
     if ($('ss-relink')) $('ss-relink').onclick = linkCurrent;
   }
 
+  // "Open a save from the game" button
   function addOpenButton() {
     const zone = $('dropzone');
     if (!zone || $('ss-open') || !supported) return;

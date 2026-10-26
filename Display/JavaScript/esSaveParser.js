@@ -1,135 +1,8 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  esSaveParser.js
-//
-//  Parses an Endless Sky save file and returns a structured
-//  object containing:
-//    - pilot       : top-level pilot metadata
-//    - ships       : array of ship objects in shipBuilder format
-//    - missions    : array of mission blocks currently sitting in the
-//                    save file's "mission" section — see the caveat
-//                    below, this is NOT simply "the player's active
-//                    missions"
-//    - events      : array of pending/scheduled event blocks (alias for
-//                    blocks.event) — see GENERIC BLOCK CAPTURE below
-//    - changes     : array of applied world-state change blocks (alias
-//                    for blocks.changes) — see GENERIC BLOCK CAPTURE below
-//    - blocks      : { <block name>: [{ name, raw }] } for every top-level
-//                    block this file doesn't have a dedicated parser for —
-//                    event, changes, economy, visited, and anything a
-//                    future save format adds. See GENERIC BLOCK CAPTURE.
-//    - storage     : per-planet stored cargo/outfits
-//    - licenses    : array of license strings
-//    - account     : credits, score, salaries, history
-//    - cargo       : player's carried cargo/outfits
-//
-//  MISSION BLOCK PARSING — read this before trusting `missions` blindly
-//  -----------------------------------------------------------------
-//  Endless Sky's own save-file guide is explicit that the "mission"
-//  section holds BOTH the player's genuinely active/accepted missions
-//  AND missions that are merely "available" — their `to offer`
-//  conditions already passed, but the player hasn't landed/visited the
-//  spaceport to actually be offered them yet. There is no dedicated
-//  flag inside the block itself that cleanly says "this one is
-//  accepted" vs "this one is just queued." So: a name showing up here
-//  means "this save is currently holding a live copy of this mission's
-//  data," not "the player is definitely working on it right now."
-//
-//  Each entry is `{ name, raw }`:
-//    - name : the mission's internal identifier — the quoted string
-//             immediately after `mission`, e.g. `mission "FW Katya 1"`.
-//             This is the SAME string Endless Sky uses to build the
-//             "<name>: offered/active/done/failed/declined" condition
-//             keys in pilot.conditions, and the SAME string missionLoader.js
-//             calls `.name` on a parsed mission — so it's the join key
-//             for cross-referencing, not necessarily what's shown to
-//             the player (that's the `name` sub-line inside the block,
-//             folded into `raw` like everything else in this block).
-//    - raw  : the full { key, values, children } tree of everything
-//             inside the block — same shape missionParser.js uses for
-//             plugin mission data — so nothing in the block is lost
-//             even though this parser doesn't special-case any of it
-//             (cargo already loaded, remaining deadline days, etc. are
-//             all in here if present, just not pulled onto named
-//             fields the way ship attributes are).
-//
-//  Reconciling this with pilot.conditions (which DOES reliably tell you
-//  offered/active/done/failed/declined COUNTS) is deliberately left to
-//  the consumer — see missionStatusHelper.js, which combines "does a
-//  mission block exist" with "is its `<name>: active` condition > 0"
-//  to make a higher-confidence call, rather than this parser asserting
-//  a status it can't actually be sure of from the block alone.
-//
-//  GENERIC BLOCK CAPTURE
-//  -----------------------------------------------------------------
-//  Every other top-level block this file doesn't have a purpose-built
-//  parser for — `event`, `changes`, `economy`, `visited`, and anything
-//  a future save format adds — is captured the same way `mission` is:
-//  the whole block, verbatim, as a { key, values, children } tree, so
-//  nothing is silently dropped just because this parser doesn't know
-//  what to do with it yet. These land in `result.blocks[blockName]`,
-//  an array of `{ name, raw }` (name is the block's own quoted
-//  argument if it has one, e.g. `event "Some Event"` → name: "Some
-//  Event"; blocks with no argument like `changes`/`visited` get
-//  name: null). `result.events` and `result.changes` are just
-//  convenience aliases onto `blocks.event` / `blocks.changes`.
-//  A flat `key → first-line-text` view of every such block ALSO still
-//  lands in `pilot.raw`, same as before this existed, for simple
-//  single-line lookups that don't care about full fidelity.
-//
-//  Ships are returned in the same internal format used by
-//  shipBuilder.js:
-//  {
-//    id, name, customName, variant, plural, sprite, thumbnail,
-//    description, mass, drag,
-//    attributes: {},
-//    weapon: { 'blast radius', 'shield damage', 'hull damage', 'hit force' },
-//    outfits:      [{ name, count, pluginId }],
-//    guns:         [{ coords, over, extra }],
-//    turrets:      [{ coords, over, extra }],
-//    drones:       [{ coords, launchEffect, extra }],
-//    fighters:     [{ coords, launchEffect, extra }],
-//    engines:      [{ coords, zoom, angle, gimbal, over, under, extra }],
-//    reverseEngines: [{ coords, zoom, angle, gimbal, over, under, extra }],
-//    steeringEngines:[{ coords, zoom, angle, gimbal, over, under, side, extra }],
-//    leaks:        [{ name, openChance, spreadChance }],
-//    explode:      [{ name, count }],
-//    finalExplode: [{ name, count }],
-//    extraLines:   [],
-//    // Save-file-only fields:
-//    _modelName,   // the ship type/model e.g. "Peregrine"
-//    _customName,  // the named ship e.g. "Great Fox"
-//    _uuid,
-//    _swizzle,
-//    _crew,
-//    _fuel,
-//    _shields,
-//    _hull,
-//    _position,    // { x, y }
-//    _system,
-//    _planet,
-//    _parked,
-//    _formation,
-//    _sourceShip,
-//    _sourcePlugin,
-//  }
-//
-//  `extra` on every hardpoint entry (guns/turrets/engines/reverseEngines/
-//  steeringEngines/bays) is a generic, non-hardcoded attribute bag using
-//  EXACTLY the same naming convention as the main data parser (parser.js):
-//    - multiple numbers on ONE sub-block line (e.g. `arc -90 50`) become
-//      a nested object: { arc: { arc_1: -90, arc_2: 50 } }
-//    - the same attribute key appearing again on a LATER, separate line
-//      becomes a flat sibling key: "hit force", "hit force_2", ...
-//    - a single value stays a plain scalar: { zoom: 1 }
-//  This is what lets a ship round-trip through save-file import → the ship
-//  builder → raw ES text export without losing or corrupting any
-//  hardpoint/weapon attribute, however unusual.
-// ═══════════════════════════════════════════════════════════
+// Reads an Endless Sky save file into data the site can use (pilot, ships, cargo, missions, conditions …). Also runs in Node.
 
-// ── Tokeniser ────────────────────────────────────────────────────────────────
-// Splits a line into tokens, respecting "quoted strings" and `backtick strings`
+// ── split a line into tokens (quotes and backticks respected) ──
 function _esTok(str) {
   const tokens = [];
   let i = 0;
@@ -163,7 +36,7 @@ function _esTok(str) {
   return tokens;
 }
 
-// Strip surrounding quotes from a single token
+// strip quotes from a token
 function _esStrip(s) {
   if (!s) return '';
   s = s.trim();
@@ -174,21 +47,14 @@ function _esStrip(s) {
   return s;
 }
 
-// Return a clean display name (strip quotes, trim)
+// clean name (no quotes, trimmed)
 function _esName(tok) {
   return _esStrip(tok || '');
 }
 
-// ── Generic numeric-aware attribute-line parser / merger ─────────────────────
-// Mirrors parser.js's parseNumericAwareLine + mergeAttributeValue exactly, so
-// every hardpoint/weapon attribute captured from a save file uses the same
-// naming convention as the main plugin-data parser. Kept as a self-contained
-// copy (rather than a shared import) since this file also runs standalone in
-// Node via module.exports, with no guarantee parser.js is loaded alongside it.
+// ── attribute lines (same rules as the main parser) ──
 
-// Parse a single attribute line into [key, values], where `values` is always
-// an array — one entry per number/word found — so the caller can tell
-// "one line with several numbers" apart from "a single value".
+// one attribute line → [key, values]
 function _esAttrLine(stripped) {
   let key, rest;
   const qk = stripped.match(/^"([^"]+)"\s*(.*)$/) ||
@@ -221,9 +87,7 @@ function _esAttrLine(stripped) {
   return [key, [rest]];
 }
 
-// Merge a parsed occurrence into an attribute bag:
-//   - multiple values from ONE line  → nested { key: { key_1, key_2, ... } }
-//   - the SAME key on a later line   → flat sibling { key, key_2, ... }
+// add a parsed line to an attribute bag (repeated keys add up / become lists)
 function _esMergeAttr(data, key, values) {
   let outerKey = key;
   if (outerKey in data) {
@@ -240,42 +104,11 @@ function _esMergeAttr(data, key, values) {
   }
 }
 
-// ── Generic indentation tree builder (for mission blocks) ────────────────────
-// Mission blocks in a save file can contain essentially anything a plugin's
-// own mission definition can (conversations, choices, nested "to complete"
-// trees, arbitrary actions) — far more variety than this file's hand-rolled
-// ship/attribute state machine is built to special-case. Rather than trying
-// to enumerate every possible mission sub-structure here too, this builds
-// the exact same generic { key, values, children } tree shape
-// missionParser.js already uses for plugin mission data, so a mission block
-// round-trips with full fidelity regardless of what's inside it.
-//
-// `rawLines` is an array of { indent, text } for every line strictly inside
-// the mission block (i.e. everything after the `mission "Name"` line itself,
-// up to but not including the next indent-0 line). `baseIndent` is the
-// indent level of those immediate children (normally 1).
+// ── indentation tree for mission blocks ──
 function _esBuildRawTree(rawLines, baseIndent) {
-  // Turn each line into { indent, key, values } using the same per-line
-  // parser as attribute lines (handles quoted/backtick keys, numeric vs
-  // string values) — NOT the ship attribute merger, since mission blocks
-  // are trees, not flat bags, so sibling repeats stay as separate entries
-  // rather than being merged into "_2"/"_3" suffixes.
+  // each line → { indent, key, values }
   const parsedLines = rawLines.map(({ indent, text }) => {
-    // ES's mission grammar has a small, fixed set of bare TWO-WORD
-    // structural keywords ("to offer", "on complete", etc.) that are
-    // never quoted (quoting would defeat their special meaning to the
-    // game's own parser). _esAttrLine's generic "split at the first
-    // space" rule would wrongly treat these as key="to"/value="offer" —
-    // so they're special-cased here first, before falling through to
-    // the generic attribute-line parser for everything else.
-    //
-    // Shape matches the plugin catalog's own convention (missionParser.js,
-    // confirmed against real parsed data) rather than merging into one
-    // compound key — key: "to"/"on", values: ["offer", ...] — so a raw
-    // tree built from a save's held mission and one from the plugin
-    // catalog are structurally identical, and anything that inspects
-    // trigger blocks (like missionStatusHelper.js's pattern detectors)
-    // works the same regardless of which source it came from.
+    // two-word mission keywords ("to offer", "on complete" …) stay together
     const bareTwoWord = text.match(/^(to|on)\s+([a-zA-Z][a-zA-Z]*)\b\s*(.*)$/);
     if (bareTwoWord) {
       const [, lead, second, rest] = bareTwoWord;
@@ -289,9 +122,7 @@ function _esBuildRawTree(rawLines, baseIndent) {
     return { indent, key, values: values === true ? [] : (Array.isArray(values) ? values.filter(v => v !== true) : []) };
   });
 
-  // Stack-based tree build: track the most recently created node at each
-  // depth so a line can be attached as a child of whichever ancestor is
-  // still open at (line.indent - 1).
+  // build the tree with a stack (one node per depth)
   const root = [];
   const stack = [{ indent: baseIndent - 1, children: root }];
 
@@ -305,9 +136,7 @@ function _esBuildRawTree(rawLines, baseIndent) {
     stack.push({ indent: line.indent, children: node.children, node });
   }
 
-  // Drop the empty `children: []` arrays we pre-allocated on leaf nodes so
-  // this matches missionParser.js's convention of omitting `children`
-  // entirely (rather than an empty array) on entries with no sub-lines.
+  // drop empty children lists
   const prune = nodes => {
     for (const n of nodes) {
       if (n.children.length) prune(n.children);
@@ -319,6 +148,7 @@ function _esBuildRawTree(rawLines, baseIndent) {
 }
 
 
+// empty ship
 function _esBlankShip() {
   return {
     id: Date.now() + Math.random(),
@@ -371,35 +201,21 @@ function _esBlankShip() {
   };
 }
 
-// ── Engine/hardpoint sub-block reader ────────────────────────────────────────
-// After pushing a new engine/reverseEngine/steeringEngine/gun/turret entry,
-// subsequent indented lines carry arbitrary attributes (zoom, angle, gimbal,
-// arc, under, over, left, right, or anything else a plugin/save might use).
-// Everything lands in `extra` (see the naming convention note at the top of
-// this file); a handful of well-known keys are ALSO mirrored onto dedicated
-// convenience fields so existing code that reads e.g. `e.zoom`/`e.angle`
-// directly keeps working unchanged.
+// an engine / hardpoint line
 function _esMakeEngineEntry(coords) {
   return { coords, zoom: '', angle: '', gimbal: '', over: false, under: false, extra: {} };
 }
+// a steering engine line
 function _esMakeSteeringEntry(coords) {
   return { coords, zoom: '', angle: '', gimbal: '', over: false, under: false, side: '', extra: {} };
 }
 
-// ── Bay sub-block reader ─────────────────────────────────────────────────────
-// After a bay line, indented children may carry: angle, "launch effect", and
-// potentially anything else (over/under/left/right/parallel...) which lands
-// in `extra`.
+// a bay line
 function _esMakeBayEntry(coords) {
   return { coords, angle: '', launchEffect: '', extra: {} };
 }
 
-// ═══════════════════════════════════════════════════════════
-//  MAIN PARSE FUNCTION
-//  Returns { pilot, ships, missions, events, changes, blocks, storage,
-//            licenses, plugins, account, cargo }
-//  — see GENERIC BLOCK CAPTURE note below for `blocks`/`events`/`changes`.
-// ═══════════════════════════════════════════════════════════
+// the whole save → { pilot, ships, missions, … }. Called by: saveManager, saveEditor, the Node tests
 function parseESSaveFile(text) {
   const lines = text.split('\n');
 
@@ -424,14 +240,7 @@ function parseESSaveFile(text) {
     plugins: [],         // installed plugin names, exactly as written in the save file
     account: { credits: 0, score: 0, salaries: {}, history: [] },
     cargo: { outfits: {}, commodities: {} },
-    // Everything else: every top-level block name this parser doesn't have
-    // a dedicated handler for (event, changes, economy, visited, and
-    // whatever else shows up in future save formats) lands here, keyed by
-    // block name, as an array of { name, raw } — same generic tree shape
-    // as `missions`. `name` is the block's quoted argument if it has one
-    // (e.g. `event "Some Event"` → name: "Some Event"); blocks with no
-    // argument (e.g. `changes`, `visited`) get name: null. See "GENERIC
-    // BLOCK CAPTURE" note below.
+    // blocks without their own handler are kept as-is
     blocks: {},
   };
 
@@ -467,30 +276,14 @@ function parseESSaveFile(text) {
   // conditions block
   let inConditions = false;
 
-  // mission block capture — see "MISSION BLOCK PARSING" note at the top of
-  // this file for why this captures a generic tree rather than special-
-  // casing fields the way the ship parser does. `mission` is handled as
-  // its own named case (rather than falling into the fully generic bucket
-  // below) purely so `result.missions` stays a first-class, obviously-
-  // named field for missionStatusHelper.js to read.
+  // mission blocks are captured as raw trees
   let missionName   = null;   // identifier of the mission currently being captured
-  // `groups N` is its own top-level line written right AFTER the ship it
-  // belongs to (PlayerInfo::Save writes the ship, then its groups; Load
-  // applies it to ships.back()). It's attached to the most recent ship.
+  // `groups N` comes after the ship it belongs to
   let pendingGroups = null;   // kept for compatibility; no longer used
   let lastShip = null;
   let missionBuffer = [];     // [{ indent, text }] for every line inside it so far
 
-  // ── GENERIC BLOCK CAPTURE ──
-  // Any top-level block whose keyword isn't one of the special-cased ones
-  // above (ship/pilot/date/system/planet/playtime/flagship index/
-  // reputation with/conditions/licenses/plugins/account/storage/cargo/
-  // mission) falls through to here. Rather than maintaining a hand-rolled
-  // buffer+flag pair per block type — which is what `missionBuffer` above
-  // already is, and which doesn't scale to "capture literally everything
-  // I haven't thought of" — this is ONE buffer used for whichever such
-  // block is currently open, keyed by its block name (event, changes,
-  // economy, visited, or anything else a future save format adds).
+  // ── any other top-level block is kept verbatim ──
   let genericBlockName = null;   // e.g. 'event', 'changes', 'visited'
   let genericBlockArg  = null;   // the block's own quoted argument, if any
   let genericBuffer    = [];     // [{ indent, text }] for the currently open block
@@ -505,9 +298,7 @@ function parseESSaveFile(text) {
     const toks   = _esTok(t);
     const key0   = _esStrip(toks[0] || '');
 
-    // ════════════════════════════════════════════════════════
-    //  TOP LEVEL  (indent === 0)
-    // ════════════════════════════════════════════════════════
+    // ── top level ──
     if (indent === 0) {
       // Close any open ship
       if (cur) { result.ships.push(cur); cur = null; }
@@ -538,9 +329,7 @@ function parseESSaveFile(text) {
       inReputation = false; inConditions = false;
 
       topBlock = key0;
-      // Clear any stashed `groups` value unless this line is what it was
-      // waiting for (either the ship it belongs to, or another `groups`
-      // line for a different ship) — see pendingGroups declaration above.
+      // forget a stashed `groups` unless this line is its ship
       if (key0 !== 'ship' && key0 !== 'groups') pendingGroups = null;
 
       // ── ship ──
@@ -571,24 +360,15 @@ function parseESSaveFile(text) {
       if (key0 === 'storage')            { topBlock = 'storage'; continue; }
       if (key0 === 'cargo')              { inTopCargo = true; topBlock = 'cargo'; continue; }
       if (key0 === 'mission') {
-        // Start capturing this block's lines verbatim — finalised into
-        // result.missions the next time we hit an indent-0 line (handled
-        // above) or at end-of-file (handled after the loop).
+        // capture this mission block
         topBlock    = 'mission';
         missionName = _esName(toks[1] || '');
         missionBuffer = [];
         continue;
       }
-      // event / changes / economy / visited (and anything else) all fall
-      // through to the generic capture immediately below — no dedicated
-      // per-name branch needed.
+      // event / changes / economy / visited … go to the generic capture
 
-      // Anything not specially handled above — event, changes, economy,
-      // visited, and any block name a future save format adds — gets
-      // captured in full via the generic mechanism instead of being
-      // dropped. Also still record a flat single-line view in pilot.raw
-      // for anything that turns out to have no children at all, so
-      // existing simple lookups against pilot.raw keep working.
+      // anything else: generic capture
       result.pilot.raw[key0] = toks.slice(1).join(' ');
       genericBlockName = key0;
       genericBlockArg  = toks[1] != null ? _esName(toks[1]) : null;
@@ -596,9 +376,7 @@ function parseESSaveFile(text) {
       continue;
     }
 
-    // ════════════════════════════════════════════════════════
-    //  CAPTURE BLOCKS we don't have a dedicated parser for
-    // ════════════════════════════════════════════════════════
+    // ── blocks kept verbatim ──
     if (topBlock === 'mission') {
       // Capture verbatim for _esBuildRawTree() rather than discarding —
       // see the MISSION BLOCK PARSING note at the top of this file.
@@ -610,9 +388,7 @@ function parseESSaveFile(text) {
       continue;
     }
 
-    // ════════════════════════════════════════════════════════
-    //  REPUTATION  (indent 1)
-    // ════════════════════════════════════════════════════════
+    // ── reputation ──
     if (inReputation && indent === 1) {
       const faction = _esName(toks[0]);
       const val     = parseFloat(toks[1]) || 0;
@@ -620,9 +396,7 @@ function parseESSaveFile(text) {
       continue;
     }
 
-    // ════════════════════════════════════════════════════════
-    //  CONDITIONS  (indent 1)
-    // ════════════════════════════════════════════════════════
+    // ── conditions ──
     if (inConditions && indent === 1) {
       const ckey = _esName(toks[0]);
       const cval = toks[1] != null ? (parseFloat(toks[1]) || toks[1]) : true;
@@ -630,31 +404,19 @@ function parseESSaveFile(text) {
       continue;
     }
 
-    // ════════════════════════════════════════════════════════
-    //  LICENSES  (indent 1)
-    // ════════════════════════════════════════════════════════
+    // ── licences ──
     if (topBlock === 'licenses' && indent === 1) {
       result.licenses.push(_esName(toks[0]));
       continue;
     }
 
-    // ════════════════════════════════════════════════════════
-    //  PLUGINS  (indent 1)
-    //  Save file lists bare/quoted plugin names only, e.g.:
-    //    plugins
-    //        DAIS
-    //        "KGS (Kai's GIMPed Stuff)"
-    //        Rumskib
-    //  No version/count info — just the names as the game wrote them.
-    // ════════════════════════════════════════════════════════
+    // ── plugins (the save lists the plugins it was made with) ──
     if (topBlock === 'plugins' && indent === 1) {
       result.plugins.push(_esName(toks[0]));
       continue;
     }
 
-    // ════════════════════════════════════════════════════════
-    //  ACCOUNT  (indents 1-2)
-    // ════════════════════════════════════════════════════════
+    // ── account ──
     if (topBlock === 'account') {
       if (indent === 1) {
         inAccountSalaries = false;
@@ -672,9 +434,7 @@ function parseESSaveFile(text) {
       continue;
     }
 
-    // ════════════════════════════════════════════════════════
-    //  TOP-LEVEL CARGO  (indents 1-2)
-    // ════════════════════════════════════════════════════════
+    // ── cargo ──
     if (topBlock === 'cargo') {
       if (indent === 1) {
         inTopCargoOutfits = (key0 === 'outfits');
@@ -696,9 +456,7 @@ function parseESSaveFile(text) {
       continue;
     }
 
-    // ════════════════════════════════════════════════════════
-    //  STORAGE  (indents 1-4)
-    // ════════════════════════════════════════════════════════
+    // ── storage ──
     if (topBlock === 'storage') {
       if (indent === 1) {
         // new planet
@@ -724,12 +482,10 @@ function parseESSaveFile(text) {
       continue;
     }
 
-    // ════════════════════════════════════════════════════════
-    //  SHIP BLOCK
-    // ════════════════════════════════════════════════════════
+    // ── ship ──
     if (!cur) continue;
 
-    // ── INDENT 1 ─────────────────────────────────────────────
+    // ── indent 1 ──
     if (indent === 1) {
       // Leaving any sub-blocks
       attrBlock   = false;
@@ -846,12 +602,7 @@ function parseESSaveFile(text) {
         continue;
       }
 
-      // ── leak ──
-      // Format is a fixed, well-known triple: leak "effectName" openChance
-      // spreadChance. Both numbers are captured directly by position (not
-      // through the generic attribute parser) since there's no ambiguity
-      // to resolve here — this shape never had the "only the first number
-      // survives" bug that affected open-ended attributes like `arc`.
+      // leak "effect" openChance spreadChance
       if (key0 === 'leak') {
         cur.leaks.push({
           name:         _esName(toks[1] || ''),
@@ -882,22 +633,13 @@ function parseESSaveFile(text) {
       continue;
     }
 
-    // ── INDENT 2 ─────────────────────────────────────────────
+    // ── indent 2 ──
     if (indent === 2) {
 
       // Sprite animation sub-params — just skip
       if (inSpriteBlock) continue;
 
-      // ── engine / turret / gun sub-properties ──
-      // Every value is captured generically into `extra` using the same
-      // nested-object (multi-number-on-one-line) / flat-sibling (repeated
-      // key) convention as parser.js. A handful of well-known keys are
-      // ALSO mirrored onto dedicated convenience fields — but only for
-      // engines/reverse/steering engines, where there's no naming clash.
-      // For guns/turrets, `over` already means "the outfit mounted here"
-      // (captured from the gun/turret line itself), so a bare `over` or
-      // `under` flag underneath one is kept ONLY in `extra` to avoid
-      // silently overwriting the outfit name with a boolean.
+      // engine / turret / gun details, kept generically
       if (lastHP && lastHP.arr) {
         const entry = lastHP.arr[lastHP.idx];
         entry.extra = entry.extra || {};
@@ -943,14 +685,7 @@ function parseESSaveFile(text) {
         if (key0 === 'licenses') { attrSub = 'licenses'; cur.attributes.licenses = cur.attributes.licenses || {}; continue; }
         if (key0 === 'weapon')   {
           attrSub = 'weapon';
-          // _esBlankShip() pre-fills cur.weapon with placeholder zeros for
-          // the 4 well-known fields. If we merge real values into that
-          // object as-is, _esMergeAttr sees "blast radius" already
-          // present (as the placeholder 0) and wrongly treats the first
-          // REAL value as a second occurrence, shifting everything into
-          // "_2"/"_3". Since we now know this ship actually has its own
-          // weapon block, clear the placeholder first so the real values
-          // land on their plain, unsuffixed keys.
+          // replace the placeholder weapon values with the real ones
           cur.weapon = {};
           continue;
         }
@@ -993,7 +728,7 @@ function parseESSaveFile(text) {
       continue;
     }
 
-    // ── INDENT 3 ─────────────────────────────────────────────
+    // ── indent 3 ──
     if (indent === 3) {
       if (attrBlock) {
         if (attrSub === 'licenses') {
@@ -1001,11 +736,7 @@ function parseESSaveFile(text) {
           continue;
         }
         if (attrSub === 'weapon') {
-          // Same generic, nested/sibling-naming attribute merge as the
-          // outfit weapon blocks in parser.js — a ship's own `weapon`
-          // block (self-destruct/collision damage) can in principle carry
-          // multi-number or repeated attributes too, and this keeps every
-          // value instead of silently dropping all but the first number.
+          // nested attributes merged like outfit weapon blocks
           const parsed = _esAttrLine(t);
           if (parsed) {
             const [k, v] = parsed;
@@ -1047,25 +778,10 @@ function parseESSaveFile(text) {
   result.events  = result.blocks.event  || [];
   result.changes = result.blocks.changes || [];
 
-  // "available job" is a DISTINCT keyword from "mission" in real save
-  // files — confirmed against an actual save, not assumed: `mission "X"`
-  // is a genuinely held mission (has a uuid, and if any NPCs/on-enter
-  // triggers were set up when it was accepted, those are serialised too);
-  // `"available job" "X"` is a job-board candidate whose `to offer` roll
-  // already passed but that the player has NOT accepted — it carries none
-  // of that accepted-state machinery, just the template fields. So these
-  // get their own first-class field rather than being just another
-  // generic block, since missionStatusHelper.js needs to tell them apart
-  // reliably, not guess.
+  // "available job" is its own keyword (not "mission")
   result.availableJobs = result.blocks['available job'] || [];
 
-  // `visited` / `visited planet` are NOT a block-with-children in real
-  // save files — confirmed against an actual save — they're hundreds of
-  // separate single-line top-level entries, one per system/planet, e.g.
-  // `visited "1 Axis"` / `"visited planet" Ada`. The generic capture above
-  // already handles that correctly (each one starts and immediately closes
-  // its own zero-child "block"), so this just flattens the result into
-  // the plain string lists a consumer actually wants.
+  // visited / visited planet are single lines, not blocks
   result.visitedSystems = (result.blocks.visited || []).map(b => b.name).filter(Boolean);
   result.visitedPlanets = (result.blocks['visited planet'] || []).map(b => b.name).filter(Boolean);
 
@@ -1076,12 +792,9 @@ function parseESSaveFile(text) {
   return result;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  CONVENIENCE HELPERS
-// ═══════════════════════════════════════════════════════════
+// ── helpers ──
 
-// Convert a parsed save-file ship into the exact shape shipBuilder.js
-// uses internally (for dropping into sbFleet directly).
+// save ship → builder design
 function saveShipToBuilderFormat(ship) {
   return {
     id:          ship.id,
@@ -1126,9 +839,7 @@ function saveShipToBuilderFormat(ship) {
   };
 }
 
-// ── Browser entry point ───────────────────────────────────────────────────────
-// Call parseESSaveFile(text) directly, or use parseSaveFileFromInput() if you
-// have a file <input> element.
+// ── in the browser: read an <input type=file> ──
 async function parseSaveFileFromInput(fileInput) {
   const file = fileInput.files[0];
   if (!file) throw new Error('No file selected');
@@ -1136,7 +847,7 @@ async function parseSaveFileFromInput(fileInput) {
   return parseESSaveFile(text);
 }
 
-// ── Node.js entry point ───────────────────────────────────────────────────────
+// ── in Node ──
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { parseESSaveFile, saveShipToBuilderFormat, parseSaveFileFromInput, _esAttrLine, _esMergeAttr };
 }

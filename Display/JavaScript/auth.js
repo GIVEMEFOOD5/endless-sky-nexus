@@ -1,15 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  auth.js  —  Endless Sky Ship Builder
-//
-//  Thin wrapper around Supabase Auth, plus the one piece of app-specific
-//  logic that needs to know about login state right now: syncing which
-//  plugins are active to the logged-in user's account instead of (or
-//  alongside) localStorage, so it follows them across devices.
-//
-//  Requires supabaseClient.js to already be loaded on the page.
-// ═══════════════════════════════════════════════════════════
+// Login, sign-up and account settings (Supabase auth), plus syncing your selected plugins to your account.
 
 (function () {
 
@@ -20,6 +11,7 @@ const _authReady = new Promise(resolve => { _authReadyResolve = resolve; });
 const _listeners = [];
 let _isAdmin = null, _adminCheckedFor = null;   // see isAdmin()
 
+// load the profile row
 async function _loadProfile(userId) {
     if (!userId) { _currentProfile = null; return; }
     try {
@@ -31,6 +23,7 @@ async function _loadProfile(userId) {
     }
 }
 
+// tell listeners the user changed
 function _fireAuthChange() {
     for (const fn of _listeners) {
         try { fn(_currentUser, _currentProfile); } catch (e) { console.error('[Auth] listener error:', e); }
@@ -60,11 +53,7 @@ window.supabaseClient.auth.onAuthStateChange(async (event, session) => {
     }
 });
 
-/** Checks whether a username is free to take — used for inline validation
- * before submitting, so "taken" feedback shows up before the user hits
- * submit rather than only as a server error after. Not a hard guarantee
- * (someone could take it a moment later) — signUp() below still handles
- * the unique-constraint error as the real source of truth. */
+// is a username free? (for checking as you type)
 async function isUsernameAvailable(username) {
     // Case-insensitive check on the server (user_management.sql); falls back
     // to an exact match if that function hasn't been installed yet.
@@ -75,8 +64,7 @@ async function isUsernameAvailable(username) {
     return !row || row.id === _currentUser?.id;
 }
 
-/** Returns a message if the username isn't allowed, or '' if it's fine.
- * Same rule as the profiles_username_format check in the database. */
+// message if a username isn't allowed, '' if fine
 function usernameProblem(username) {
     const v = String(username || '').trim();
     if (v.length < 3) return 'Usernames need at least 3 characters.';
@@ -85,6 +73,7 @@ function usernameProblem(username) {
     return '';
 }
 
+// sign up
 async function signUp(email, password, username) {
     if (username) {
         const problem = usernameProblem(username);
@@ -96,10 +85,7 @@ async function signUp(email, password, username) {
         const { error: profileErr } = await window.supabaseClient
             .from('profiles').insert({ id: data.user.id, username });
         if (profileErr) {
-            // Most likely cause: username taken in the split second between
-            // the availability check and this insert. Signup itself still
-            // succeeded — surface this distinctly so the UI can say so
-            // rather than implying the whole signup failed.
+            // someone may have taken the name a moment ago
             const err = new Error(
                 profileErr.message.includes('duplicate') || profileErr.code === '23505'
                     ? 'That username was just taken — your account was created, but pick a different username to finish setting up your profile.'
@@ -113,51 +99,48 @@ async function signUp(email, password, username) {
     return data.user;
 }
 
+// log in
 async function signIn(email, password) {
     const { data, error } = await window.supabaseClient.auth.signInWithPassword({ email, password });
     if (error) throw error;
     return data.user;
 }
 
+// log out
 async function signOut() {
     await window.supabaseClient.auth.signOut();
-    // The active-plugins localStorage key is shared/global on this browser
-    // (dataLoader.js and generalPluginStuff.js both write to it) — clear it
-    // on sign-out so this account's picks don't linger as the "remembered"
-    // selection for whoever uses this browser next, logged in or not.
+    // selected plugins are per browser — sync them on login
     try { localStorage.removeItem('es_sb_active_plugins'); } catch (_) { /* ignore */ }
 }
 
-/** Resolves once the initial session check has completed (page load only). */
+// resolves once the session has been checked
 async function ready() {
     await _authReady;
     return _currentUser;
 }
 
+// current user
 function getCurrentUser() {
     return _currentUser;
 }
 
+// current profile
 function getCurrentProfile() {
     return _currentProfile;
 }
 
-/** What the UI should actually show — the username if one's set, the
- * email otherwise (covers accounts created before usernames existed, or
- * anyone who skipped setting one). */
+// username if set, else email
 function getDisplayName() {
     return _currentProfile?.username || _currentUser?.email || null;
 }
 
-/** Fires immediately with current state, then again on every login/logout.
- * Listener receives (user, profile) — profile is null if none is set. */
+// listen for login/logout (fires once straight away)
 function onAuthChange(fn) {
     _listeners.push(fn);
     if (_currentUser !== null || _listeners.length) fn(_currentUser);
 }
 
-/** Reads the logged-in user's saved active-plugin list, or null if signed
- * out / never saved one — callers should fall back to localStorage. */
+// your saved plugin selection (null if signed out)
 async function getActivePluginsPreference() {
     const user = await ready();
     if (!user) return null;
@@ -167,8 +150,7 @@ async function getActivePluginsPreference() {
     return data.active_plugins;
 }
 
-/** Silently does nothing if signed out — this is a "sync if logged in"
- * call, not a required save path (localStorage still gets written too). */
+// save it (does nothing if signed out)
 async function saveActivePluginsPreference(activePlugins) {
     const user = getCurrentUser();
     if (!user) return;
@@ -183,8 +165,7 @@ async function saveActivePluginsPreference(activePlugins) {
     }
 }
 
-/** Changes the current user's username. Rejects with a friendly message
- * on a uniqueness conflict, same as signUp()'s profile-creation step. */
+// change username
 async function updateUsername(newUsername) {
     const user = getCurrentUser();
     if (!user) throw new Error('You need to be logged in to do that.');
@@ -192,12 +173,7 @@ async function updateUsername(newUsername) {
     if (problem) throw new Error(problem);
     newUsername = newUsername.trim();
 
-    // FIX: was .update(...).eq('id', user.id) — that only touches a row
-    // that already exists. Any account without a profiles row yet (e.g.
-    // created before usernames existed) would match zero rows and return
-    // success with no error, looking like it worked while nothing was
-    // actually written. upsert creates the row if it's missing, updates
-    // it if it's already there.
+    // upsert so a missing profile row is created
     const { error } = await window.supabaseClient
         .from('profiles').upsert({ id: user.id, username: newUsername });
     if (error) {
@@ -211,8 +187,7 @@ async function updateUsername(newUsername) {
     _fireAuthChange();
 }
 
-/** Changes the current user's password. Supabase's own session token
- * authorizes this — no re-entry of the old password required. */
+// change password
 async function updatePassword(newPassword) {
     const user = getCurrentUser();
     if (!user) throw new Error('You need to be logged in to do that.');
@@ -220,10 +195,7 @@ async function updatePassword(newPassword) {
     if (error) throw error;
 }
 
-/** Changes the account email. Supabase sends a confirmation link to the
- * NEW address by default — the change only takes effect once that's
- * clicked, so the caller should tell the user to check their inbox
- * rather than assume this took effect immediately. */
+// change email (confirmation goes to the new address)
 async function updateEmail(newEmail) {
     const user = getCurrentUser();
     if (!user) throw new Error('You need to be logged in to do that.');
@@ -231,17 +203,18 @@ async function updateEmail(newEmail) {
     if (error) throw error;
 }
 
-/** Sends a "reset your password" email. The link brings the user back to
- * the account page, where navBar.js asks for the new password. */
+// "reset your password" email
 async function requestPasswordReset(email) {
     const redirectTo = new URL('UserManager.html', window.location.href).href;
     const { error } = await window.supabaseClient.auth.resetPasswordForEmail(email, { redirectTo });
     if (error) throw error;
 }
+// in the middle of a password reset?
 function isInPasswordRecovery() { return _inPasswordRecovery; }
+// set the new password
 function finishPasswordRecovery() { _inPasswordRecovery = false; }
 
-// ── admin check (user_management.sql: app_admins / is_admin()) ──
+// is this user an admin?
 async function isAdmin() {
     const user = getCurrentUser();
     if (!user) return false;
@@ -252,7 +225,7 @@ async function isAdmin() {
     return _isAdmin;
 }
 
-/** Everything this account has stored, as one JSON-ready object. */
+// everything this account stores, for download
 async function exportMyData() {
     const user = getCurrentUser();
     if (!user) throw new Error('You need to be logged in to do that.');
@@ -286,7 +259,7 @@ async function exportMyData() {
     };
 }
 
-/** Permanently deletes the account and everything stored with it. */
+// delete the account and everything in it
 async function deleteMyAccount() {
     const user = getCurrentUser();
     if (!user) throw new Error('You need to be logged in to do that.');

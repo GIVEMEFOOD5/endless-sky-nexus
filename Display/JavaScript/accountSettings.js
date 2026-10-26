@@ -1,17 +1,10 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  accountSettings.js  —  Endless Sky Ship Builder
-//
-//  Wires up the "My Account" panel on UserManager.html: change
-//  username, email, and password. Requires auth.js to already be
-//  loaded (it is, earlier on this page) — no defensive wait needed
-//  here the way navBar.js needs one, since this file only ever loads
-//  after auth.js in the document.
-// ═══════════════════════════════════════════════════════════
+// Account settings form (username, email, password).
 
 (function () {
 
+// message under the form
 function showMessage(elId, message, isError) {
     const box = document.getElementById(elId);
     if (!box) return;
@@ -20,12 +13,14 @@ function showMessage(elId, message, isError) {
         : '';
 }
 
+// button busy state
 function setButtonLoading(btn, loading, defaultLabel) {
     if (!btn) return;
     btn.disabled = loading;
     btn.textContent = loading ? 'Saving…' : defaultLabel;
 }
 
+// fill the form
 function render(user, profile) {
     const loggedOut = document.getElementById('account-logged-out');
     const loggedIn = document.getElementById('account-logged-in');
@@ -41,9 +36,7 @@ function render(user, profile) {
 
     const usernameField = document.getElementById('account-username');
     const emailField = document.getElementById('account-email');
-    // Don't clobber what the user's actively typing if this fires again
-    // (e.g. after a username save triggers onAuthChange) — only prefill
-    // on first render for this session.
+    // don't overwrite what you're typing
     if (!usernameField.dataset.touched) usernameField.value = profile?.username || '';
     if (!emailField.dataset.touched) emailField.value = user.email || '';
 }

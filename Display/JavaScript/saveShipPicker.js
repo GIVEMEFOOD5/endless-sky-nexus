@@ -1,24 +1,13 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  saveShipPicker.js — choose a ship to add to a save, or to refit one with
-//
-//  Three groups, in this order:
-//    1. Your ships     — every ship in your builder fleets, plus ships you've
-//                        shared from your account (private or public)
-//    2. Shared by other pilots — public ships only (the database only
-//                        returns public, non-hidden ships of other users)
-//    3. Game ships     — ships and variants from the plugins loaded here
-//
-//  window.SaveShipPicker.open({ mode: 'add'|'refit', title, onPick(choice) })
-//  choice = { kind: 'build', build, label, from }  |  { kind: 'game', ship, label, from }
-// ═══════════════════════════════════════════════════════════════════════════
+// Ship picker used by the save editor: game ships, your designs, other pilots' shared ships.
 
 (function () {
   const h = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const PAGE = 30;
   let state = null;
 
+  // game ships (selected plugins)
   function gameShips() {
     const local = window.DataLoader?.LOCAL_PLUGIN_ID || '__local_builds__';
     const seen = new Set(), out = [];
@@ -37,6 +26,7 @@
     return out.sort((a, b) => a.label.localeCompare(b.label));
   }
 
+  // your designs
   async function yourShips() {
     const out = [], ids = new Set();
     if (window.FleetStore) {
@@ -60,6 +50,7 @@
     return out;
   }
 
+  // pilots' shared ships
   async function sharedShips(query) {
     const sb = window.supabaseClient;
     if (!sb) return [];
@@ -76,7 +67,7 @@
       sub: [r.build_data?.attributes?.category, `by ${nameOf(r.user_id)}`].filter(Boolean).join(' · ') }));
   }
 
-  // ── modal ────────────────────────────────────────────────────────────────
+  // ── the window ──
   function ensure() {
     let m = document.getElementById('ssp-modal');
     if (m) return m;
@@ -102,13 +93,16 @@
     });
     return m;
   }
+  // close
   function close() { document.getElementById('ssp-modal')?.classList.remove('active'); state = null; }
 
+  // does a ship match the search?
   function matches(item) {
     const q = (state.query || '').toLowerCase();
     return !q || item.label.toLowerCase().includes(q) || (item.internal || '').toLowerCase().includes(q) || (item.sub || '').toLowerCase().includes(q);
   }
 
+  // one group of results
   function group(key, title, items, emptyText) {
     if (items === null) return `<h3 class="ssp-h">${h(title)}</h3><p class="ssp-empty">Loading…</p>`;
     const list = items.filter(matches);
@@ -122,6 +116,7 @@
       ${list.length > shown.length ? `<button class="btn btn-secondary btn-sm" data-more="${key}" style="margin-bottom:10px;">Show ${Math.min(PAGE, list.length - shown.length)} more</button>` : ''}`;
   }
 
+  // draw the list
   function renderBody() {
     if (!state) return;
     const body = document.getElementById('ssp-body');
@@ -143,6 +138,7 @@
     };
   }
 
+  // open it
   async function open({ mode = 'add', title, onPick }) {
     const m = ensure();
     state = { mode, onPick, query: '', limits: { yours: PAGE, shared: PAGE, game: PAGE }, yours: null, shared: null, game: gameShips() };

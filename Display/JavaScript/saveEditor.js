@@ -1,20 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  saveEditor.js — "Edit save" tab on UserManager.html
-//
-//  Edits the save's ORIGINAL text (kept by saveVault.js) through the
-//  lossless esSaveFile.js reader, so everything the editor doesn't touch is
-//  written back exactly as the game wrote it. Every change is kept as the
-//  save's edited version; "Download edited save" gives a .txt the game can
-//  load, and "Revert to original" throws the edits away.
-//
-//  Also adds to the saves library: which saves are kept in the account,
-//  saves from the account that aren't on this device yet, and an upload
-//  prompt for saves that are only in this browser.
-//
-//  Load after saveManager.js, esSaveFile.js and saveVault.js.
-// ═══════════════════════════════════════════════════════════════════════════
+// The ✏️ Edit tab on Saves & Account: change pilot, credits, ships, cargo, licences, missions, events — with undo.
 
 (function () {
   if (!window.EsSaveFile || !window.SaveVault) { console.warn('[SaveEditor] esSaveFile.js / saveVault.js missing'); return; }
@@ -22,10 +8,12 @@
   const E = window.EsSaveFile;
   const $ = id => document.getElementById(id);
   const h = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // message
   const say = (m, t) => (typeof toast === 'function' ? toast(m, t) : console.log(m));
+  // logged in?
   const loggedIn = () => !!(window.EsAuth && window.EsAuth.getCurrentUser());
 
-  // ── capture the original text of every new upload ────────────────────────
+  // ── keep the original text of every upload ──
   let pendingText = null;
   const origHandleFile = window.handleFile;
   window.handleFile = async function (file) {
@@ -62,8 +50,9 @@
     return r;
   };
 
-  // ── cloud library (under the saves list) ─────────────────────────────────
+  // ── your saves in your account (under the saves list) ──
   let cloudRenderSeq = 0;
+  // the account saves list
   async function renderCloudLibrary() {
     const lib = $('savesLibrary');
     if (!lib) return;
@@ -150,7 +139,7 @@
     });
   }
 
-  // ── tab plumbing ─────────────────────────────────────────────────────────
+  // add the Edit tab once
   function ensureTab() {
     const tabs = $('resultTabs');
     if (!tabs || tabs.querySelector('[data-tab="edit"]')) return;
@@ -169,9 +158,10 @@
     // the original tabs don't know about this pane — hide it when they're clicked
     tabs.querySelectorAll('.tab:not([data-tab="edit"])').forEach(t => t.addEventListener('click', () => pane.classList.add('hidden')));
   }
+  // which tab is open
   const activeTab = () => document.querySelector('#resultTabs .tab.active')?.dataset.tab;
 
-  // ── editor state ─────────────────────────────────────────────────────────
+  // ── editor state ──
   let doc = null;          // EsSaveFile.SaveFile
   let docId = null;
   let hasEdits = false;
@@ -187,6 +177,7 @@
   const U = () => window.UiKit;
   const matches = text => !search || (U() ? U().match(search, text, { strict: true }) > 0 : String(text).toLowerCase().includes(search.toLowerCase()));
 
+  // open the editor for the current save
   async function loadEditor() {
     const pane = $('tab-edit');
     if (!pane || !currentSaveId) return;
@@ -203,6 +194,7 @@
     render();
   }
 
+  // no original text for this save
   function renderNoOriginal(pane) {
     pane.innerHTML = `
       <section class="panel">
@@ -223,7 +215,7 @@
     };
   }
 
-  // Apply a change: persist the edited text, refresh the other tabs.
+  // apply a change: save the text, refresh the other tabs
   function changed(message, { undoable = false } = {}) {
     hasEdits = true;
     clearTimeout(saveTimer);
@@ -248,6 +240,7 @@
     if (message && undoable && U()) U().undoToast(message, undo);
     else if (message) say(message, 'success');
   }
+  // undo the last change
   function undo() {
     if (!undoStack.length) return;
     const prev = undoStack.pop();
@@ -257,25 +250,28 @@
     lastText = doc.toString();
     say('Undone.', 'success');
   }
+  // status line
   function setStatus(text, bad) {
     const s = $('sv-status');
     if (s) { s.textContent = text; s.style.color = bad ? 'var(--c-danger-text)' : 'var(--c-text-dim)'; }
   }
 
-  // ── render ───────────────────────────────────────────────────────────────
+  // ── drawing ──
   const numIn = (attr, value, extra = '') =>
     `<input type="number" class="text-input" style="width:100px;" ${attr} value="${h(value)}" ${extra}>`;
 
+  // draw the editor
   function render() {
     const pane = $('tab-edit');
     if (!pane || !doc) return;
     const p = doc.pilot, d = doc.date || { day: 1, month: 1, year: 3013 };
     const ships = doc.ships;
-    // active ships (and the flagship) first, then parked; filtered by the search box
+    // active ships (flagship first), then parked — filtered by the search
     const pg = (key, items) => {
       const r = U() ? U().paginate(items, pages[key], PAGE_SIZE[key]) : { slice: items, page: 1, pages: 1, from: 1, to: items.length, total: items.length };
       pages[key] = r.page; return r;
     };
+    // page buttons
     const pagerHtml = (key, r) => U() ? U().pager({ ...r, id: key }) : '';
     const matchingShips = ships.filter(s => matches(`${s.name} ${s.model} ${modelLabel(s.model)}`))
       .sort((a, b) => (b.isFlagship - a.isFlagship) || (a.parked - b.parked) || (a.index - b.index));
@@ -460,6 +456,7 @@
 
   // A model's display name (what the game shows), with the internal name dimmed beside it.
   let modelIdx = null, modelKey = '';
+  // the game ship a save ship is
   function modelShip(model) {
     const key = Object.keys(window.allData || {}).map(k => k + ':' + ((window.allData[k].ships || []).length)).join('|');
     if (!modelIdx || key !== modelKey) {
@@ -469,7 +466,9 @@
     }
     return modelIdx.get(model) || null;
   }
+  // its name
   function modelLabel(model) { const s = modelShip(model); return s && window.ShipNames ? window.ShipNames.label(s) : ''; }
+  // its name as HTML
   function modelHtml(model) {
     const s = modelShip(model);
     return s && window.ShipNames ? window.ShipNames.html(s) : h(model);
@@ -477,13 +476,14 @@
 
   // ── mission / event catalogues (from Supabase, for this save's plugins) ──
   const catalog = { missions: null, events: null, pluginIds: null };
-  // Mission/event pickers list what your selected plugins (☰ Select Plugins) contain.
+  // pickers only list what your selected plugins contain
   async function savePluginIds() {
     if (catalog.pluginIds) return catalog.pluginIds;
     const DL = window.DataLoader;
     const ids = DL && typeof DL.getActivePluginIds === 'function' ? [...DL.getActivePluginIds()] : null;
     return (catalog.pluginIds = ids && ids.length ? ids : null);
   }
+  // mission/event names for the selected plugins
   async function fetchNames(table, cols) {
     const sb = window.supabaseClient;
     if (!sb) return [];
@@ -500,14 +500,17 @@
     return rows;
   }
   const pluginLabel = id => String(id || '').split('/').pop();
+  // mission list
   async function missionCatalog() {
     if (!catalog.missions) catalog.missions = fetchNames('missions', 'id, name, display_name, plugin_id');
     return catalog.missions;
   }
+  // event list
   async function eventCatalog() {
     if (!catalog.events) catalog.events = fetchNames('game_events', 'name, plugin_id');
     return catalog.events;
   }
+  // search a list
   function searchList(rows, q, labelOf, subOf, valueOf) {
     const scored = [];
     for (const r of rows) {
@@ -518,6 +521,7 @@
     return scored.slice(0, 50).map(([, r]) => ({ value: valueOf(r), label: labelOf(r), sub: subOf(r), data: r }));
   }
 
+  // a mission's state in this save
   function missionState(name) {
     const g = k => Number(doc.getCondition(`${name}: ${k}`)) || 0;
     if (doc.missions.some(m => m.id === name)) return 'in this save (accepted or on offer)';
@@ -527,6 +531,7 @@
     if (g('offered')) return 'offered before';
     return 'never offered';
   }
+  // mission controls (complete, remove …)
   function missionPanel() {
     const m = pendingMission, sum = m.summary;
     const lines = window.MissionActions ? window.MissionActions.describe(sum) : [];
@@ -548,6 +553,7 @@
         <button class="btn btn-secondary btn-sm" data-act="cancelmission">Cancel</button></div>
     </div>`;
   }
+  // event controls (schedule …)
   function eventPanel() {
     const ev = pendingEvent, d = ev.date;
     return `<div style="margin-top:10px;padding:12px;border:1px solid var(--c-border);border-radius:8px;">
@@ -563,7 +569,7 @@
         <button class="btn btn-secondary btn-sm" data-act="cancelevent">Cancel</button></div>
     </div>`;
   }
-  // "Changes 3 systems, 1 planet, 2 links" from an event's raw definition
+  // "changes 3 systems, 1 planet …" from an event
   function summarizeEvent(raw) {
     const counts = {};
     try {
@@ -580,6 +586,7 @@
     const parts = Object.entries(counts).map(([k, c]) => `${c} ${(names[k] || [k, k + 's'])[c === 1 ? 0 : 1]}`);
     return parts.length ? `Changes ${parts.join(', ')}.` : 'This event has no map changes (it may only set story flags).';
   }
+  // add a game ship
   function addGameShip(model, name) {
     const D = window.ShipDefinition;
     if (!D) return false;
@@ -594,6 +601,7 @@
     doc.addShip(D.fromGameShip(found), { name, levels: D.maxLevels(attrs, D.outfitList(found.outfits), outfits) });
     return true;
   }
+  // wire up the type-ahead boxes
   function bindPickers() {
     if (!U()) return;
     const mi = $('sv-mission-pick');
@@ -629,6 +637,7 @@
     });
   }
 
+  // a ship's outfits editor
   function outfitEditor(s) {
     const entries = Object.entries(s.outfits);
     return `<div style="padding:10px 0 14px;">
@@ -645,6 +654,7 @@
     </div>`;
   }
 
+  // cargo / storage table
   function itemTable(kind, label, items, unit, list) {
     return `<div style="margin-bottom:14px;">
       <div style="font-weight:600;margin-bottom:6px;">${label === 'Commodity' ? 'Commodities' : label + 's'}</div>
@@ -659,9 +669,10 @@
       </div></div>`;
   }
 
-  // ── events ───────────────────────────────────────────────────────────────
+  // ── events ──
   const nonNeg = v => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : null; };
 
+  // wire up the editor
   function bind(pane) {
     pane.onchange = e => {
       const t = e.target;
@@ -825,9 +836,7 @@
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey && !typing && undoStack.length) { e.preventDefault(); undo(); }
   });
 
-  // ── add / refit from the ship picker ─────────────────────────────────────
-  // Cargo the ships you're flying (not parked) can hold, and what's in the hold now
-  // (commodities by the ton, outfits by their mass).
+  // ── add / refit from the ship picker (cargo is checked against the fleet's hold) ──
   function fleetHold() {
     const { ships, outfits } = gameIndex();
     const num = v => Number(v) || 0;
@@ -847,6 +856,7 @@
     return { capacity: Math.max(0, Math.round(capacity)), used: Math.round(used) };
   }
 
+  // name → game ship / outfit
   function gameIndex() {
     const ships = new Map(), outfits = new Map();
     for (const p of Object.values(window.allData || {})) {
@@ -856,6 +866,7 @@
     return { ships, outfits };
   }
 
+  // add or refit a picked ship
   function applyPicked(choice, refitIndex) {
     const D = window.ShipDefinition;
     if (!D || !doc) return;
@@ -889,6 +900,7 @@
     } catch (err) { say(err.message, 'danger'); }
   }
 
+  // one pilot field
   function pilotField(t) {
     const v = t.value.trim();
     switch (t.dataset.f) {
@@ -914,6 +926,7 @@
     }
   }
 
+  // one ship field
   function shipField(s, t) {
     switch (t.dataset.s) {
       case 'flagship': doc.setFlagshipIndex(s.index); return changed(`${s.name || s.model} is now your flagship.`);
@@ -928,6 +941,7 @@
     }
   }
 
+  // download the edited save
   function download() {
     const problems = doc.validate();
     if (problems.length && !confirm(`This save has problems the game may not like:\n\n• ${problems.join('\n• ')}\n\nDownload anyway?`)) return;
@@ -939,6 +953,7 @@
     say(`Downloaded ${name}.txt`, 'success');
   }
 
+  // go back to the original
   async function revert() {
     if (!confirm('Throw away all edits to this save and go back to the file you uploaded?')) return;
     const rec = await V.revert(docId);

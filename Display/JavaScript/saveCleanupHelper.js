@@ -1,102 +1,13 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  saveCleanupHelper.js
-//
-//  A second "helper" alongside missionStatusHelper.js — but where that
-//  one is read-only (answers questions about a save, never changes it),
-//  this one mutates. To keep those two concerns from tangling, edits
-//  never touch the save saveManager.js imported. Instead, everything
-//  here operates on a separate localStorage entry — the "Updated Save"
-//  — which starts as a copy of the current save and is what actually
-//  gets modified. The original stays exactly as imported, forever.
-//
-//  ── What "remove failed mission lines" means, precisely ────────────
-//  Endless Sky records a mission's resolved outcome as a condition
-//  named "<mission name>: failed" in the save's top-level `conditions`
-//  block. That block is exactly what esSaveParser.js already isolates
-//  into `save.pilot.conditions` — confirmed against a real save that
-//  this is NOT the same as the string "<name>: failed" appearing
-//  elsewhere, e.g. inside another mission's OWN `to fail` trigger
-//  (checking whether a different mission failed, as part of that
-//  mission's live logic) — those live inside a mission's `raw` tree,
-//  never in `pilot.conditions`, so operating only on
-//  `pilot.conditions` already can't accidentally touch them.
-//  "Removing" a failed-mission line means deleting that one condition
-//  key from the Updated Save's `pilot.conditions`.
-//
-//  ── What "events if they have been triggered" means, precisely ─────
-//  A save's `event` block(s) (see esSaveParser.js's GENERIC BLOCK
-//  CAPTURE note) describe a scheduled world-state change with a `date`
-//  child — e.g. `event \n date 17 2 3027 \n ...`. Comparing that date
-//  against the pilot's own current date (`save.pilot.date`, same
-//  `DD MM YYYY` format) tells you whether the event's date has already
-//  passed. Endless Sky is supposed to apply and clear an event once
-//  its date arrives; one still sitting in the save with a past date is
-//  exactly the "triggered but not cleaned up" case this exists for.
-//  Events with a FUTURE date are left alone — they haven't happened
-//  yet, removing them would silently cancel something still pending.
-//
-//  ── What "remove an individual mission" means, precisely ────────────
-//  Confirmed against a real save: for every currently-held mission, its
-//  "<name>: active" and "<name>: offered" conditions sit as ADJACENT
-//  lines in the conditions block (in that order). That confirmed the
-//  mechanism, but removal isn't limited to held missions — it strips
-//  every trace of a mission regardless of its current status: the held
-//  `mission` block if it has one, an `"available job"` entry if it has
-//  one instead, and every condition key that exists for that name
-//  (offered/active/done/failed/declined). A mission that's already
-//  resolved (done or failed, no longer held) only has condition
-//  entries left — removing just active/offered wouldn't touch those,
-//  so all five get checked and cleared, whichever are actually present.
-//
-//  ── What "complete a mission" means, precisely ───────────────────────
-//  Different from removal: this simulates the mission actually
-//  finishing successfully, not un-happening. Confirmed against a real
-//  save (a repeatable mission completed 14 times, failed 2, with no
-//  "active" key left over at all): completion DECREMENTS "active" by
-//  1 (deleting the key entirely if that reaches 0, since Endless Sky
-//  never writes "active" as a literal 0) and INCREMENTS "done" by 1 —
-//  it does NOT touch "offered", which is cumulative history. Rewards
-//  (money, outfits) are taken from the mission's `onComplete`-triggered
-//  grants specifically — confirmed against real plugin data that
-//  `grantedIn` uses exactly that string, alongside onOffer/onAccept/
-//  onVisit/etc. for the OTHER trigger points this deliberately ignores,
-//  since those would have already applied when the mission was offered/
-//  accepted, not now.
-//  Ship rewards are NOT added to the save's ship list — doing that
-//  properly needs the ship's full stat/outfit data, which this page
-//  doesn't load (that lives in dataLoader.js's ship catalog, a
-//  different page entirely). completeMission() reports them back
-//  instead of silently fabricating an incomplete ship entry.
-//
-//  Public API on window.SaveCleanupHelper:
-//    .getUpdatedSave()          → the working copy, or null if no save is loaded
-//    .resetUpdatedSave()        → discard edits, recopy from the current save
-//    .listFailedConditions()    → [{ key, name, count }]
-//    .listTriggeredEvents()     → [{ index, dateText, raw }]
-//    .removeFailedCondition(name)   → remove one, returns updated save
-//    .removeAllFailedConditions()   → remove every one currently listed
-//    .removeTriggeredEvent(index)   → remove one, returns updated save
-//    .removeAllTriggeredEvents()    → remove every one currently listed
-//    .removeMission(name)           → erase a held mission entirely
-//    .completeMission(name, rewards) → simulate completion + apply rewards
-//                                       rewards: { credits, outfits:[{name,count}],
-//                                                  ships:[{name,count}] } — caller
-//                                       (the display layer, which has the plugin
-//                                       catalog) builds this from the mission's
-//                                       own onComplete-triggered payment/rewards.
-//                                       Returns { save, unappliedShips }.
-// ═══════════════════════════════════════════════════════════
+// "Updated Save": a cleaned-up copy of your save (remove failed missions, triggered events …) for the Missions page.
 
 (function () {
 
 // Same keys saveManager.js writes to — see that file's own header comment.
 const SM_CURRENT_KEY = 'ES_SM_CURRENT';
 const SM_SAVE_PREFIX  = 'ES_SM_SAVE_';
-// New key this file owns. Singular/current, not per-save-id, mirroring
-// how ES_SM_ACTIVE_SAVE_SHIPS already tracks "a derived working copy for
-// whichever save is current" rather than one per save ever imported.
+// this file's own storage key (one at a time, like the active save ships)
 const SM_UPDATED_SAVE_KEY = 'ES_SM_UPDATED_SAVE';
 
 function _readJSON(key) {
@@ -118,13 +29,13 @@ function _writeJSON(key, value) {
   }
 }
 
+// the original save
 function _getOriginalSave() {
   const id = _readJSON(SM_CURRENT_KEY);
   return id ? _readJSON(SM_SAVE_PREFIX + id) : null;
 }
 
-// Returns the Updated Save, creating it from the current original save
-// on first use. Returns null only if there's no save loaded at all.
+// the Updated Save (made from the current save the first time). Called by: UserManagerMissionDisplay
 function getUpdatedSave() {
   let updated = _readJSON(SM_UPDATED_SAVE_KEY);
   if (updated) return updated;
@@ -137,6 +48,7 @@ function getUpdatedSave() {
   return updated;
 }
 
+// start again from the original
 function resetUpdatedSave() {
   const original = _getOriginalSave();
   if (!original) return null;
@@ -145,7 +57,7 @@ function resetUpdatedSave() {
   return fresh;
 }
 
-// ── Failed-condition listing/removal ─────────────────────────
+// ── failed conditions ──
 function listFailedConditions(save) {
   save = save || getUpdatedSave();
   if (!save || !save.pilot || !save.pilot.conditions) return [];
@@ -158,6 +70,7 @@ function listFailedConditions(save) {
   return out;
 }
 
+// remove one failed condition
 function removeFailedCondition(name) {
   const save = getUpdatedSave();
   if (!save) return null;
@@ -166,6 +79,7 @@ function removeFailedCondition(name) {
   return save;
 }
 
+// remove them all
 function removeAllFailedConditions() {
   const save = getUpdatedSave();
   if (!save) return null;
@@ -174,9 +88,7 @@ function removeAllFailedConditions() {
   return save;
 }
 
-// ── Triggered-event listing/removal ──────────────────────────
-// Parses a `DD MM YYYY` string (pilot.date's format) into a comparable
-// [year, month, day] tuple. Returns null if it doesn't look like that.
+// "DD MM YYYY" → date
 function _parseDate(str) {
   if (!str) return null;
   const parts = String(str).trim().split(/\s+/).map(Number);
@@ -185,6 +97,7 @@ function _parseDate(str) {
   return [year, month, day];
 }
 
+// is date a on or before date b?
 function _dateLTE(a, b) {
   for (let i = 0; i < 3; i++) {
     if (a[i] !== b[i]) return a[i] < b[i];
@@ -192,9 +105,7 @@ function _dateLTE(a, b) {
   return true; // exactly equal counts as "has arrived"
 }
 
-// An event block's own date lives as a `date` entry among its raw
-// children (see esSaveParser.js's _esBuildRawTree) — values are numbers
-// there already, not a string, since the whole line was numeric tokens.
+// an event's own date
 function _eventDateTuple(eventEntry) {
   const dateNode = (eventEntry.raw || []).find(n => n.key === 'date');
   if (!dateNode || dateNode.values.length !== 3) return null;
@@ -202,6 +113,7 @@ function _eventDateTuple(eventEntry) {
   return [year, month, day];
 }
 
+// events that have already happened
 function listTriggeredEvents(save) {
   save = save || getUpdatedSave();
   if (!save) return [];
@@ -225,6 +137,7 @@ function listTriggeredEvents(save) {
   return out;
 }
 
+// remove one
 function removeTriggeredEvent(index) {
   const save = getUpdatedSave();
   if (!save || !Array.isArray(save.events)) return null;
@@ -236,6 +149,7 @@ function removeTriggeredEvent(index) {
   return save;
 }
 
+// remove them all
 function removeAllTriggeredEvents() {
   const save = getUpdatedSave();
   if (!save) return null;
@@ -248,18 +162,7 @@ function removeAllTriggeredEvents() {
   return save;
 }
 
-// ── Mission removal ───────────────────────────────────────────
-// Strips a mission out of the save entirely, whatever state it's
-// currently in — not just currently-held ones:
-//   - a held `mission` block, if it has one
-//   - an `"available job"` entry, if it has one instead
-//   - EVERY condition key for that name — offered/active/done/failed/
-//     declined, whichever exist. A resolved mission (done or failed,
-//     no longer held) only has condition entries, no data block, so
-//     removing just "active"/"offered" alone wouldn't touch it — this
-//     covers a mission at any point in its lifecycle, not only the
-//     "just accepted" case the offered/active pairing was confirmed
-//     against.
+// remove a mission block from the save
 function _pullMissionBlock(save, name) {
   const idx = (save.missions || []).findIndex(m => m.name === name);
   if (idx === -1) return null;
@@ -268,6 +171,7 @@ function _pullMissionBlock(save, name) {
   return removed;
 }
 
+// remove an available job
 function _pullAvailableJob(save, name) {
   const idx = (save.availableJobs || []).findIndex(m => m.name === name);
   if (idx === -1) return null;
@@ -276,6 +180,7 @@ function _pullAvailableJob(save, name) {
   return removed;
 }
 
+// remove a mission
 function removeMission(name) {
   const save = getUpdatedSave();
   if (!save) return null;
@@ -288,36 +193,7 @@ function removeMission(name) {
   return save;
 }
 
-// ── Mission completion ───────────────────────────────────────
-// Simulates a mission finishing successfully — from WHATEVER state it's
-// currently in, not only currently-held ones:
-//   - held        → pulls the block, decrements "active" (deleting the
-//                    key at 0, never writing a literal 0 — matches
-//                    confirmed real-save behaviour)
-//   - available   → pulls it out of the available-jobs list instead
-//   - anything else (declined, offered-only, never encountered, or
-//     already done/failed before on a repeatable) → no block/listing to
-//     pull, "active" is left alone since it was never incremented in
-//     the first place
-//
-// `opts.repeatable` matters for what happens to any EXISTING failed/
-// declined history:
-//   - repeatable missions can legitimately have mixed history (done
-//     some times, failed others) — that history is left alone, "done"
-//     is just incremented on top, matching a real repeatable mission's
-//     own condition counters.
-//   - non-repeatable missions can only ever resolve ONE way, ever — a
-//     real save can never have both "done" and "failed"/"declined" set
-//     for the same non-repeatable mission at once. So completing one
-//     that currently shows failed/declined CLEARS those first, since
-//     leaving them would create a state the actual game can't produce
-//     (and other missions' `to offer`/`to fail` checks sometimes test
-//     these condition names directly — see esSaveParser.js's mission-
-//     block note on why that's not just cosmetic).
-//
-// `rewards` shape: { credits: number, outfits: [{name, count}], ships: [{name, count}] }
-// Ship rewards are reported back in `unappliedShips`, not written to
-// save.ships — see the header note on why.
+// complete a mission the way the game would (rewards, conditions, events)
 function completeMission(name, rewards, opts) {
   const save = getUpdatedSave();
   if (!save) return null;

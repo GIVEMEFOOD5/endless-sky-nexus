@@ -1,25 +1,15 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  accountCenter.js — extra sections in "My Account" on UserManager.html
-//
-//    • Shared ships   — every ship this user saved from the builder: make it
-//                       public or private, copy its link, add it to a fleet,
-//                       delete it. Only ships marked public are visible to
-//                       anyone else.
-//    • Your data      — download everything the account stores; delete the
-//                       account.
-//    • Moderation     — admins only (app_admins): open reports, hide/unhide
-//                       a shared ship, reset an abusive username.
-//
-//  Needs auth.js, supabaseClient.js; fleetStore.js/saveVault.js if present.
-// ═══════════════════════════════════════════════════════════════════════════
+// The Account tab: shared ships, your data (export / delete), and admin tools.
 
 (function () {
+  // Supabase client
   const sb = () => window.supabaseClient;
   const A = window.EsAuth;
   const h = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // message
   const say = (m, t) => (typeof toast === 'function' ? toast(m, t) : alert(m));
+  // link to a page
   const pageUrl = (page, params) => { const u = new URL(page, location.href); for (const [k, v] of Object.entries(params || {})) u.searchParams.set(k, v); return u.href; };
   window.EsLinks = {
     ship: id => pageUrl('shipBuilder.html', { shared: id }),
@@ -32,6 +22,7 @@
   root.id = 'ac-root';
   host.appendChild(root);
 
+  // draw the tab
   async function render() {
     const user = A.getCurrentUser();
     if (!user) { root.innerHTML = ''; return; }
@@ -59,7 +50,7 @@
     if (await A.isAdmin()) { renderAdmin(); renderSiteErrors(); }
   }
 
-  // ── shared ships ─────────────────────────────────────────────────────────
+  // ── shared ships ──
   async function renderShips() {
     if (window.PluginAvailability) await window.PluginAvailability.ready;
     const box = document.getElementById('ac-ships');
@@ -110,7 +101,7 @@
     };
   }
 
-  // ── your data ────────────────────────────────────────────────────────────
+  // ── your data ──
   async function exportData() {
     const b = document.getElementById('ac-export');
     b.disabled = true; b.textContent = 'Preparing…';
@@ -124,6 +115,7 @@
     finally { b.disabled = false; b.textContent = 'Download my data'; }
   }
 
+  // delete account (asks first)
   function openDelete() {
     let m = document.getElementById('ac-delete-modal');
     if (!m) {
@@ -172,8 +164,7 @@
     m.classList.add('active');
   }
 
-  // ── moderation (admins) ──────────────────────────────────────────────────
-  // Errors from visitors' browsers (errorReporter.js → client_errors), most common first
+  // ── admin: site errors and moderation ──
   async function renderSiteErrors() {
     const box = document.getElementById('ac-admin');
     if (!box) return;
@@ -196,6 +187,7 @@
         : '<p style="font-size:0.84rem;">✅ No errors reported this week.</p>'}`;
   }
 
+  // admin section
   async function renderAdmin() {
     const box = document.getElementById('ac-admin');
     if (!box) return;

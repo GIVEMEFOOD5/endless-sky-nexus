@@ -1,30 +1,19 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  saveCache.js — parsed saves that never need re-uploading
-//
-//  The pages read each save's parsed JSON from localStorage
-//  (ES_SM_SAVE_<id>). Big saves don't fit there (localStorage is ~5 MB per
-//  site), and the write used to fail silently — so after a reload the save
-//  looked "gone" and had to be uploaded again.
-//
-//  The original .txt is always kept in IndexedDB by saveVault.js, so this
-//  rebuilds the parsed JSON from it whenever localStorage doesn't have it,
-//  and keeps it in memory for the page. Pages call EsSaveCache.get(id)
-//  instead of failing; 'esSaveCacheReady' fires once the preload is done.
-//
-//  Needs esSaveParser.js (parseESSaveFile) and saveVault.js.
-// ═══════════════════════════════════════════════════════════════════════════
+// Parsed saves too big for localStorage: rebuilt from the stored text and kept in memory.
 
 (function () {
   const mem = new Map();
   const readJSON = k => { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : null; } catch (_) { return null; } };
 
+  // cached parsed save
   function get(id) { return id ? (mem.get(id) || null) : null; }
+  // cache one
   function set(id, parsed) { if (id && parsed) mem.set(id, parsed); }
+  // forget one
   function drop(id) { mem.delete(id); }
 
-  /** Parsed save for `id`: localStorage, then memory, then rebuilt from the stored text. */
+  // parsed save: localStorage, then memory, then rebuilt from the text
   async function ensure(id) {
     if (!id) return null;
     const stored = readJSON('ES_SM_SAVE_' + id);
