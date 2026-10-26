@@ -1,42 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  battleSimEngagement.js — how the fight is FLOWN, with skilled pilots
-//
-//  The core simulator (battleSim.js) handles damage, shields, energy, heat,
-//  ammo, status effects and anti-missile frame by frame. This module adds
-//  the flying, so not every shot is a guaranteed hit:
-//
-//  • Distance. Both sides start out of range. Each pilot works out which
-//    distance suits them best — where their expected damage most exceeds
-//    the enemy's — and flies there. If one wants to be farther away and the
-//    other closer, the faster ship decides: a quicker ship with longer reach
-//    can sit where the enemy can't answer (kiting); a quicker brawler can
-//    close in. Acceleration matters while getting up to speed.
-//  • Range. A weapon only fires when the target is within its reach
-//    (velocity × lifetime, submunitions included). Good pilots hold fire
-//    out of range rather than waste ammo and energy.
-//  • Facing. Fixed guns must point at the target. While the enemy circles,
-//    the pilot needs enough turning to keep up (target sideways speed ÷
-//    distance); turrets use their own turret turn rate instead. A ship
-//    running away can only snap round to fire forward guns now and then.
-//  • Accuracy (unguided shots). Flight time = distance ÷ projectile speed.
-//    In that time a good pilot sidesteps (limited by speed and
-//    acceleration), and the weapon's inaccuracy spreads shots over a cone.
-//    Hit chance = target size ÷ (target size + spread + dodge). Beams and
-//    near-instant shots can't be dodged.
-//  • Guidance (homing missiles), from Projectile.cpp: radar lock falls with
-//    radar jamming, optical lock with optical jamming (both weaker at range:
-//    1 − d / (500 + √jamming·500)), infrared lock with how hot the target
-//    runs; a missile with several seekers locks if any one does.
-//  • Status effects: ionised ships can't run engines, overheated ships
-//    can't fly or fire, slowing reduces top speed.
-//
-//  Teams are flown as a group (speed, turning, size and jamming averaged
-//  over their ships).
-//
-//  window.BattleEngagement — used by battleSim.js when "Skilled pilots" is on.
-// ═══════════════════════════════════════════════════════════════════════════
+// How the fight is flown: distance, kiting, aim, dodging, turning and missile locks, with pilot skill. Used by battleSim.
 
 (function () {
   const FPS = 60;
@@ -46,7 +10,7 @@
   const RAD = 180 / Math.PI;
   const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 
-  /** Fleet-level movement & size from a merged team (stats._teamShips). */
+  // a team's speed, turning and size. Called by: side
   function movement(stats) {
     const entries = stats._teamShips && stats._teamShips.length ? stats._teamShips : [{ resolved: stats, count: 1 }];
     let n = 0, speed = 0, accel = 0, turn = 0, radius = 0, radar = 0, optical = 0;
@@ -65,10 +29,7 @@
     return { speed: speed / n, accel: accel / n, turn: turn / n, radius: radius / n, radar: radar / n, optical: optical / n };
   }
 
-  /**
-   * Per-weapon flying facts. `meta` comes from battleSim.js (it can resolve
-   * submunition ranges); here we just normalise.
-   */
+  // what a weapon does in flight (range, speed, homing …)
   function weaponFacts(w, meta) {
     const vel = num(w.velocity) * FPS;                          // px/s
     const life = num(w.lifetime);
@@ -86,8 +47,9 @@
     };
   }
 
-  // ── chances ──────────────────────────────────────────────────────────────
+  // ── hit and lock chances ──
   const jamAt = (j, d) => j > 0 ? j * (1 - Math.min(1, d / (500 + Math.sqrt(j) * 500))) : 0;
+  // missile lock chance
   function lockChance(f, target, d, heatFrac) {
     const t = f.track;
     const any = t.radar + t.optical + t.infrared + t.generic;
@@ -100,10 +62,9 @@
     ];
     return 1 - p.reduce((miss, x) => miss * (1 - x), 1);
   }
-  // Pilot skill (0–1, the share of a side flown by skilled pilots):
-  //   skilled pilots dodge, lead their shots and keep their guns on target;
-  //   ordinary pilots fly straight at the enemy, don't dodge and aim worse.
+  // skill 0–1: skilled pilots dodge, lead and track; ordinary ones charge in
   const skillOf = s => (s && Number.isFinite(s.skill) ? Math.max(0, Math.min(1, s.skill)) : 1);
+  // chance an unguided shot hits
   function unguidedHit(f, attacker, target, d) {
     const t = f.beam || !f.speed ? 0 : d / f.speed;                // flight time (s)
     const dodge = DODGE_SHARE * skillOf(target) * Math.min(target.speedNow * t, 0.5 * target.accel * t * t);
@@ -111,6 +72,7 @@
     const aim = 0.7 + 0.3 * skillOf(attacker);                      // leading the target
     return Math.max(0.03, Math.min(1, aim * target.radius / (target.radius + 0.5 * spread + dodge)));
   }
+  // can the guns stay on target?
   function facing(f, attacker, target, d) {
     // the enemy's sideways motion, as an angle per second seen from here
     const omega = (target.speedNow * 0.5 / Math.max(MIN_DISTANCE, d)) * RAD;
@@ -118,14 +80,9 @@
     return omega <= 0 ? 1 : Math.max(0.15, Math.min(1, canTurn / omega));
   }
 
-  /**
-   * One engagement between side A and side B.
-   *   create(sA, sB, metaA, metaB) → engagement
-   *   eng.step(stA, stB)            once per frame, before firing
-   *   eng.factor('A'|'B', i, defSt) expected share of weapon i's damage that lands (0 = hold fire)
-   *   eng.summary()                 numbers and plain-English notes for the report
-   */
+  // one fight between A and B: create(), then step() every frame. Called by: battleSim.simulateBattle
   function create(sA, sB, metaA, metaB) {
+    // one side's numbers
     const side = (stats, meta) => {
       const mv = movement(stats);
       return { stats, mv, facts: stats.weapons.map((w, i) => weaponFacts(w, meta && meta[i])), v: 0, speedNow: mv.speed, turnNow: mv.turn,
@@ -138,7 +95,7 @@
     let vel = 0;   // current rate of change of the distance, px/frame
     const log = { frames: 0, distSum: 0, engaged: 0, engagedDist: 0, inRangeA: 0, inRangeB: 0, hitA: 0, firedA: 0, hitB: 0, firedB: 0, kitedA: 0, kitedB: 0 };
 
-    // Expected damage per second one side deals at distance x (static estimate, used to plan).
+    // expected damage per second at a distance (for planning)
     const nominal = (me, foe, x) => {
       let sum = 0;
       me.facts.forEach((f, i) => {
@@ -151,6 +108,7 @@
       });
       return sum;
     };
+    // distances worth considering
     const candidates = () => {
       // planned distances sit just inside or just outside someone's reach (never exactly on it)
       const r = new Set([MIN_DISTANCE]);
@@ -158,10 +116,9 @@
       return [...r].filter(x => x >= MIN_DISTANCE && x <= START_DISTANCE).sort((a, b) => a - b);
     };
     const regen = s => num(s.stats.shieldRegenPerSec) + num(s.stats.hullRepairPerSec);
+    // pick a distance
     const plan = (me, foe) => {
-      // Best distance = where my damage (beyond their repairs) wears them down
-      // fastest compared with how fast theirs wears me down. Sitting out of
-      // reach only helps if my own damage still beats their regeneration.
+      // best distance: where I wear them down fastest compared with them wearing me down
       let best = MIN_DISTANCE, bestScore = -Infinity;
       const myHp = me.stats.maxShields + me.stats.maxHull, foeHp = foe.stats.maxShields + foe.stats.maxHull;
       for (const x of candidates()) {
@@ -171,7 +128,7 @@
       }
       return best;
     };
-    // Skilled pilots fly to their best distance; ordinary ones close in to brawl.
+    // skilled pilots fly to their best distance; ordinary ones close in
     const want = (me, foe) => MIN_DISTANCE + me.skill * (plan(me, foe) - MIN_DISTANCE);
     A.want = want(A, B); B.want = want(B, A);
 
@@ -179,6 +136,7 @@
     // keep up), a good pilot moves in closer to where more of my weapons bite.
     const RETHINK = 5 * FPS;
     const hpOf = st => Math.max(0, st.shields) + Math.max(0, st.hull);
+    // change plan if not getting through (skilled only)
     function rethink(me, foe, foeSt) {
       if (me.skill < 0.5) return;                       // only skilled pilots change their plan mid-fight
       if (me.lastFoeHp != null && hpOf(foeSt) >= me.lastFoeHp - 1) {
@@ -188,6 +146,7 @@
       me.lastFoeHp = hpOf(foeSt);
     }
 
+    // move one frame
     function step(stA, stB) {
       // once one side is out of the fight there's nothing left to fly (and it would skew the report)
       if (stA.disabled || stA.destroyed || stB.disabled || stB.destroyed) return;
@@ -198,9 +157,7 @@
         s.speedNow = stalled ? 0 : s.mv.speed * slow;
         s.turnNow = stalled ? 0 : s.mv.turn;
       }
-      // which way each pilot wants the distance to go: +1 farther, −1 closer, 0 hold
-      // happy anywhere from 20 px inside the planned distance up to it (never just past it:
-      // the plan is often "right at the edge of my reach")
+      // which way each pilot wants the distance to go (+1 away, −1 closer, 0 hold)
       const dirOf = s => (d < s.want - 20 ? 1 : d > s.want ? -1 : 0);
       A.dir = dirOf(A); B.dir = dirOf(B);
       let rate;   // change in distance, px/s
@@ -241,6 +198,7 @@
       if (inB && !inA) log.kitedA++;
     }
 
+    // damage multiplier for a weapon this frame
     function factor(who, i, defSt) {
       const me = sides[who], foe = who === 'A' ? B : A;
       const f = me.facts[i];
@@ -257,6 +215,7 @@
       return p;
     }
 
+    // notes on how it was flown
     function summary(nameA, nameB) {
       const avgD = log.engaged ? log.engagedDist / log.engaged : (log.frames ? log.distSum / log.frames : d);
       const reachA = Math.max(0, ...A.facts.filter(f => f.damaging).map(f => f.range));

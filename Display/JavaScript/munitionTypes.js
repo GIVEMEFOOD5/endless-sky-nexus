@@ -1,66 +1,14 @@
 ;(function () {
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  munitionTypes.js  —  Endless Sky Munition Analysis Module
-// ═══════════════════════════════════════════════════════════════════════════════
-//
-//  OVERVIEW
-//  ────────
-//  This module analyses every weapon (outfit with a "weapon" block) loaded into
-//  the outfit index and classifies it across five orthogonal axes:
-//
-//    1. ANTI-MISSILE   — weapons that intercept projectiles in flight
-//    2. TRACKING       — homing/guidance system type and effective tracking score
-//    3. MISSILE STRENGTH — a projectile's resistance to interception
-//    4. AMMO & STORAGE — what consumable each weapon requires and where it comes from
-//    5. SUBMUNITIONS   — recursive payload chains (submunition trees)
-//
-//  NO HARDCODING POLICY (mirrors damageTypes.js / battleSim.js)
-//  All field names are read from the outfit data or from attrDefs where available.
-//  The only compile-time constants here are the canonical weapon-block key names
-//  that are defined by the Endless Sky data file format itself (Weapon.cpp Load),
-//  which cannot change without breaking all existing save files.
-//
-//  DEPENDENCIES
-//  ────────────
-//  Requires window.DamageTypes to be ready (for damage-type lookups on submunitions).
-//  Reads _outfitIndex (the flat map of outfitName → outfit) from the calling scope
-//  via the getter function passed to MunitionTypes.init().
-//
-//  PUBLIC API
-//  ──────────
-//  MunitionTypes.init(getOutfitIndex, attrDefs)
-//      Must be called once after outfit data is loaded.
-//      getOutfitIndex: () => { [name]: outfit }  — live getter, not a snapshot.
-//      attrDefs: the parsed attributeDefinitions object (may be null).
-//
-//  MunitionTypes.analyseWeapon(weapon, outfitName)  → MunitionProfile
-//      Full profile for a single weapon block.
-//
-//  MunitionTypes.analyseOutfit(outfit)  → MunitionProfile | null
-//      Convenience wrapper; returns null if outfit has no weapon block.
-//
-//  MunitionTypes.buildRegistry()  → MunitionRegistry
-//      Scans every outfit in the index and returns categorised lists.
-//
-//  MunitionTypes.getAmmoTree(outfitName)  → AmmoNode | null
-//      Resolves the full ammo-supply chain for a given weapon outfit.
-//
-//  MunitionTypes.resolveSubmunitionTree(weapon, rootName)  → SubTree
-//      Recursively resolves the submunition DAG (depth-limited to 12).
-//
-//  MunitionTypes.formatProfile(profile)  → string
-//      Human-readable summary for debugging / display.
-//
-// ═══════════════════════════════════════════════════════════════════════════════
+// Weapon profiles: anti-missile, tracking, missile strength, ammo and submunition chains. Used by the Data Viewer and battle sim.
 
-// ── Internal state ────────────────────────────────────────────────────────────
+// ── state ──
 let _getOutfitIndex = () => ({});
 let _attrDefs       = null;
 let _ready          = false;
 
-// ── Constants (data-file format keys — from Weapon.cpp Load) ─────────────────
+// ── weapon keys (fallbacks; the parser's list is used when loaded) ──
 
 // Tracking / guidance keys present in the weapon block
 const TRACKING_KEYS_FALLBACK = [
@@ -101,27 +49,21 @@ const FIRING_STATUS_KEYS_FALLBACK = [
     'firing slowing',
 ];
 
-// The three lists above are fallbacks. With attrDefs loaded they come from
-// the weapon keys the parser read out of Weapon.cpp (gameKeys.js), so new
-// tracking types, firing costs or status effects appear without edits here.
+// with the definitions loaded these come from the game's weapon code
 const _gk = () => window.GameKeys || null;
+// tracking keys
 function trackingKeys()     { return _gk() ? _gk().trackingKeys(TRACKING_KEYS_FALLBACK) : TRACKING_KEYS_FALLBACK; }
+// firing cost keys
 function firingCostKeys()   { return _gk() ? _gk().firingCostKeys(FIRING_COST_KEYS_FALLBACK) : FIRING_COST_KEYS_FALLBACK; }
+// firing status keys
 function firingStatusKeys() { return _gk() ? _gk().firingStatusKeys(FIRING_STATUS_KEYS_FALLBACK) : FIRING_STATUS_KEYS_FALLBACK; }
 
 // Submunition structural keys
 const SUBMUNITION_KEYS = ['submunition', 'cluster', 'stream'];
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  INIT
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── start ──
 
-/**
- * init(getOutfitIndex, attrDefs)
- *
- * @param {() => Object} getOutfitIndex  — returns the live outfit index map
- * @param {Object|null}  attrDefs        — attributeDefinitions.json parsed object
- */
+// remember the outfit index and definitions. Called on load
 function init(getOutfitIndex, attrDefs) {
     if (typeof getOutfitIndex !== 'function')
         throw new Error('[MunitionTypes] init: getOutfitIndex must be a function');
@@ -131,90 +73,12 @@ function init(getOutfitIndex, attrDefs) {
     console.log('[MunitionTypes] Ready.');
 }
 
+// are the definitions loaded?
 function isReady() { return _ready; }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  CORE ANALYSIS  —  analyseWeapon(weapon, outfitName)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── analysing one weapon ──
 
-/**
- * MunitionProfile shape:
- * {
- *   outfitName:    string,
- *   isWeapon:      true,
- *
- *   // ── Anti-missile ────────────────────────────────────────────────────
- *   antiMissile: {
- *     isAntiMissile:   boolean,    // true if anti-missile > 0
- *     strength:        number,     // raw anti-missile value
- *     interceptChance: number,     // against a target with missileStrength=0 (=1.0 max)
- *     notes:           string[],
- *   },
- *
- *   // ── Tracking / homing ───────────────────────────────────────────────
- *   tracking: {
- *     isHoming:          boolean,
- *     homingLevel:       number,   // integer from 'homing' key
- *     homingDescription: string,   // plain-English level name
- *     trackingScore:     number,   // effective 0–1 combined tracking fraction
- *     trackingBreakdown: [{ key, value, contribution }],
- *     turningRate:       number,   // 'turn' key — how fast the projectile steers
- *     acceleration:      number,   // 'acceleration' key
- *     drag:              number,   // 'drag' key on projectile
- *   },
- *
- *   // ── Missile strength ────────────────────────────────────────────────
- *   missileStrength: {
- *     value:        number,   // 'missile strength' key on this weapon
- *     survivalOdds: string,   // human-readable vs common AM values
- *     notes:        string[],
- *   },
- *
- *   // ── Ammo & storage ──────────────────────────────────────────────────
- *   ammo: {
- *     hasAmmo:          boolean,
- *     ammoOutfitName:   string|null,    // name of the outfit that IS the ammo
- *     ammoStorageKey:   string|null,    // attribute key used as ammo counter
- *     ammoPerShot:      number,         // how many ammo units consumed per shot
- *     firingCosts:      { [key]: number }, // energy/heat/fuel/hull/shields per shot
- *     firingStatusInj:  { [key]: number }, // status injected onto self per shot
- *     ammoOutfitDetails: Object|null,   // the ammo outfit record (if found)
- *     storageCapacityKey: string|null,  // attribute that provides storage space
- *   },
- *
- *   // ── Submunitions ────────────────────────────────────────────────────
- *   submunitions: {
- *     hasSubmunitions: boolean,
- *     isCluster:       boolean,   // 'cluster' structural flag
- *     isStream:        boolean,   // 'stream' structural flag
- *     tree:            SubTree,   // see resolveSubmunitionTree()
- *     totalDamageTypes: string[], // all damage types present across the full tree
- *     maxDepth:         number,
- *     leafCount:        number,   // total individual sub-projectiles
- *   },
- *
- *   // ── Timing & range ──────────────────────────────────────────────────
- *   timing: {
- *     reload:           number,
- *     burstCount:       number,
- *     burstReload:      number,
- *     shotsPerSecond:   number,   // sustained (accounting for burst cycle)
- *     burstDuration:    number,   // frames for a full burst
- *   },
- *   range: {
- *     velocity:     number,
- *     lifetime:     number,
- *     effectiveRange: number,    // velocity * lifetime (pixels)
- *     safeRange:    number,
- *     blastRadius:  number,
- *     triggerRadius: number,
- *     splitRange:   number,
- *   },
- *
- *   // ── Classification tags ─────────────────────────────────────────────
- *   tags: string[],   // e.g. ['homing', 'anti-missile', 'burst', 'submunition', ...]
- * }
- */
+// everything about one weapon → a profile. Called by: analyseOutfit, buildRegistry
 function analyseWeapon(weapon, outfitName) {
     if (!weapon || typeof weapon !== 'object')
         return null;
@@ -222,23 +86,23 @@ function analyseWeapon(weapon, outfitName) {
     const w = weapon;
     const name = outfitName || w._name || '(unknown)';
 
-    // ── Anti-missile ──────────────────────────────────────────────────────────
+    // anti-missile
     const amStr   = w[ANTI_MISSILE_KEY] || 0;
     const antiMissile = _buildAntiMissileProfile(amStr);
 
-    // ── Tracking ─────────────────────────────────────────────────────────────
+    // tracking
     const tracking = _buildTrackingProfile(w);
 
-    // ── Missile strength ─────────────────────────────────────────────────────
+    // missile strength
     const missileStrength = _buildMissileStrengthProfile(w);
 
-    // ── Ammo ─────────────────────────────────────────────────────────────────
+    // ammo
     const ammo = _buildAmmoProfile(w, name);
 
-    // ── Submunitions ─────────────────────────────────────────────────────────
+    // submunitions
     const submunitions = _buildSubmunitionProfile(w, name);
 
-    // ── Timing ───────────────────────────────────────────────────────────────
+    // timing
     const reload      = Math.max(1, w.reload      || 1);
     const burstCount  = Math.max(1, w['burst count']  || 1);
     const burstReload = Math.max(1, w['burst reload'] || reload);
@@ -247,12 +111,12 @@ function analyseWeapon(weapon, outfitName) {
         : reload;
     const shotsPerSecond = (burstCount / framesPerCycle) * 60; // FPS = 60
 
-    // ── Range ────────────────────────────────────────────────────────────────
+    // range
     const velocity   = w.velocity   || 0;
     const lifetime   = w.lifetime   || 0;
     const effectiveRange = velocity * lifetime;
 
-    // ── Tags ─────────────────────────────────────────────────────────────────
+    // tags
     const tags = _buildTags(w, antiMissile, tracking, missileStrength, submunitions, burstCount, ammo);
 
     return {
@@ -281,25 +145,7 @@ function analyseWeapon(weapon, outfitName) {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  _buildAntiMissileProfile
-// ─────────────────────────────────────────────────────────────────────────────
-//
-//  From Ship.cpp / Weapon.cpp: the intercept check is a random draw.
-//  When an AM weapon fires at a missile the game resolves:
-//
-//      roll = Random::Real() * (antiMissile + missileStrength)
-//      if roll < antiMissile  →  missile destroyed
-//
-//  i.e.  P(intercept) = antiMissile / (antiMissile + missileStrength)
-//
-//  For a missile with strength 0:  P = 1.0 (guaranteed)
-//  For equal values:               P = 0.5
-//
-//  Anti-missile weapons are unusual because they DO NOT use the normal
-//  weapon reload/shoot loop — the game fires them reactively when a
-//  missile enters range each frame. They cannot also be regular weapons.
-// ─────────────────────────────────────────────────────────────────────────────
+// anti-missile strength and costs
 function _buildAntiMissileProfile(amStr) {
     const isAntiMissile = amStr > 0;
     const notes = [];
@@ -321,27 +167,7 @@ function _buildAntiMissileProfile(amStr) {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  _buildTrackingProfile
-// ─────────────────────────────────────────────────────────────────────────────
-//
-//  Homing in Endless Sky works on a 0–4 integer scale (the 'homing' key)
-//  plus fractional per-type tracking scores.  The effective guidance is
-//  the maximum of all tracking fractions (they do not add together).
-//
-//  Homing levels (from Weapon.h / Weapon.cpp):
-//    0 — unguided (no homing key or homing = 0)
-//    1 — partial:   tracking * straight-line intercept
-//    2 — seeking:   turns toward target each frame using 'turn'
-//    3 — infrared:  as seeking but only tracks engine heat
-//    4 — scrambled: as seeking but tracking degrades under scrambling
-//
-//  The distinct tracking fraction keys each represent a sensor modality.
-//  The game picks whichever is highest (or the combined 'tracking' key).
-//
-//  'turn' (degrees/frame) — how fast the projectile can steer.
-//  High turn = tight tracking; low turn = wide sweeping arcs.
-// ─────────────────────────────────────────────────────────────────────────────
+// tracking: radar, optical, infrared, generic
 const HOMING_LEVEL_NAMES = [
     'Unguided',
     'Partial (straight-line intercept)',
@@ -350,6 +176,7 @@ const HOMING_LEVEL_NAMES = [
     'Radar-seeking (disrupted by scrambling)',
 ];
 
+// tracking profile
 function _buildTrackingProfile(w) {
     const homingLevel = Math.floor(w.homing || 0);
     const isHoming    = homingLevel > 0;
@@ -366,9 +193,7 @@ function _buildTrackingProfile(w) {
         }
     }
 
-    // 'tracking' is the generic fallback fraction (0–1)
-    // optical/infrared/radar are alternate sensor types; game uses whichever applies
-    // effective score = best available (they are not summed)
+    // 'tracking' is the generic share; the others are sensor types
     const trackingScore = bestScore;
 
     return {
@@ -392,23 +217,7 @@ function _buildTrackingProfile(w) {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  _buildMissileStrengthProfile
-// ─────────────────────────────────────────────────────────────────────────────
-//
-//  'missile strength' on a WEAPON means its projectiles are that hard to shoot
-//  down. The interception formula (see _buildAntiMissileProfile) is symmetric:
-//
-//      P(AM intercepts) = antiMissile / (antiMissile + missileStrength)
-//
-//  So missileStrength = 0  →  any AM weapon intercepts 100%
-//     missileStrength = X  →  needs AM >= X for even odds
-//
-//  Note: "missile strength 0" AND "homing 0" means it is just a kinetic bolt —
-//  it cannot be shot down (no missile to track) unless it has missile strength > 0.
-//  Anti-missile weapons in the vanilla game only trigger against homing projectiles
-//  OR against any projectile with missile strength > 0.
-// ─────────────────────────────────────────────────────────────────────────────
+// missile strength (how hard to shoot down)
 function _buildMissileStrengthProfile(w) {
     const value = w[MISSILE_STRENGTH_KEY] || 0;
     const notes = [];
@@ -432,27 +241,7 @@ function _buildMissileStrengthProfile(w) {
     return { value, notes };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  _buildAmmoProfile
-// ─────────────────────────────────────────────────────────────────────────────
-//
-//  Endless Sky ammunition works as follows (from Weapon.cpp / Outfit.cpp):
-//
-//  A weapon with an 'ammo' key consumes one unit of the named outfit per shot.
-//  The ammo outfit defines a storage attribute (usually "<name> capacity" or
-//  just the outfit's presence in the cargo/installed list acts as the counter).
-//  In the data files the ammo outfit itself contributes e.g. "Javelin" +1 to
-//  the ship's attribute set.  The weapon's 'ammo' block references that outfit
-//  name so the engine knows to decrement it.
-//
-//  Some weapons consume ammo at a rate other than 1/shot (burst weapons may
-//  consume 1 per burst-shot, not 1 per burst cycle).
-//
-//  Firing costs (energy/heat/fuel/hull/shields) are separate from ammo —
-//  they are consumed each time the weapon fires regardless of ammo type.
-//
-//  'ammoStored' on the outfit record is the compiled storage amount.
-// ─────────────────────────────────────────────────────────────────────────────
+// ammo used, carried and costs
 function _buildAmmoProfile(w, outfitName) {
     const index = _getOutfitIndex();
 
@@ -461,7 +250,7 @@ function _buildAmmoProfile(w, outfitName) {
     let ammoOutfitDetails = null;
     let storageCapacityKey = null;
 
-    // ── NEW FORMAT: w.ammunition = [{type, count}, …] ────────────────────────
+    // new format: [{ type, count }]
     if (Array.isArray(w.ammunition) && w.ammunition.length > 0) {
         const first    = w.ammunition[0];
         ammoOutfitName = first?.type  ?? null;
@@ -470,7 +259,7 @@ function _buildAmmoProfile(w, outfitName) {
             ammoOutfitDetails = index[ammoOutfitName] || null;
     }
 
-    // ── LEGACY FORMAT A: weapon.ammo = "OutfitName" ──────────────────────────
+    // old format A: weapon.ammo = name
     if (!ammoOutfitName) {
         const rawAmmoField = w['ammo'];
         if (typeof rawAmmoField === 'string' && rawAmmoField.length > 0) {
@@ -480,7 +269,7 @@ function _buildAmmoProfile(w, outfitName) {
         }
     }
 
-    // ── LEGACY FORMAT B: weapon["OutfitName"] = count|true ───────────────────
+    // old format B: outfit name as key
     if (!ammoOutfitName) {
         for (const key of Object.keys(w)) {
             if (key === 'ammo' || key === 'ammunition') continue;
@@ -553,6 +342,7 @@ function _buildAmmoProfile(w, outfitName) {
     };
 }
 
+// ammo notes
 function _buildAmmoNotes(hasAmmo, ammoOutfitName, ammoPerShot, firingCosts, ammoOutfitDetails) {
     const notes = [];
     if (hasAmmo) {
@@ -576,52 +366,15 @@ function _buildAmmoNotes(hasAmmo, ammoOutfitName, ammoPerShot, firingCosts, ammo
     return notes;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  _buildSubmunitionProfile  +  resolveSubmunitionTree
-// ─────────────────────────────────────────────────────────────────────────────
-//
-//  A "submunition" entry in the weapon block means that when the projectile
-//  hits (or detonates), it spawns additional projectiles.  These can be:
-//
-//    submunition "Outfit Name"           — spawns 1 copy
-//    submunition "Outfit Name" 4         — spawns 4 copies
-//    submunition { name: ..., count: N } — compiled object form
-//
-//  Submunitions can themselves have submunitions (cluster bombs, etc.).
-//  The game caps this at a reasonable depth in practice.
-//
-//  'cluster' flag — all submunitions fire at once in a spread pattern
-//  'stream'  flag — submunitions release one per frame over 'lifetime' frames
-//
-//  SubTree node shape:
-//  {
-//    name:        string,
-//    count:       number,    // how many spawn
-//    depth:       number,
-//    weapon:      Object|null,   // weapon block of this submunition outfit
-//    outfit:      Object|null,   // full outfit record
-//    children:    SubTree[],
-//    damageTypes: string[],      // damage types at THIS node only
-//    totalDamageContribution: { [type]: number }  // scaled by count * parent counts
-//  }
-// ─────────────────────────────────────────────────────────────────────────────
+// submunitions, all the way down
 
 const MAX_SUBMUNITION_DEPTH = 12;
 
-/**
- * _resolveSubmunitionRefs(w)  →  Array<{ subName, subCount }>
- *
- * Dual-format submunition parsing (internal to munitionTypes):
- *
- * FORMAT A: w.submunition = "Name" | { name, count } | array of those
- * FORMAT B: w["OutfitName"] = count | true  (outfit name as key)
- *
- * Returns array of { subName, subCount } pairs.
- */
+// submunition names and counts (all formats)
 function _resolveSubmunitionRefs(w) {
     const results = [];
 
-    // ── NEW FORMAT: w.submunitions = [{type, count}, …] ──────────────────────
+    // new format: [{ type, count }]
     if (Array.isArray(w.submunitions)) {
         for (const entry of w.submunitions) {
             const subName  = entry?.type  ?? null;
@@ -631,7 +384,7 @@ function _resolveSubmunitionRefs(w) {
         if (results.length > 0) return results;
     }
 
-    // ── LEGACY FORMAT A: w.submunition = "Name" | {name,count} | array ───────
+    // old format A
     const rawSub = w.submunition;
     if (rawSub != null) {
         const entries = Array.isArray(rawSub) ? rawSub : [rawSub];
@@ -645,7 +398,7 @@ function _resolveSubmunitionRefs(w) {
         if (results.length > 0) return results;
     }
 
-    // ── LEGACY FORMAT A2: "submunition OutfitName" key ────────────────────────
+    // old format A2: "submunition Name"
     for (const key of Object.keys(w)) {
         if (!key.startsWith('submunition ')) continue;
         const subName = key.slice('submunition '.length).trim();
@@ -658,7 +411,7 @@ function _resolveSubmunitionRefs(w) {
     }
     if (results.length > 0) return results;
 
-    // ── LEGACY FORMAT B: outfit name as key with numeric count ────────────────
+    // old format B: outfit name as key
     const index = _getOutfitIndex();
     for (const key of Object.keys(w)) {
         if (key === 'submunition' || key === 'submunitions') continue;
@@ -683,6 +436,7 @@ function _resolveSubmunitionRefs(w) {
     return results;
 }
 
+// submunition tree
 function resolveSubmunitionTree(weapon, rootName, _visited, _depth, _multiplier) {
     const visited    = _visited    || new Set([rootName].filter(Boolean));
     const depth      = _depth      || 0;
@@ -737,12 +491,14 @@ function resolveSubmunitionTree(weapon, rootName, _visited, _depth, _multiplier)
     };
 }
 
+// tree → list
 function _flattenTree(node, out) {
     if (!node) return;
     out.push(node);
     for (const child of (node.children || [])) _flattenTree(child, out);
 }
 
+// submunition profile
 function _buildSubmunitionProfile(w, outfitName) {
     const isCluster = !!(w.cluster);
     const isStream  = !!(w.stream);
@@ -796,6 +552,7 @@ function _buildSubmunitionProfile(w, outfitName) {
     };
 }
 
+// submunition notes
 function _buildSubmunitionNotes(isCluster, isStream, maxDepth, leafCount, tree) {
     const notes = [];
     if (isCluster) notes.push(`CLUSTER: all submunitions release simultaneously in a spread.`);
@@ -805,9 +562,7 @@ function _buildSubmunitionNotes(isCluster, isStream, maxDepth, leafCount, tree) 
     return notes;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  _buildTags
-// ─────────────────────────────────────────────────────────────────────────────
+// short tags (anti-missile, homing, …)
 function _buildTags(w, antiMissile, tracking, missileStrength, submunitions, burstCount, ammo) {
     const tags = [];
     if (antiMissile.isAntiMissile)        tags.push('anti-missile');
@@ -827,33 +582,15 @@ function _buildTags(w, antiMissile, tracking, missileStrength, submunitions, bur
     return tags;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  CONVENIENCE WRAPPERS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── shortcuts ──
 
-/**
- * analyseOutfit(outfit)
- * Wraps analyseWeapon; returns null if the outfit has no weapon block.
- */
+// profile for an outfit (null if not a weapon)
 function analyseOutfit(outfit) {
     if (!outfit?.weapon) return null;
     return analyseWeapon(outfit.weapon, outfit.name);
 }
 
-/**
- * getAmmoTree(outfitName)
- *
- * Returns a nested structure describing the full ammo-supply chain:
- * {
- *   outfitName:         string,
- *   weaponProfile:      MunitionProfile | null,
- *   ammoOutfitName:     string | null,
- *   ammoOutfit:         Object | null,
- *   ammoPerShot:        number,
- *   storageCapacityKey: string | null,
- *   roundsPerStorageUnit: number | null,   // ammoStored value if found
- * }
- */
+// the ammo supply chain for an outfit
 function getAmmoTree(outfitName) {
     const index  = _getOutfitIndex();
     const outfit = index[outfitName];
@@ -884,29 +621,7 @@ function getAmmoTree(outfitName) {
     };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  REGISTRY  —  buildRegistry()
-// ═══════════════════════════════════════════════════════════════════════════════
-//
-//  Scans every outfit in the index and builds categorised lists.
-//
-//  MunitionRegistry shape:
-//  {
-//    antiMissileWeapons:  MunitionProfile[],   // sorted by AM strength desc
-//    homingWeapons:       MunitionProfile[],   // sorted by tracking score desc
-//    missilesWithStrength: MunitionProfile[],  // sorted by missile strength desc
-//    ammoWeapons:         MunitionProfile[],   // weapons that consume ammo
-//    freeWeapons:         MunitionProfile[],   // weapons with no ammo requirement
-//    submunitionWeapons:  MunitionProfile[],   // weapons with submunition blocks
-//    burstWeapons:        MunitionProfile[],   // weapons with burst count > 1
-//    allWeapons:          MunitionProfile[],   // every weapon outfit
-//    ammoOutfits:         Object[],            // outfits that ARE ammo (no weapon)
-//    summary: {
-//      total, antiMissile, homing, withMissileStrength,
-//      withAmmo, withSubmunitions, withBurst,
-//    },
-//  }
-// ─────────────────────────────────────────────────────────────────────────────
+// profiles for every weapon. Called by: whoever needs them all
 function buildRegistry() {
     const index  = _getOutfitIndex();
     const all    = [];
@@ -963,9 +678,7 @@ function buildRegistry() {
     };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  FORMATTING  —  formatProfile(profile)
-// ═══════════════════════════════════════════════════════════════════════════════
+// profile as text
 
 function formatProfile(profile) {
     if (!profile) return '(null profile)';
@@ -1047,6 +760,7 @@ function formatProfile(profile) {
     return lines.join('\n');
 }
 
+// tree as text
 function _formatSubTree(node, lines, indent) {
     if (!node) return;
     const marker = node.leaf ? '◆' : '▼';
@@ -1056,16 +770,9 @@ function _formatSubTree(node, lines, indent) {
         _formatSubTree(child, lines, indent + '  ');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  INTERCEPTION CALCULATOR  (utility exported for UI use)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── interception ──
 
-/**
- * calcInterceptChance(antiMissileStrength, missileStrength)
- * Returns the probability [0, 1] that an AM shot with the given strength
- * intercepts a missile with the given strength, per Endless Sky's formula:
- *   P = antiMissile / (antiMissile + missileStrength)
- */
+// chance anti-missile stops a missile
 function calcInterceptChance(antiMissileStrength, missileStrength) {
     const am = Math.max(0, antiMissileStrength  || 0);
     const ms = Math.max(0, missileStrength || 0);
@@ -1074,11 +781,7 @@ function calcInterceptChance(antiMissileStrength, missileStrength) {
     return am / (am + ms);
 }
 
-/**
- * calcEffectiveTrackingScore(weapon)
- * Returns the effective 0–1 tracking fraction for a weapon block.
- * Mirrors the logic in _buildTrackingProfile without building the full object.
- */
+// effective 0–1 tracking score
 function calcEffectiveTrackingScore(weapon) {
     let best = 0;
     for (const key of trackingKeys()) {
@@ -1089,9 +792,7 @@ function calcEffectiveTrackingScore(weapon) {
     return best;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  PUBLIC EXPORT
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── window.MunitionTypes ──
 
 window.MunitionTypes = {
     // Lifecycle
@@ -1110,7 +811,7 @@ window.MunitionTypes = {
     calcInterceptChance,
     calcEffectiveTrackingScore,
 
-    // Constants (read-only copies for external inspection)
+    // read-only copies of the key lists
     get TRACKING_KEYS()      { return [...trackingKeys()]; },
     ANTI_MISSILE_KEY,
     MISSILE_STRENGTH_KEY,

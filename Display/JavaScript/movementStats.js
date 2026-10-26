@@ -1,9 +1,7 @@
 ;(function () {
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  movementStats.js  —  Endless Sky Ship Movement Analysis
-// ═══════════════════════════════════════════════════════════════════════════════
+// A ship's movement figures (speed, acceleration, turning, jumps, cloaking) from the game's formulas.
 
 const FPS = 60;
 
@@ -19,6 +17,7 @@ function _a(combined, key) {
     return (typeof v === 'number' && isFinite(v)) ? v : 0;
 }
 
+// ramscoop formula from the game code
 function _parseRamscoopFormula(formulaStr) {
     if (!formulaStr) return null;
 
@@ -33,6 +32,7 @@ function _parseRamscoopFormula(formulaStr) {
     return { coefficient, solarExp, attrKey };
 }
 
+// which attribute is which
 function _buildKeyRegistry(attrDefs) {
     const attrs    = attrDefs?.attributes            || {};
     const shipFns  = attrDefs?.shipFunctions         || {};
@@ -41,6 +41,7 @@ function _buildKeyRegistry(attrDefs) {
     const capDisp  = attrDefs?.shipDisplay?.capacityDisplay || [];
     const intVars  = attrDefs?.shipDisplay?.intermediateVars || {};
 
+    // find an attribute key
     const findKey = (...patterns) => {
         for (const pat of patterns) {
             if (attrs[pat]) return pat;
@@ -144,9 +145,7 @@ function _buildKeyRegistry(attrDefs) {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  INIT
-// ─────────────────────────────────────────────────────────────────────────────
+// read the formulas from the definitions. Called on load
 
 function init(attrDefs) {
     _attrDefs = attrDefs || null;
@@ -159,9 +158,12 @@ function init(attrDefs) {
         console.warn('[MovementStats] init called without attrDefs — will use fallback keys.');
 }
 
+// are the definitions loaded?
 function isReady()     { return _ready; }
+// the key list
 function getRegistry() { return _keys; }
 
+// keys to use before the definitions load
 function _fallbackKeys() {
     return {
         mass: 'mass', inertiaReduction: 'inertia reduction',
@@ -193,9 +195,7 @@ function _fallbackKeys() {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  COMPUTE
-// ─────────────────────────────────────────────────────────────────────────────
+// movement figures for a ship's attributes. Called by: computedMovementStats
 
 function compute(combinedAttrs, attrDefsOverride) {
     if (attrDefsOverride && !_ready) init(attrDefsOverride);
@@ -236,10 +236,7 @@ function compute(combinedAttrs, attrDefsOverride) {
         ? (abTotalThrust / inertialMass) * (1 + accelMult) * FPS * FPS : 0;
 
     const turning        = a(k.turning);
-    // FIX: turnRatePerSec was previously computed only as turning/inertialMass.
-    // The game also has a turn multiplier (from Ship.cpp TurnRate):
-    //   TurnRate = [turn] / InertialMass * (1 + [turn multiplier])
-    // We compute it correctly here and ensure it's always exposed.
+    // turn rate includes the game's turn multiplier
     const turnMultiplier = a('turn multiplier') || 0;
     const turnRatePerSec = inertialMass > 0
         ? (turning / inertialMass) * (1 + turnMultiplier) * FPS
@@ -408,9 +405,7 @@ function compute(combinedAttrs, attrDefsOverride) {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  FORMAT
-// ─────────────────────────────────────────────────────────────────────────────
+// figures as text
 
 function format(profile) {
     if (!profile) return '(null profile)';
@@ -533,18 +528,9 @@ function format(profile) {
     return lines.join('\n');
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  COMPARE
-//
-//  FIX: Turn Rate and Time for 180° rows were missing because the row used
-//  null values which weren't handled. Now we always emit these rows;
-//  null values format as '—' which is correct for ships that cannot turn.
-//
-//  The row() helper now returns a valid row even when values are null,
-//  so battleSim.buildCompareGrid correctly receives and displays them.
-// ─────────────────────────────────────────────────────────────────────────────
+// two ships' figures side by side
 function compareProfiles(profileA, nameA, profileB, nameB) {
-    // Format a numeric value with optional unit; null → '—'
+    // number with unit, or '—'
     const fmtVal = (v, unit = '') => {
         if (v == null) return '—';
         return `${v}${unit}`;
@@ -602,9 +588,7 @@ function compareProfiles(profileA, nameA, profileB, nameB) {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  PUBLIC EXPORT
-// ─────────────────────────────────────────────────────────────────────────────
+// ── window.MovementStats ──
 
 window.MovementStats = {
     init,

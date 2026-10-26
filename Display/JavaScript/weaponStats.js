@@ -1,33 +1,13 @@
 ;(function () {
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  WeaponStats.js  —  Endless Sky Weapon DPS & Range Calculator
-//
-//  Submunition trees and ammo resolution use the exact same logic as
-//  battleSim.js (which already works correctly).  No separate resolution
-//  strategy — just the same three-format submunition scan and the same
-//  ammo detection that battleSim uses.
-//
-//  DEPENDENCIES
-//  ────────────
-//  None at module level.  Receives outfitIndex as a plain object argument
-//  on every call — same pattern as battleSim.
-// ═══════════════════════════════════════════════════════════════════════════════
+// Per-weapon and per-ship DPS from weapon data (follows submunitions and ammo). Used by ItemStats and the battle sim.
 
 const FPS = 60;
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  SUBMUNITION REFS
-//  Exact copy of battleSim.resolveSubmunitionRefs (kept private in battleSim).
-//  Handles all three formats present in the compiled data.
-// ─────────────────────────────────────────────────────────────────────────────
+// submunition refs
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  INDEX FALLBACK
-//  When callers don't pass an outfitIndex (e.g. outfit detail page),
-//  WeaponStats falls back to the global outfit index that battleSim maintains.
-// ─────────────────────────────────────────────────────────────────────────────
+// submunition list (all formats)
 
 
 function _getSubmunitionRefs(w, outfitIndex) {
@@ -89,6 +69,7 @@ function _getSubmunitionRefs(w, outfitIndex) {
     return results;
 }
 
+// which ammo a weapon uses
 function _resolveAmmoRef(w, outfitIndex) {
     // NEW FORMAT: ammunition: [{type, count}]
     if (Array.isArray(w.ammunition) && w.ammunition.length > 0) {
@@ -122,6 +103,7 @@ function _resolveAmmoRef(w, outfitIndex) {
     return null;
 }
 
+// damage incl. submunitions
 function _resolveSubmunitionDamage(weapon, outfitIndex, visited, depth) {
     visited = visited || new Set();
     depth   = depth   || 0;
@@ -152,6 +134,7 @@ function _resolveSubmunitionDamage(weapon, outfitIndex, visited, depth) {
     return totals;
 }
 
+// range incl. submunitions
 function _resolveEffectiveRange(w, outfitIndex, visited, depth, inheritedVelocity) {
     if (depth > 8) return null;
     // Use own velocity if set, otherwise inherit from parent
@@ -172,17 +155,7 @@ function _resolveEffectiveRange(w, outfitIndex, visited, depth, inheritedVelocit
     return (total > 0 || anySubHasRange) ? total : null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  SHOTS PER SECOND  — same as battleSim
-//
-//  A weapon only has a meaningful refire rate if it actually declares one
-//  (`reload` or `burst reload`). Weapons with neither — e.g. a one-shot
-//  detonation like a nuke submunition fired once and never again — do not
-//  refire at all, so shots-per-second must be 0, not silently defaulted to
-//  "fires every single frame" (60/s). The previous `weapon.reload || 1`
-//  fallback conflated "no reload key present" with "reloads in 1 frame",
-//  which inflated every DPS figure for such weapons by 60×.
-// ─────────────────────────────────────────────────────────────────────────────
+// shots per second (reload, burst, …)
 
 function _resolveShotsPerSecond(weapon) {
     /*const reload      = Math.max(1, weapon.reload       || 1);
@@ -198,9 +171,7 @@ function _resolveShotsPerSecond(weapon) {
     return FPS / reload;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  CORE WEAPON PROFILE
-// ─────────────────────────────────────────────────────────────────────────────
+// one weapon's numbers. Called by: getOutfitWeaponStats, getShipWeaponStats
 
 function _calcWeaponProfile(weapon, outfitName, outfitIndex) {
     const w          = weapon;
@@ -210,17 +181,7 @@ function _calcWeaponProfile(weapon, outfitName, outfitIndex) {
     const dmgPerShot = _resolveSubmunitionDamage(w, outfitIndex, visited, 0);
     const range      = _resolveEffectiveRange(w, outfitIndex, new Set([outfitName].filter(Boolean)), 0, 0);
 
-    // Discover firing costs dynamically — no hardcoded key list. Any key on
-    // the weapon block starting with "firing " that attributeDefinitions.json
-    // flags as isWeaponStat is a genuine per-shot cost (energy/heat/fuel/hull/
-    // shields/ion/scramble/slowing/disruption/discharge/corrosion/leak/burn,
-    // or any new one the data adds later — this doesn't need updating when
-    // the game adds more). "firing force" is deliberately excluded by this
-    // same mechanism: it's isWeaponDataKey but not isWeaponStat, since it's a
-    // knockback value, not a rate cost — attrDefs.json data draws that line,
-    // not this file. Falls back to accepting all "firing "-prefixed numeric
-    // keys if attrDefs isn't available, since without the flag there's no
-    // other way to tell cost keys apart from non-cost ones.
+    // firing costs: any key starting with "firing "
     const attrDefs = window.attrDefs?.attributes || null;
     const firingCosts = {};
     for (const [key, val] of Object.entries(w)) {
@@ -230,17 +191,7 @@ function _calcWeaponProfile(weapon, outfitName, outfitIndex) {
         firingCosts[key] = val;
     }
 
-    // Apply each damage type's own displayMultiplier — read dynamically from
-    // attrDefs by the damage key itself (e.g. "ion damage" -> 100), the same
-    // way every other displayed attribute in Sorter.js/CompareDisplay.js
-    // already gets its multiplier. Status-effect damage types (ion,
-    // scrambling, slowing, disruption, discharge, corrosion, leak, burn) are
-    // stored internally as small fractions and rescaled by attrDefs for
-    // display; shield/hull damage have no multiplier defined (default 1), so
-    // this doesn't change their existing correct behaviour. Doing this here,
-    // once, means every consumer (dpsBreakdown, totalDps, shieldDps,
-    // hullDps — in Sorter.js, CompareDisplay.js, everywhere) is correct
-    // automatically, with nothing to keep in sync elsewhere.
+    // each damage type's own display multiplier from the definitions
     const dpsBreakdown = {};
     let totalDps = 0;
     for (const [key, val] of Object.entries(dmgPerShot)) {
@@ -269,9 +220,7 @@ function _calcWeaponProfile(weapon, outfitName, outfitIndex) {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  PUBLIC API 1:  getOutfitWeaponStats(outfit, outfitIndex)
-// ─────────────────────────────────────────────────────────────────────────────
+// one outfit's weapon stats
 
 function getOutfitWeaponStats(outfit, outfitIndex) {
     if (!outfit?.weapon) return null;
@@ -281,9 +230,7 @@ function getOutfitWeaponStats(outfit, outfitIndex) {
     return profile;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  PUBLIC API 2:  getShipWeaponStats(ship, outfitIndex)
-// ─────────────────────────────────────────────────────────────────────────────
+// a ship's total DPS and each weapon's
 
 function getShipWeaponStats(ship, outfitIndex) {
     const idx       = outfitIndex || {};
@@ -358,9 +305,7 @@ function getShipWeaponStats(ship, outfitIndex) {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  INTEGRATION HOOK FOR ComputedStats.js
-// ─────────────────────────────────────────────────────────────────────────────
+// resolve an outfit name to weapon stats
 
 function resolveWeaponStats(outfitMap, outfitIndex) {
     const stats = getShipWeaponStats({ outfits: outfitMap }, outfitIndex || {});
@@ -380,9 +325,7 @@ function resolveWeaponStats(outfitMap, outfitIndex) {
     return flat;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  EXPORT
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── window.WeaponStats ──
 
 const WeaponStats = {
     getOutfitWeaponStats,

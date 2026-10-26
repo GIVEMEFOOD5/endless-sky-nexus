@@ -1,48 +1,7 @@
 ;(function () {
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  damageTypes.js  —  Endless Sky Damage / Protection / Resistance Reference
-//
-//  ZERO HARDCODING POLICY
-//  ──────────────────────
-//  This file contains NO static lists of type names, attribute keys, formulas,
-//  shield-interaction flags, constants, or descriptions.  Everything is read at
-//  runtime from the _attrDefs object (attributeDefinitions.json) which is built
-//  by attributeParser.js directly from the game's C++ source files.
-//
-//  REQUIRED SHAPE OF attributeDefinitions.json
-//  ────────────────────────────────────────────
-//  weapon.damageTypes[]           — PascalCase type names from DamageDealt.h
-//
-//  weapon.damageTypeDetails[]     — one entry per type, built by attributeParser.js
-//    typeName          PascalCase, matches damageTypes[]
-//    category          'hp' | 'resource' | 'status'
-//    resourceKey       e.g. 'ion damage'
-//    relativeKey       e.g. '% shield damage'  (null if none)
-//    shieldInteraction 'full' | 'half' | 'blocked' | 'direct'
-//    statusEffect      statName string (e.g. 'ionization') or null
-//    resistanceKey     attribute key string or null
-//    protectionKey     attribute key string or null
-//    description       string
-//    applyFormula      pseudo-code string
-//    notes[]
-//
-//  weapon.statusEffectDecay.decayMap    { statName → resistKey }
-//  weapon.statusEffectDecay.descriptors[]
-//    statName, resistKey, protectionKey, damageKey, label,
-//    effectType, description, decayFormula, costKeys[],
-//    passiveHalfLifeFrames
-//    (scrambling only: jamChanceFormula)
-//
-//  attributes.{key}.isProtection         true  → listed in protection registry
-//  attributes.{key}.isStatusResistance   true  → listed in resistance registry
-//  attributes.{key}.protectionAppliesTo
-//  attributes.{key}.protectionFormula
-//  attributes.{key}.protectionNote
-//  attributes.{key}.stackingDescription
-//  attributes.{key}.clampRange
-// ═══════════════════════════════════════════════════════════════════════════════
+// Damage types, protections and resistances, read from the attribute definitions (game rules). Used by the battle sim.
 
 let _ready     = false;
 let _typeMap   = {};   // lowercase typeName  → entry
@@ -50,9 +9,7 @@ let _protMap   = {};   // attribute key        → entry
 let _resistMap = {};   // statName / resistKey → entry
 let _registry  = null;
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  initDamageTypes(attrDefs)
-// ─────────────────────────────────────────────────────────────────────────────
+// build the lists once the definitions load. Called on load
 function initDamageTypes(attrDefs) {
     _ready     = false;
     _typeMap   = {};
@@ -76,7 +33,7 @@ function initDamageTypes(attrDefs) {
     for (const d of typeDetails)
         if (d.typeName) detailsByName[d.typeName.toLowerCase()] = d;
 
-    // ── 1. Damage types ───────────────────────────────────────────────────────
+    // 1. damage types
     const damageTypes = [];
     for (const typeName of typeNames) {
         const d = detailsByName[typeName.toLowerCase()];
@@ -106,7 +63,7 @@ function initDamageTypes(attrDefs) {
         _typeMap[typeName.toLowerCase()] = entry;
     }
 
-    // ── 2. Protections ────────────────────────────────────────────────────────
+    // 2. protections
     const protections = [];
     const seenProt = new Set();
 
@@ -126,7 +83,7 @@ function initDamageTypes(attrDefs) {
         _protMap[key] = entry;
     }
 
-    // ── 3. Resistances ────────────────────────────────────────────────────────
+    // 3. resistances
     const resistances = [];
     const seenResist = new Set();
 
@@ -188,33 +145,30 @@ function initDamageTypes(attrDefs) {
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Public API
-// ─────────────────────────────────────────────────────────────────────────────
+// ── public ──
 function isReady()          { return _ready; }
+// everything
 function getRegistry()      { return _registry; }
+// all damage types
 function getAllDamageTypes() { return _registry?.damageTypes  ?? []; }
+// all protections
 function getAllProtections() { return _registry?.protections  ?? []; }
+// all resistances
 function getAllResistances() { return _registry?.resistances  ?? []; }
 
+// one damage type
 function getDamageType(typeName)  { return _typeMap  [(typeName  || '').toLowerCase()] ?? null; }
+// one protection
 function getProtection(key)       { return _protMap  [key]                             ?? null; }
+// one resistance
 function getResistance(keyOrStat) { return _resistMap[keyOrStat]                       ?? null; }
 
+// how a type behaves against shields
 function getShieldInteraction(typeName) {
     return getDamageType(typeName)?.shieldInteraction ?? 'half';
 }
 
-/**
- * getShieldMultiplier(typeName, shieldsUp)
- * Returns the numeric multiplier (0 | 0.5 | 1.0) to apply to incoming
- * damage/status dose, sourced entirely from shieldInteraction in attrDefs.
- *
- *   'full'    → 1.0 always  (Discharge — "always maximum effect" per wiki)
- *   'half'    → 0.5 when up (Ion, Scrambling, Disruption, Slowing, Burn, Heat, Energy, Fuel)
- *   'blocked' → 0.0 when up (Corrosion, Leak — "ignored when shields are up" per wiki)
- *   'direct'  → 1.0 always  (Shield, Hull HP — handled separately in applyWeaponDamage)
- */
+// how much of a damage type gets through shields (0, 0.5 or 1)
 function getShieldMultiplier(typeName, shieldsUp) {
     if (!shieldsUp) return 1.0;
     switch (getShieldInteraction(typeName)) {

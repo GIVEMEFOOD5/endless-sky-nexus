@@ -1,17 +1,7 @@
 ;(function () {
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  battleSim.js  —  Endless Sky Battle Simulator  (Multi-Team Edition)
-//
-//  All rendering is delegated to battleSimStatsDisplay.js via:
-//      window.BattleSimDisplay.renderResults(payload)
-//
-//  Data loading is fully delegated to dataLoader.js via window.DataLoader.
-//
-//  ZERO HARDCODING POLICY — all damage types, protection keys, resistance keys
-//  and status effect names are read from attributeDefinitions.json via _attrDefs.
-// ═══════════════════════════════════════════════════════════════════════════════
+// The battle simulator page: teams, ships, pilot skill, and the frame-by-frame fight.
 
 const FPS          = 60;
 const MAX_SIM_SECS = 6000;
@@ -29,7 +19,7 @@ let _weaponDataKeys    = new Set();
 
 let _simCancelled = false;
 
-// ── TEAM STATE ─────────────────────────────────────────────────────────────────
+// ── teams ──
 let _teams = [];
 let _nextTeamId = 1;
 
@@ -56,26 +46,26 @@ const FIRING_STATUS_MAP_FALLBACK = {
 };
 
 const FIRING_RESOURCE_KEYS_FALLBACK = ['firing energy', 'firing fuel', 'firing hull', 'firing shields'];
+// weapon status effects → resource they drain
 function firingStatusMap() {
     return window.GameKeys ? window.GameKeys.firingStatusMap(FIRING_STATUS_MAP_FALLBACK) : FIRING_STATUS_MAP_FALLBACK;
 }
-// Pools a weapon draws down and can run dry of. Heat is a firing cost too,
-// but it fills up rather than running out — overheating is handled on its own.
+// pools a weapon can run dry of (heat fills up instead)
 function firingResourceKeys() {
     const all = window.GameKeys ? window.GameKeys.firingCostKeys(null) : null;
     return all ? all.filter(k => k !== 'firing heat') : FIRING_RESOURCE_KEYS_FALLBACK;
 }
 const MISSILE_STRENGTH_KEY  = 'missile strength';
+// label for a resource
 function resourceLabel(key) { return key.replace(/^firing\s+/, ''); }
 
-// ── Formatting shims (delegate to display module when available) ───────────────
+// ── formatting (from the stats display) ──
 const fmt       = (...a) => window.BattleSimDisplay?.fmt(...a)     ?? String(a[0] ?? '—');
+// seconds → "1m 20s"
 const fmtT      = (...a) => window.BattleSimDisplay?.fmtT(...a)    ?? String(a[0] ?? '—');
 const escHtml   = (...a) => window.BattleSimDisplay?.escHtml(...a) ?? String(a[0] ?? '');
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  BOOTSTRAP — delegate to DataLoader
-// ═══════════════════════════════════════════════════════════════════════════════
+// start: wait for DataLoader, then set up the page. Called on page load
 
 async function init() {
     hideResults();
@@ -106,7 +96,7 @@ async function init() {
         }
 
         setStatus('');
-        // Wire PluginManager hook so team ships rebuild when active plugins change
+        // rebuild team ships when the selected plugins change
         window._renderCardsFromManager = async () => { await onPluginsChanged(); };
         // initDefaultPlugin fires pluginsChanged → onPluginsChanged via the hook above
         window.PluginManager.initDefaultPlugin();
@@ -116,12 +106,13 @@ async function init() {
     document.addEventListener('pluginsChanged', () => onPluginsChanged());
 }
 
-/** Returns the GitHub raw base URL that DataLoader uses — kept in one place. */
+// GitHub base URL DataLoader uses
 function _baseUrl() {
     const REPO_URL = 'GIVEMEFOOD5/endless-sky-nexus';
     return `https://raw.githubusercontent.com/${REPO_URL}/main/data`;
 }
 
+// status line under the fight button
 function setStatus(msg, isError = false) {
     const el = document.getElementById('simStatus');
     if (!el) return;
@@ -130,9 +121,7 @@ function setStatus(msg, isError = false) {
     el.style.display = msg ? 'block' : 'none';
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  onPluginsChanged — rebuild _allShips and _outfitIndex from DataLoader data
-// ─────────────────────────────────────────────────────────────────────────────
+// plugins loaded or changed: refresh ship lists and teams. Called by: init, the plugin picker
 
 async function onPluginsChanged() {
     try {
@@ -183,15 +172,13 @@ async function onPluginsChanged() {
     }
 }
 
-// Start a fight as soon as the page has everything it needs (opened from a
-// link or from auto-fit) — attribute and damage-type data load a little later.
+// start a fight once everything has loaded (from a link or auto-fit). Called by: loadSharedBattle, loadPendingMatchup
 function runWhenReady(tries = 0) {
     if ((!_attrDefs || !window.DamageTypes?.isReady()) && tries < 30) { setTimeout(() => runWhenReady(tries + 1), 1000); return; }
     setTimeout(() => runSimulation(), 500);
 }
 
-// ── Share links: the whole battle set-up inside a link (no account) ──────
-// Game ships go by name; your own designs travel inside the link.
+// ── share links: game ships by name, your designs inside the link ──
 function designFor(shipData) {
     if (shipData._isLocalBuild && shipData._localId != null) {
         try {
@@ -202,6 +189,7 @@ function designFor(shipData) {
     }
     return null;
 }
+// 🔗 Share this battle
 async function shareBattle() {
     if (!window.ShareLinks) return;
     const skipped = [];
@@ -220,6 +208,7 @@ async function shareBattle() {
     if (skipped.length) setStatus(`Not included in the link (can't be shared): ${skipped.join(', ')}`, true);
 }
 window.shareBattle = shareBattle;
+// open a shared battle link. Called by: onPluginsChanged
 async function loadSharedBattle() {
     if (!window.ShareLinks || !/[#&]battle=/.test(location.hash)) return;
     const data = await ShareLinks.read('battle');
@@ -248,8 +237,7 @@ async function loadSharedBattle() {
     if (_teams.filter(t => t.ships.length).length >= 2) runWhenReady();
 }
 
-// "⚔ Test in Battle Simulator" from the ship builder's auto-fit: the fit on
-// team 1, what it was fitted against (or the stock ship) on team 2.
+// "⚔ Test in Battle Simulator" from auto-fit: the fit vs its enemies. Called by: onPluginsChanged
 function loadPendingMatchup() {
     let p = null;
     try { p = JSON.parse(localStorage.getItem('ES_BS_PENDING') || 'null'); } catch (_) {}
@@ -270,11 +258,10 @@ function loadPendingMatchup() {
     if (_teams[1].ships.length) runWhenReady();
     else setStatus(`None of the opponent ships (${missing.join(', ')}) are in your selected plugins.`, true);
 }
-// ═══════════════════════════════════════════════════════════════════════════════
-//  ATTRIBUTE HELPERS
-// ═══════════════════════════════════════════════════════════════════════════════
+// how the game stacks an attribute. Called by: resolveShipStats
 
 function getStacking(key) { return (_attrDefs?.attributes?.[key]?.stacking) || 'additive'; }
+// protection attributes
 function getProtectionKeys() {
     if (!_attrDefs?.attributes) return [];
     return Object.keys(_attrDefs.attributes).filter(k => k.endsWith(' protection'));
@@ -284,9 +271,7 @@ const dmgKey    = t => t.toLowerCase() + ' damage';
 const protKey   = t => t.toLowerCase() + ' protection';
 const relDmgKey = t => '% ' + t.toLowerCase() + ' damage';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  OUTFIT ATTRIBUTE EXTRACTION
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── outfit attributes ──
 
 const OUTFIT_META_KEYS = new Set([
     '_pluginId','name','displayName','pluralName','category',
@@ -297,6 +282,7 @@ const OUTFIT_META_KEYS = new Set([
     'flotsamSprite','ammo','isDefined',
 ]);
 
+// outfit → its attributes
 function extractOutfitAttributes(outfit) {
     const merged = {};
     for (const [key, val] of Object.entries(outfit)) {
@@ -309,9 +295,7 @@ function extractOutfitAttributes(outfit) {
     return merged;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  STAT RESOLUTION
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── a ship's fighting stats ──
 
 function _lookupOutfit(outfitName, pluginId) {
     // Tier 1: direct lookup in the outfit's own plugin
@@ -337,6 +321,7 @@ function _lookupOutfit(outfitName, pluginId) {
     return null;
 }
 
+// a ship's fighting stats. Called by: addShipToTeam
 function resolveShipStats(ship) {
     const rawAttrs = ship.attributes || {};
     const combined = {};
@@ -350,7 +335,7 @@ function resolveShipStats(ship) {
     const weapons             = [];
     const outfitContributions = {};
 
-    // ── Build unified outfit entries from whichever format is present ──────────
+    // outfits as one list, whatever format
     const outfitEntries = [];
     const outfitSource = ship.outfits || ship.outfitMap;
 
@@ -372,7 +357,7 @@ function resolveShipStats(ship) {
         }
     }
 
-    // ── Process weapons and attributes ────────────────────────────────────────
+    // weapons and attributes
     for (const { name: outfitName, count: qty, pluginId } of outfitEntries) {
         const outfit = _lookupOutfit(outfitName, pluginId);
         if (!outfit) continue;
@@ -397,7 +382,7 @@ function resolveShipStats(ship) {
         }
     }
 
-    // ── Mass / drag top-level fallback ────────────────────────────────────────
+    // mass / drag fallback
     if (combined['mass'] == null && ship.mass != null && ship.mass !== '') {
         const n = Number(ship.mass); if (isFinite(n)) combined['mass'] = n;
     }
@@ -445,7 +430,7 @@ function resolveShipStats(ship) {
     const fuelCap                   = a('fuel capacity');
     const fuelRegenPerFrame         = a('fuel generation') + a('ram scoop') * 0;
 
-    // ── Ammo inventory (reuses the same outfitEntries) ────────────────────────
+    // ammo carried
     const ammoInventory = {};
     for (const { name: outfitName, count: qty, pluginId } of outfitEntries) {
         const outfit = _lookupOutfit(outfitName, pluginId);
@@ -496,9 +481,7 @@ function resolveShipStats(ship) {
     };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  COMPOSITE STATS
-// ═══════════════════════════════════════════════════════════════════════════════
+// a whole team as one combatant. Called by: runSimulation
 
 function mergeTeamStats(entries) {
     if (!entries.length) return null;
@@ -577,14 +560,12 @@ function mergeTeamStats(entries) {
     return merged;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  WEAPON HELPERS
-// ═══════════════════════════════════════════════════════════════════════════════
+// what a weapon's submunitions are (old and new formats). Called by: resolveSubmunitionDamage, resolveEffectiveRange
 
 function resolveSubmunitionRefs(w) {
     const results = [];
 
-    // ── NEW FORMAT: w.submunitions = [{type, count}, …] ──────────────────────
+    // new format: [{ type, count }]
     if (Array.isArray(w.submunitions)) {
         for (const entry of w.submunitions) {
             const subName  = entry?.type  ?? null;
@@ -594,7 +575,7 @@ function resolveSubmunitionRefs(w) {
         if (results.length > 0) return results;
     }
 
-    // ── LEGACY FORMAT A ───────────────────────────────────────────────────────
+    // old format A
     const rawSub = w.submunition;
     if (rawSub != null) {
         const entries = Array.isArray(rawSub) ? rawSub : [rawSub];
@@ -607,7 +588,7 @@ function resolveSubmunitionRefs(w) {
         if (results.length > 0) return results;
     }
 
-    // ── LEGACY FORMAT A2 ──────────────────────────────────────────────────────
+    // old format A2
     for (const key of Object.keys(w)) {
         if (!key.startsWith('submunition ')) continue;
         const subName = key.slice('submunition '.length).trim();
@@ -618,7 +599,7 @@ function resolveSubmunitionRefs(w) {
     }
     if (results.length > 0) return results;
 
-    // ── LEGACY FORMAT B ───────────────────────────────────────────────────────
+    // old format B
     for (const key of Object.keys(w)) {
         if (key === 'submunition' || key === 'submunitions') continue;
         if (key.startsWith('submunition ')) continue;
@@ -638,6 +619,7 @@ function resolveSubmunitionRefs(w) {
     return results;
 }
 
+// weapon range incl. submunitions
 function resolveEffectiveRange(w, visited, depth, inheritedVelocity) {
     if (depth > 8) return null;
     const vel      = (w.velocity || 0) > 0 ? (w.velocity || 0) : (inheritedVelocity || 0);
@@ -658,6 +640,7 @@ function resolveEffectiveRange(w, visited, depth, inheritedVelocity) {
     return (total > 0 || anySubHasRange) ? total : null;
 }
 
+// damage incl. submunitions
 function resolveSubmunitionDamage(weapon, multiplier, visited, depth) {
     if (depth > 8) return {};
     const totals = {};
@@ -676,6 +659,7 @@ function resolveSubmunitionDamage(weapon, multiplier, visited, depth) {
     return totals;
 }
 
+// every weapon's numbers. Called by: resolveShipStats
 function analyzeWeapons(weapons) {
     const firingCostKeys = (_attrDefs?.outfitDisplay?.valueNames || [])
         .map(v => v.key).filter(k => k.startsWith('firing '));
@@ -729,9 +713,7 @@ function analyzeWeapons(weapons) {
     return result;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  AMMO / FIRING HELPERS  (unchanged from original)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ammo that's really a capacity (negative)
 
 function _isNegativeCapacityAmmo(outfit, outfitName) {
     const attrs = extractOutfitAttributes(outfit);
@@ -740,19 +722,20 @@ function _isNegativeCapacityAmmo(outfit, outfitName) {
     return false;
 }
 
+// which ammo a weapon uses
 function resolveAmmoRef(w) {
-    // ── NEW FORMAT: w.ammunition = [{type, count}, …] ────────────────────────
+    // new format: [{ type, count }]
     if (Array.isArray(w.ammunition) && w.ammunition.length > 0) {
         const first = w.ammunition[0];
         if (first?.type) return { ammoName: first.type, ammoCount: first.count ?? 1 };
     }
 
-    // ── LEGACY FORMAT A: weapon.ammo = "OutfitName" ──────────────────────────
+    // old format: weapon.ammo = name
     const rawAmmoField = w['ammo'];
     if (typeof rawAmmoField === 'string' && rawAmmoField.length > 0)
         return { ammoName: rawAmmoField, ammoCount: 1 };
 
-    // ── LEGACY FORMAT B: outfit name as key ──────────────────────────────────
+    // old format: outfit name as key
     for (const key of Object.keys(w)) {
         if (key === 'ammo' || key === 'ammunition') continue;
         const val = w[key];
@@ -774,6 +757,7 @@ function resolveAmmoRef(w) {
     return null;
 }
 
+// can it fire right now?
 function canWeaponFire(w, st, stats) {
     const fe = w['firing energy'] || 0;
     if (fe > 0 && (st.isIonized || st.energy < fe)) return 'firing energy';
@@ -791,6 +775,7 @@ function canWeaponFire(w, st, stats) {
     return null;
 }
 
+// pay a shot's costs
 function consumeFiringCosts(w, st) {
     st.energy  -= (w['firing energy']  || 0);
     st.fuel    -= (w['firing fuel']    || 0);
@@ -803,15 +788,14 @@ function consumeFiringCosts(w, st) {
             Math.max(0, st.ammoInventory[ammoRef.ammoName] - ammoRef.ammoCount);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  SUSTAIN EVENT TRACKING  (unchanged)
-// ═══════════════════════════════════════════════════════════════════════════════
+// weapon running out of something (energy, ammo …) — for the fight log
 
 function _isAmmoReason(r) { return typeof r === 'string' && r.startsWith('ammo:'); }
 
 const STALL_CONFIRM_FRAMES  = 2 * 60;
 const RESUME_CONFIRM_FRAMES = 1 * 60;
 
+// start-of-fight sustain state
 function createSustainState() {
     const resourceState = {};
     for (const key of firingResourceKeys())
@@ -819,6 +803,7 @@ function createSustainState() {
     return { resourceState, ammoExhausted: new Set() };
 }
 
+// log when weapons run dry
 function checkWeaponSustainEvents(st, stats, side, t, sus, phases) {
     const weapons = stats.weapons;
     if (!weapons.length) return;
@@ -871,9 +856,7 @@ function checkWeaponSustainEvents(st, stats, side, t, sus, phases) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  COMBAT SIMULATION CORE  (unchanged)
-// ═══════════════════════════════════════════════════════════════════════════════
+// a side's state at the start of a fight. Called by: simulateBattle
 
 function createCombatantState(stats) {
     const statusEffects = {};
@@ -895,6 +878,7 @@ function createCombatantState(stats) {
     };
 }
 
+// the fight itself, frame by frame. Called by: runSimulation
 async function simulateBattle(sA, sB, onProgress, opts = {}) {
     const result = { winner:null, ttkA:Infinity, ttkB:Infinity,
         projectedTtkA:null, projectedTtkB:null, phases:[], warnings:[],
@@ -910,8 +894,7 @@ async function simulateBattle(sA, sB, onProgress, opts = {}) {
     const timelineA = [], timelineB = [];
     let frame = 0;
 
-    // Skilled pilots (battleSimEngagement.js): distance, range, aim, dodging,
-    // facing and missile guidance decide how much of each shot lands.
+    // skilled-pilot model (battleSimEngagement.js)
     const meta = s => s.weapons.map(w => ({ range: resolveEffectiveRange(w, new Set([w._name].filter(Boolean)), 0, 0), turret: !!w._turret }));
     const eng = opts.skilled && window.BattleEngagement ? window.BattleEngagement.create(sA, sB, meta(sA), meta(sB)) : null;
     const hitA = eng ? (i, def) => eng.factor('A', i, def) : null;
@@ -993,9 +976,7 @@ async function simulateBattle(sA, sB, onProgress, opts = {}) {
         if (!stA.destroyed && stA.hull < 0) { stA.destroyed = true; stA.destroyedAt = t; }
         if (!stB.destroyed && stB.hull < 0) { stB.destroyed = true; stB.destroyedAt = t; }
         if ((stA.disabled || stA.destroyed) && (stB.disabled || stB.destroyed)) break;
-        // Once one side is out of the fight nothing more can happen to the other
-        // (a disabled ship doesn't shoot) — finish a few seconds later, for any
-        // missiles still in flight, instead of simulating up to 100 minutes.
+        // one side out → stop 5 s later (missiles in flight); stalemate → stop
         const outA = stA.disabled || stA.destroyed, outB = stB.disabled || stB.destroyed;
         if ((outA || outB) && endAt == null) endAt = frame + 5 * FPS;
         if (endAt != null && frame >= endAt) break;
@@ -1065,6 +1046,7 @@ async function simulateBattle(sA, sB, onProgress, opts = {}) {
     return result;
 }
 
+// one frame of firing
 function shootFrame(attSt, defSt, attStats, missileQueue, hitFn) {
     if (attSt.isOverheated) return;
     for (let i = 0; i < attStats.weapons.length; i++) {
@@ -1101,6 +1083,7 @@ function shootFrame(attSt, defSt, attStats, missileQueue, hitFn) {
     }
 }
 
+// anti-missile shooting down missiles
 function resolveAntiMissile(defenderSt, defenderStats, missileQueue, result, side) {
     if (!missileQueue || missileQueue.length === 0) return;
     const weapons = defenderStats.weapons;
@@ -1130,6 +1113,7 @@ function resolveAntiMissile(defenderSt, defenderStats, missileQueue, result, sid
     }
 }
 
+// missiles that arrive this frame
 function applyQueuedMissiles(missileQueue, defSt) {
     for (const entry of missileQueue) {
         if (entry.intercepted) continue;
@@ -1137,6 +1121,7 @@ function applyQueuedMissiles(missileQueue, defSt) {
     }
 }
 
+// burst fire timing
 function advanceBurst(attSt, i, burstCount, burstReload, reload) {
     if (burstCount > 1) {
         attSt.weaponBurstCounters[i]++;
@@ -1151,6 +1136,7 @@ function advanceBurst(attSt, i, burstCount, burstReload, reload) {
     }
 }
 
+// apply a hit
 function applyWeaponDamage(w, defSt, defStats, multiplier, visited, depth) {
     multiplier = multiplier || 1; depth = depth || 0;
     if (depth > 8) return;
@@ -1164,6 +1150,7 @@ function applyWeaponDamage(w, defSt, defStats, multiplier, visited, depth) {
     }
 }
 
+// shield/hull damage
 function _applyDirectDamage(w, defSt, defStats, multiplier) {
     const disruptMult       = 1 + (defSt.statusEffects.disruption || 0) * 0.01;
     const effectivePiercing = Math.max(0, Math.min(1, w.piercing || 0)) * (1 - defStats.piercingRes);
@@ -1211,6 +1198,7 @@ function _applyDirectDamage(w, defSt, defStats, multiplier) {
     }
 }
 
+// status damage (ion, heat …)
 function applyStatusOrInstantDamage(defSt, typeName, dmg) {
     switch (typeName) {
         case 'Energy':     defSt.energy -= dmg; break;
@@ -1228,6 +1216,7 @@ function applyStatusOrInstantDamage(defSt, typeName, dmg) {
     }
 }
 
+// energy/heat generation per frame
 function doGeneration(st, stats) {
     st.energy += stats.energyGenPerFrame - stats.energyConsumeIdlePerFrame
                - stats.movingEnergyPerFrame - stats.coolingEnergyPerFrame;
@@ -1240,6 +1229,7 @@ function doGeneration(st, stats) {
     if ((st.statusEffects.leak      || 0) > 0) st.fuel    -= st.statusEffects.leak;
 }
 
+// shield/hull regen per frame
 function doRegen(st, stats) {
     if (st.shieldDelayCounter > 0) st.shieldDelayCounter--;
     else if (st.shields < stats.maxShields)
@@ -1249,6 +1239,7 @@ function doRegen(st, stats) {
         st.hull += stats.hullRepairPerFrame + stats.delayedHullPerFrame;
 }
 
+// status effects wear off
 function decayStatusEffects(st, stats) {
     for (const statName of Object.keys(_statusDecayMap)) {
         const cur = st.statusEffects[statName] || 0;
@@ -1259,6 +1250,7 @@ function decayStatusEffects(st, stats) {
     }
 }
 
+// milestones for the fight log
 function checkMilestones(st, stats, side, t, m, phases) {
     if (!m.shieldsBroken && stats.maxShields > 0 && st.shields <= 0) {
         m.shieldsBroken = true;
@@ -1284,6 +1276,7 @@ function checkMilestones(st, stats, side, t, m, phases) {
     }
 }
 
+// time to disable if the fight went on
 function projectSurvival(stats, finalState, avgShieldDps, avgHullDps) {
     if (avgShieldDps <= 0 && avgHullDps <= 0) return Infinity;
     let shields = Math.max(0, finalState.shields);
@@ -1302,9 +1295,7 @@ function projectSurvival(stats, finalState, avgShieldDps, avgHullDps) {
     return Infinity;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  TEAM MANAGEMENT  (unchanged)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── teams ──
 
 function createTeam(name) {
     const idx   = _teams.length;
@@ -1315,6 +1306,7 @@ function createTeam(name) {
     return team;
 }
 
+// remove a team
 function removeTeam(teamId) {
     _teams = _teams.filter(t => t.id !== teamId);
     renderAllTeams();
@@ -1322,6 +1314,7 @@ function removeTeam(teamId) {
     hideResults();
 }
 
+// add a ship to a team
 function addShipToTeam(teamId, shipData, count) {
     const team = _teams.find(t => t.id === teamId);
     if (!team) return;
@@ -1336,6 +1329,7 @@ function addShipToTeam(teamId, shipData, count) {
     hideResults();
 }
 
+// remove a ship
 function removeShipFromTeam(teamId, shipIdx) {
     const team = _teams.find(t => t.id === teamId);
     if (!team) return;
@@ -1345,6 +1339,7 @@ function removeShipFromTeam(teamId, shipIdx) {
     hideResults();
 }
 
+// change a ship's count
 function updateShipCount(teamId, shipIdx, newCount) {
     const team = _teams.find(t => t.id === teamId);
     if (!team || !team.ships[shipIdx]) return;
@@ -1370,17 +1365,19 @@ function setShipSkilled(teamId, shipIdx, value) {
     setTimeout(() => { renderTeamCard(team); syncSkillMaster(); }, 0);
     hideResults();
 }
+// Make all / none skilled
 function setTeamSkilled(teamId, on) {
     const team = _teams.find(t => t.id === teamId);
     if (!team) return;
     for (const e of team.ships) e.skilled = on ? e.count : 0;
     renderTeamCard(team); syncSkillMaster(); hideResults();
 }
+// the bottom "every ship skilled" box
 function setEveryoneSkilled(on) {
     for (const t of _teams) for (const e of t.ships) e.skilled = on ? e.count : 0;
     renderAllTeams(); hideResults();
 }
-// the bottom "every ship is skilled" box reflects the teams
+// bottom "every ship skilled" box follows the teams
 function syncSkillMaster() {
     const box = document.getElementById('skilledPilots');
     if (!box) return;
@@ -1388,7 +1385,7 @@ function syncSkillMaster() {
     box.checked = !ships.length ? box.checked : ships.every(e => (e.skilled || 0) >= e.count);
     box.indeterminate = ships.length > 0 && !box.checked && ships.some(e => (e.skilled || 0) > 0);
 }
-/** Share of a team that's skilled, weighted by how much each ship matters (toughness × count). */
+// skilled share of a team (weighted by toughness × count)
 function teamSkill(team) {
     let tot = 0, sk = 0;
     for (const e of team.ships) {
@@ -1401,17 +1398,17 @@ window.setShipSkilled = setShipSkilled;
 window.setTeamSkilled = setTeamSkilled;
 window.setEveryoneSkilled = setEveryoneSkilled;
 
+// rename a team
 function renameTeam(teamId, newName) {
     const team = _teams.find(t => t.id === teamId);
     if (team) team.name = newName || team.name;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  SHIP SEARCH  (unchanged)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── ship search ──
 
 const _blurTimers = {};
 
+// ship search for a team
 function searchShipsForTeam(teamId, query) {
     const lq = (query || '').toLowerCase().trim();
     const dd = document.getElementById('dropdown_' + teamId);
@@ -1442,20 +1439,20 @@ function searchShipsForTeam(teamId, query) {
     dd.classList.add('open');
 }
 
+// open its dropdown
 function openTeamDropdown(teamId) {
     clearTimeout(_blurTimers[teamId]);
     searchShipsForTeam(teamId, document.getElementById('search_' + teamId)?.value);
 }
 
+// close it
 function blurTeamDropdown(teamId) {
     _blurTimers[teamId] = setTimeout(() => {
         document.getElementById('dropdown_' + teamId)?.classList.remove('open');
     }, 180);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  RENDERING — TEAM CARDS  (unchanged)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── drawing the teams ──
 
 function renderAllTeams() {
     const container = document.getElementById('teamsContainer');
@@ -1466,12 +1463,14 @@ function renderAllTeams() {
     if (addBtn) addBtn.style.display = _teams.length >= 30 ? 'none' : '';
 }
 
+// redraw one team card
 function renderTeamCard(team) {
     const existing = document.getElementById('teamCard_' + team.id);
     if (!existing) { renderAllTeams(); return; }
     existing.replaceWith(createTeamCardElement(team));
 }
 
+// build a team card
 function createTeamCardElement(team) {
     const el = document.createElement('div');
     el.className = 'team-card';
@@ -1560,9 +1559,7 @@ function createTeamCardElement(team) {
     return el;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  SIMULATION RUNNER  (unchanged)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── running the simulation ──
 
 function updateSimButton() {
     const btn = document.getElementById('fightBtn');
@@ -1574,11 +1571,13 @@ function updateSimButton() {
         : '⚔ SIMULATE BATTLE';
 }
 
+// hide old results
 function hideResults() {
     const el = document.getElementById('simResults');
     if (el) el.style.display = 'none';
 }
 
+// ⚔ SIMULATE BATTLE
 async function runSimulation() {
     if (!_attrDefs) { setStatus('Attribute definitions not loaded — please wait.', true); return; }
     if (!window.DamageTypes?.isReady()) { setStatus('Damage type registry not ready — please wait.', true); return; }
@@ -1658,9 +1657,10 @@ async function runSimulation() {
     }
 }
 
+// stop a running fight
 function cancelSimulation() { _simCancelled = true; }
 
-// ── Public API ─────────────────────────────────────────────────────────────────
+// ── window.BattleSim ──
 window.searchShipsForTeam  = searchShipsForTeam;
 window.openTeamDropdown    = openTeamDropdown;
 window.blurTeamDropdown    = blurTeamDropdown;
@@ -1670,7 +1670,7 @@ window.updateShipCount     = updateShipCount;
 window.renameTeam          = renameTeam;
 window.runSimulation       = runSimulation;
 
-// Ship count boxes: 1 to 9,999 ships. Anything else is put right — and says so.
+// ship count boxes: 1–9,999, put right if not
 function clampCount(el) {
     if (!el) return 1;
     const raw = Number(el.value);

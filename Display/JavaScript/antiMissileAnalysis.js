@@ -1,96 +1,9 @@
 ;(function () {
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  antiMissileAnalysis.js  —  Endless Sky Anti-Missile Analysis Module
-// ═══════════════════════════════════════════════════════════════════════════════
-//
-//  OVERVIEW
-//  ────────
-//  Analyses one or more anti-missile weapons installed on a ship and produces:
-//
-//    1. PER-WEAPON profile   — strength, range, reload, DPS equivalent, energy/heat cost
-//    2. COMBINED ship profile — aggregate intercept probability vs any missile strength,
-//                               effective shots-per-second, energy/heat budget impact
-//    3. INTERCEPT TABLE      — P(intercept) across a configurable range of missile
-//                               strength values, accounting for multi-weapon volleys
-//
-//  INTERCEPT FORMULA  (from Ship.cpp / Weapon.cpp — no hardcoding)
-//  ────────────────────────────────────────────────────────────────
-//  When a missile enters anti-missile range, every AM weapon that has completed
-//  its reload cycle fires at it reactively (one attempt per frame until the missile
-//  is destroyed or escapes).  Each attempt resolves independently:
-//
-//      roll = Random::Real() * (antiMissile + missileStrength)
-//      if roll < antiMissile  →  missile destroyed
-//      i.e.  P(single shot intercepts) = antiMissile / (antiMissile + missileStrength)
-//
-//  For N independent weapons firing at the same missile on the same frame:
-//      P(missile survives all N shots) = ∏ (1 - Pᵢ)
-//      P(missile destroyed)            = 1 - ∏ (1 - Pᵢ)
-//
-//  AM weapons fire REACTIVELY each frame — they do NOT use the normal ship weapon
-//  reload loop.  However they DO have their own internal reload counter, so a weapon
-//  with reload=10 can only fire once every 10 frames.  The module models sustained
-//  fire by computing shots-per-second for each weapon independently.
-//
-//  MISSILE STRENGTH RESOLUTION
-//  ───────────────────────────
-//  missile strength lives on the PROJECTILE, not always on the launcher.
-//  For weapons with submunitions (e.g. Finisher Maegrolain → Active Finisher),
-//  the effective missile strength is read from the deepest projectile that actually
-//  carries it — resolveEffectiveMissileStrength() walks the submunition tree.
-//
-//  NO HARDCODING POLICY
-//  All attribute key names are read from attrDefs (attributeDefinitions.json) or
-//  from the weapon block itself at runtime.  The only compile-time string literals
-//  are the canonical weapon-block keys from Weapon.cpp Load() that are part of the
-//  game's persistent save format and cannot change without breaking saves.
-//  Default intercept-table strength benchmarks are derived dynamically from the
-//  actual missile strengths present in the outfit index — never hardcoded.
-//
-//  DEPENDENCIES
-//  ────────────
-//  window.MunitionTypes must be initialised (calls MunitionTypes.init first).
-//  Reads _outfitIndex via the getter passed to MunitionTypes.init.
-//  attrDefs: the parsed attributeDefinitions.json object.
-//
-//  PUBLIC API
-//  ──────────
-//  AntiMissileAnalysis.init(getOutfitIndex, attrDefs)
-//      Must be called once.  May share the same getter/attrDefs as MunitionTypes.
-//
-//  AntiMissileAnalysis.analyseShip(resolvedShipStats)  → ShipAMProfile
-//      Full profile for one resolved ship stats object (as produced by battleSim.js
-//      resolveShipStats).
-//
-//  AntiMissileAnalysis.analyseWeapon(weapon, outfitName)  → WeaponAMProfile | null
-//      Profile for a single weapon block.  Returns null if not an AM weapon.
-//
-//  AntiMissileAnalysis.combinedInterceptChance(weaponProfiles, missileStrength)  → number
-//      P(at least one weapon intercepts) for simultaneous shots from all weapons,
-//      against a missile with the given strength.
-//
-//  AntiMissileAnalysis.buildInterceptTable(weaponProfiles, missileStrengths)  → InterceptTable
-//      Returns a table of P(intercept) for every supplied missile strength value.
-//
-//  AntiMissileAnalysis.deriveStrengthBenchmarks()  → number[]
-//      Scans the outfit index and returns sorted unique missile strength values
-//      present across all weapons/submunitions, padded with 0 and sensible
-//      intermediate steps.  Never hardcodes values.
-//
-//  AntiMissileAnalysis.resolveEffectiveMissileStrength(weapon)  → number
-//      Walks a weapon's submunition tree to find the missile strength that actually
-//      applies at interception time (i.e. on the deepest homing projectile).
-//
-//  AntiMissileAnalysis.formatProfile(shipAMProfile)  → string
-//      Human-readable summary for debugging / display.
-//
-//  AntiMissileAnalysis.isReady()  → boolean
-//
-// ═══════════════════════════════════════════════════════════════════════════════
+// Anti-missile: how much of a missile threat a ship's anti-missile stops (game formulas from the definitions).
 
-// ── Internal state ─────────────────────────────────────────────────────────────
+// ── state ──
 let _getOutfitIndex = () => ({});
 let _attrDefs       = null;
 let _ready          = false;
@@ -98,7 +11,7 @@ let _ready          = false;
 const FPS = 60;
 const MAX_SUBMUNITION_DEPTH = 12;
 
-// ── Canonical weapon-block key for anti-missile (from Weapon.cpp Load) ─────────
+// anti-missile key in weapon data
 const ANTI_MISSILE_KEY_FALLBACK = 'anti-missile';
 const MISSILE_STRENGTH_KEY      = 'missile strength';
 const VELOCITY_KEY              = 'velocity';
@@ -109,13 +22,14 @@ const FIRING_FUEL_KEY           = 'firing fuel';
 const BURST_COUNT_KEY           = 'burst count';
 const BURST_RELOAD_KEY          = 'burst reload';
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── helpers ──
 
 function _antiMissileKey() {
     if (_attrDefs?.attributes?.['anti-missile']) return 'anti-missile';
     return ANTI_MISSILE_KEY_FALLBACK;
 }
 
+// firing cost keys
 function _firingCostKeys() {
     if (_attrDefs?.outfitDisplay?.valueNames) {
         return _attrDefs.outfitDisplay.valueNames
@@ -126,9 +40,7 @@ function _firingCostKeys() {
             'firing hull', 'firing shields'];
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  INIT
-// ═══════════════════════════════════════════════════════════════════════════════
+// remember the outfit index. Called on load
 
 function init(getOutfitIndex, attrDefs) {
     if (typeof getOutfitIndex !== 'function')
@@ -139,21 +51,10 @@ function init(getOutfitIndex, attrDefs) {
     console.log('[AntiMissileAnalysis] Ready.');
 }
 
+// ready?
 function isReady() { return _ready; }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  MISSILE STRENGTH RESOLUTION
-//  missile strength lives on the projectile, not always on the launcher.
-//  For a launcher with submunitions (e.g. Finisher Maegrolain → Active Finisher),
-//  the interceptable object IS the submunition, so its missile strength is what
-//  the AM roll is made against.
-//
-//  Resolution rules (mirrors Ship.cpp behaviour):
-//    1. If the weapon itself has missile strength > 0, use that.
-//    2. Otherwise recurse into submunitions and return the first non-zero value
-//       found depth-first (the first actual projectile the AM weapon would face).
-//    3. If nothing is found, return 0 (any AM weapon intercepts with 100%).
-// ═══════════════════════════════════════════════════════════════════════════════
+// how hard a missile is to shoot down (incl. submunitions)
 
 function resolveEffectiveMissileStrength(weapon, _visited, _depth) {
     if (!weapon) return 0;
@@ -179,7 +80,7 @@ function resolveEffectiveMissileStrength(weapon, _visited, _depth) {
     return 0;
 }
 
-// ── Lightweight submunition reference resolver (mirrors battleSim.js) ──────────
+// submunition names and counts
 function _resolveSubmunitionRefs(w) {
     const results = [];
     const rawSub = w.submunition;
@@ -221,13 +122,7 @@ function _resolveSubmunitionRefs(w) {
     return results;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  DYNAMIC BENCHMARK DERIVATION
-//  Scans the full outfit index to collect every missile strength value actually
-//  present in the data, then builds a sorted, deduplicated list of benchmarks.
-//  Adds 0 (guaranteed intercept) and fills gaps so the table is useful.
-//  NEVER hardcodes strength values.
-// ═══════════════════════════════════════════════════════════════════════════════
+// typical missile strengths to compare against
 
 function deriveStrengthBenchmarks() {
     const index  = _getOutfitIndex();
@@ -255,9 +150,7 @@ function deriveStrengthBenchmarks() {
     return [...enriched].sort((a, b) => a - b);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  SINGLE-WEAPON ANALYSIS
-// ═══════════════════════════════════════════════════════════════════════════════
+// one anti-missile weapon
 
 function analyseWeapon(weapon, outfitName) {
     if (!weapon || typeof weapon !== 'object') return null;
@@ -290,6 +183,7 @@ function analyseWeapon(weapon, outfitName) {
         }
     }
 
+    // intercept probability
     const pIntercept = (ms) => calcInterceptChance(strength, ms);
 
     // Intercept probabilities use real missile strength values from the index
@@ -331,9 +225,7 @@ function analyseWeapon(weapon, outfitName) {
     };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  MULTI-WEAPON COMBINED INTERCEPT
-// ═══════════════════════════════════════════════════════════════════════════════
+// chance several systems together stop a missile
 
 function combinedInterceptChance(weaponProfiles, missileStrength) {
     if (!weaponProfiles || weaponProfiles.length === 0) return 0;
@@ -346,9 +238,7 @@ function combinedInterceptChance(weaponProfiles, missileStrength) {
     return 1 - surviveProbability;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  SHIP-LEVEL PROFILE
-// ═══════════════════════════════════════════════════════════════════════════════
+// a whole ship's anti-missile
 
 function analyseShip(resolvedShipStats) {
     const name    = resolvedShipStats?.name || '(unknown)';
@@ -443,9 +333,7 @@ function analyseShip(resolvedShipStats) {
     };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  INTERCEPT TABLE
-// ═══════════════════════════════════════════════════════════════════════════════
+// intercept chance table
 
 function buildInterceptTable(weaponProfiles, missileStrengths) {
     const strengths = (missileStrengths || []).map(v => Math.max(0, v));
@@ -461,9 +349,7 @@ function buildInterceptTable(weaponProfiles, missileStrengths) {
     return { missileStrengths: strengths, perWeapon, combined };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  UTILITY — INTERCEPT CHANCE
-// ═══════════════════════════════════════════════════════════════════════════════
+// chance one shot stops one missile
 
 function calcInterceptChance(antiMissileStrength, missileStrength) {
     const am = Math.max(0, antiMissileStrength || 0);
@@ -473,9 +359,7 @@ function calcInterceptChance(antiMissileStrength, missileStrength) {
     return am / (am + ms);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  FORMATTING
-// ═══════════════════════════════════════════════════════════════════════════════
+// profile as text
 
 function formatProfile(profile) {
     if (!profile) return '(null profile)';
@@ -532,9 +416,7 @@ function formatProfile(profile) {
     return lines.join('\n');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  PUBLIC EXPORT
-// ═══════════════════════════════════════════════════════════════════════════════
+// ── window.AntiMissileAnalysis ──
 
 window.AntiMissileAnalysis = {
     // Lifecycle
