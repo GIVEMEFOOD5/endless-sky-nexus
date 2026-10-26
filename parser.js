@@ -1,62 +1,4 @@
-// parser.js - Endless Sky data parser for GitHub Actions
-// Parses ship, variant, outfit, and effect data from GitHub repositories.
-// Uses sparse Git clones (data/ + images/ only) instead of the GitHub API,
-// which avoids rate limits and the 100k-file tree truncation limit.
-// Also supports "archive" sources: a .zip / .tar / .tar.gz / .tgz uploaded
-// to rawData/ in the repo, which may itself contain one or more plugins.
-//
-// ── CHANGELOG (mission/event parsing pass) ──────────────────────────────────
-//   - Fixed: `give ship`/`ship`/`give outfit`/`outfit` action lines with a
-//     BARE (unquoted) model/outfit name were silently dropped — only the
-//     quoted form matched. e.g. `give ship Peregrine "Shadow Flight"` was
-//     invisible to locationResolver entirely. Both now accept bare or
-//     quoted names.
-//   - Added: `event "X"` action lines inside a mission (e.g. under
-//     `on accept`) are now recorded as a mission → event trigger link, so
-//     "accepting this mission causes event X to fire" is traceable.
-//   - Added: `parseEventBlock` now understands `system "X"` sub-blocks
-//     (`add fleet` / `remove fleet` — how an event changes what spawns in a
-//     region) and `government "X"` sub-blocks (`"attitude toward"` changes).
-//   - Extended: `parsePlanetBlock` now also tracks `add outfitter` /
-//     `remove outfitter` / `remove shipyard` (previously only `add
-//     shipyard` was handled), and threads an optional `eventName` through
-//     so every planet-level change an event causes is traceable back to
-//     that event.
-//   - Added: a named `fleet "X"` reference inside an `npc` block (the
-//     common way to spawn an existing fleet's ships, as opposed to an
-//     inline anonymous fleet body) is now resolved to its actual ship list
-//     via a new post-processing pass, `resolveAllNpcFleetRefs()`, run once
-//     all files/plugins have been parsed — necessary because the
-//     referenced fleet's own definition may live in a file parsed before
-//     OR after the mission/event that references it.
-//
-//   NOT changed in this pass (flagged, not silently skipped):
-//   - Bespoke per-NPC-ship outfit loadouts declared inline under a specific
-//     `ship "X" "Variant"` line inside an `npc` block are still not parsed
-//     into outfit/species data.
-//   - Negative-count `give outfit "X" -N` ("take away") lines are still
-//     matched then discarded rather than recorded anywhere.
-//
-// ── CHANGELOG (person-block pass) ────────────────────────────────────────
-//   - Added: `person "X"` blocks (persons.txt-style unique/named ships —
-//     e.g. story bosses, capturable one-offs, and several alien "special"
-//     ships that are never sold in a shipyard or spawned from a normal
-//     fleet) were PREVIOUSLY NOT RECOGNIZED AT ALL by the top-level
-//     dispatcher in parseFileContent. Any ship that only ever appears via
-//     a person block therefore got no government and no location data,
-//     with no warning. Added `parsePersonBlock` + a dispatch branch for
-//     `person `, alongside a new SpeciesResolver.collectPerson /
-//     LocationResolver.collectPerson+collectPersonSystem pair.
-//   - Fixed: the anonymous inline `fleet` sub-block inside an `npc` block
-//     (a real, distinct syntax from both the named `fleet "X"` reference
-//     AND the flat quoted-ship-list-directly-under-npc form — see e.g.
-//     Remnant/Korath mission files, where `npc kill` contains its own
-//     `fleet` sub-block with its own `government` and `variant` lines) is
-//     now scanned for a LOCAL `government` line. Previously this local
-//     government was silently ignored in favor of whatever `government`
-//     line (if any) appeared directly under the npc itself, which is only
-//     correct when the two happen to agree.
-// ─────────────────────────────────────────────────────────────────────────
+// The data parser (GitHub Action): reads the game and every plugin, then writes ships, outfits, map and missions to Supabase.
 
 const https           = require('https');
 const http            = require('http');
@@ -78,28 +20,21 @@ const AdmZip          = require('adm-zip');
 const tar             = require('tar');
 const { createClient } = require('@supabase/supabase-js');
 
-// ── Supabase: replaces the per-plugin JSON files as the parser's output ──
-// SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are set as GitHub Actions secrets.
-// The service-role key bypasses Row-Level Security by design — this script
-// is the only writer, everything else (the frontend) only ever reads with
-// the public anon key, which RLS restricts to select-only.
+// ── Supabase (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are GitHub secrets) ──
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-// internal_id -> database id, filled in as each plugin is written, used to
-// build the ship_outfits / variant_outfits junction rows in a second pass
-// once every plugin (and therefore every outfit) has been inserted.
+// internal_id → database id, for building junction rows
 const shipIdByInternalId    = new Map();
 const outfitIdByInternalId  = new Map();
 const variantIdByInternalId = new Map();
 
-// ---------------------------------------------------------------------------
-// Archive download + extraction helpers
-// ---------------------------------------------------------------------------
+// ── archive plugins (zip / tar) ──
 
 // Recognised archive extensions, in the order they should be tested
 // (longest/most-specific suffix first, e.g. ".tar.gz" before ".gz").
 const ARCHIVE_EXTENSIONS = ['.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar', '.zip'];
 
+// archive extension of a file name
 function detectArchiveExtension(urlOrName) {
   const lower = urlOrName.toLowerCase().split('?')[0];
   for (const ext of ARCHIVE_EXTENSIONS) {
@@ -108,10 +43,7 @@ function detectArchiveExtension(urlOrName) {
   return null;
 }
 
-/**
- * Download a URL to a local file, following redirects (raw.githubusercontent.com
- * and similar CDNs may 301/302 redirect). Caps followed redirects at 5.
- */
+// download a URL to a file (follows redirects)
 function downloadToFile(url, destPath, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https://') ? https : http;
@@ -140,14 +72,7 @@ function downloadToFile(url, destPath, redirectsLeft = 5) {
   });
 }
 
-/**
- * Extract a downloaded archive file to destDir, based on its extension.
- * Supports .zip (via adm-zip) and .tar / .tar.gz / .tgz / .tar.bz2 / .tbz2
- * (via the `tar` package — note: .tar.bz2 requires the OS `bzip2` to be on
- * PATH since the `tar` package itself only handles gzip natively; if bzip2
- * isn't available this will throw and the plugin will be skipped with a
- * clear error rather than silently producing an empty plugin).
- */
+// unpack an archive by its extension
 async function extractArchive(archivePath, destDir, ext) {
   await fs.mkdir(destDir, { recursive: true });
 
@@ -177,9 +102,7 @@ async function extractArchive(archivePath, destDir, ext) {
   throw new Error(`Unsupported archive extension: ${ext}`);
 }
 
-// ---------------------------------------------------------------------------
-// Compute a deterministic structural hash of a ship's data for duplicate detection.
-// ---------------------------------------------------------------------------
+// stable hash for a ship (detects changes)
 function hashShip(ship) {
   const relevant = {
     sprite:          ship.sprite          ?? null,
@@ -202,20 +125,7 @@ function hashShip(ship) {
     .slice(0, 12);
 }
 
-// ---------------------------------------------------------------------------
-// Convert the internal outfitMap { name: { count, pluginId } | count }
-// into the array format expected by shipBuilder.js:
-//   { "Blaster": { count: 2, pluginId: "Endless Sky/Endless Sky", internalId: "Endless Sky/Endless Sky::Blaster" }, ... }
-//
-// NEW (internal-ID pass): `internalId` is the same `pluginId::name`
-// compound key EndlessSkyParser._registerOutfit() stamps on the outfit's
-// own `_internalId` field, precomputed here so frontend lookup code (e.g.
-// shipBuilder.js sbFindOutfit, battleSim.js _lookupOutfit) can key straight
-// off `internalId` without reconstructing the string itself in five
-// different places. `internalId` is null when `pluginId` is null (e.g. an
-// outfit whose owning plugin couldn't be resolved) — callers should fall
-// back to name-only lookup in that case, same as before this pass.
-// ---------------------------------------------------------------------------
+// outfit map → the stored format
 function outfitMapToOutputFormat(outfitMap) {
   if (!outfitMap || typeof outfitMap !== 'object') return {};
   const result = {};
@@ -230,64 +140,16 @@ function outfitMapToOutputFormat(outfitMap) {
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// normaliseWeaponBlock
-//
-// Rewrites the weapon block so submunitions and ammo are stored as canonical
-// arrays regardless of which data-file syntax was used.
-//
-// OUTPUT FORMATS
-// ──────────────
-// weapon.submunitions: Array<{ type: string, count: number }>
-// weapon.ammunition:   Array<{ type: string, count: number }>
-//
-// INPUT FORMS HANDLED
-// ───────────────────
-// Submunitions:
-//   (a) submunition "OutfitName"           → count 1
-//   (b) submunition "OutfitName" 3         → count 3
-//   (c) "submunition" "OutfitName" 1       → count 1 (parseKeyValue strips the quotes off key)
-//   (d) submunition "OutfitName" (array)   → one entry per element
-//   (e) "submunition OutfitName" prefixed keys (with offset arrays or numeric counts)
-//   (f) loose numeric outfit-name keys where the outfit has a weapon block
-//
-// Ammo:
-//   (a) ammo "OutfitName"                  → count 1
-//   (b) ammo "OutfitName" 3               → count 3
-//   (c) loose numeric outfit-name keys where the outfit is Ammunition category
-// ---------------------------------------------------------------------------
+// ── weapon blocks: one normalised shape ──
 
-/**
- * Parse a raw string value that may be:
- *   "OutfitName"          → { name: "OutfitName", count: 1 }
- *   "OutfitName" 3        → { name: "OutfitName", count: 3 }
- *   OutfitName            → { name: "OutfitName", count: 1 }
- *   OutfitName 2          → { name: "OutfitName", count: 2 }
- */
-/**
- * FIXED (bare-government pass). Every `government "X"` / `` government `X` ``
- * matcher in this file previously required quotes around the government
- * name. That's correct for multi-word governments (`government "Gegno Vi"`
- * — the quotes are only there because of the space) but WRONG for the very
- * common single-word case, e.g. `government Gegno`, `government Republic`,
- * `government Hai` — all valid, unquoted Endless Sky syntax. Those lines
- * silently failed to match, leaving `government` as `null` for every fleet/
- * npc/planet/event/person that used a bare government name — which, for
- * plugins that mostly use single-word government names, meant most or all
- * of their fleets/ships never got a government at all, no warning given.
- *
- * `matchGovernmentLine(stripped)` is the single shared matcher now used by
- * every call site in this file (fleet/npc/planet/event/person), mirroring
- * the same bare-or-quoted acceptance already used for `give ship`/`give
- * outfit`/person `ship` lines. Returns the government name, or null if the
- * line isn't a government line at all.
- */
+// "Name" / "Name" 3 / Name 3 → { name, count }
 function matchGovernmentLine(stripped) {
   const m = stripped.match(/^government\s+(?:"([^"]+)"|`([^`]+)`|(\S+))\s*$/);
   if (!m) return null;
   return m[1] ?? m[2] ?? m[3] ?? null;
 }
 
+// "Name" N → { name, count }
 function parseNameCount(raw) {
     if (typeof raw !== 'string') return null;
     raw = raw.trim();
@@ -305,6 +167,7 @@ function parseNameCount(raw) {
     return { name: raw, count: 1 };
 }
 
+// tidy a weapon block
 function normaliseWeaponBlock(weapon, outfitsByName) {
     if (!weapon || typeof weapon !== 'object') return weapon;
 
@@ -321,7 +184,7 @@ function normaliseWeaponBlock(weapon, outfitsByName) {
         keysToDelete.push('ammo');
     }
 
-    // ── 2. weapon.submunition = string | object | array ───────────────────────
+    // 2. weapon.submunition (string, object or list)
     if (weapon.submunition != null) {
         const raw     = weapon.submunition;
         const entries = Array.isArray(raw) ? raw : [raw];
@@ -340,7 +203,7 @@ function normaliseWeaponBlock(weapon, outfitsByName) {
         keysToDelete.push('submunition');
     }
 
-    // ── 3. "submunition OutfitName" prefixed keys ─────────────────────────────
+    // 3. "submunition Name" keys
     for (const key of Object.keys(weapon)) {
         if (!key.startsWith('submunition ')) continue;
         const subName = key.slice('submunition '.length).trim();
@@ -354,7 +217,7 @@ function normaliseWeaponBlock(weapon, outfitsByName) {
         keysToDelete.push(key);
     }
 
-    // ── 4. Loose numeric keys — best-effort ammo / submunition detection ───────
+    // 4. loose keys — best-effort ammo / submunition detection
     for (const key of Object.keys(weapon)) {
         if (keysToDelete.includes(key)) continue;
         if (key === 'ammo' || key === 'submunition') continue;
@@ -390,7 +253,7 @@ function normaliseWeaponBlock(weapon, outfitsByName) {
         }
     }
 
-    // ── Apply deletions and write normalised arrays ────────────────────────────
+    // write the normalised lists
     for (const k of keysToDelete) delete weapon[k];
 
     if (submunitions.length > 0) weapon.submunitions = submunitions;
@@ -420,14 +283,7 @@ class EndlessSkyParser {
     this._currentRepoShipsBefore = 0;
     this._currentRepoShipsAfter  = 0;
 
-    // Named fleet references found inside `npc` blocks (missions AND
-    // events) — e.g. `fleet "Marauder Raid"`. These can't be resolved to
-    // an actual ship list at the point they're encountered, because the
-    // fleet's own `fleet "Marauder Raid" ... ` definition may live in a
-    // file parsed before OR after this reference (parse order across
-    // files/plugins is not guaranteed to match dependency order). Instead
-    // they're queued here and resolved in one pass, after every file in
-    // every plugin has been parsed, by resolveAllNpcFleetRefs().
+    // fleets named inside npc blocks (missions and events)
     this._pendingNpcFleetRefs = [];
 
     // Populated by resolveEventGovernmentImpact() — the joined
@@ -470,17 +326,7 @@ class EndlessSkyParser {
     return internalId;
   }
 
-  /**
-   * NEW (internal-ID pass). Outfits previously only got `_pluginId` stamped
-   * on them — no equivalent to the `_internalId` (`pluginId::name`) that
-   * `_registerShip` already stamps on every ship. That gap is exactly what
-   * let frontend code (shipBuilder.js, battleSim.js, etc.) fall back to
-   * ambiguous name-only outfit lookups even in places where the owning
-   * plugin was already known — the same class of collision this session's
-   * earlier fixes addressed on the parser side. Stamping `_internalId`
-   * here means every outfit is uniquely addressable by the same
-   * `pluginId::name` convention ships already use, with zero guessing.
-   */
+  // give every outfit its internal id and plugin
   _registerOutfit(outfit, pluginId) {
     outfit._internalId = `${pluginId}::${outfit.name}`;
     outfit._pluginId = pluginId;
@@ -516,16 +362,7 @@ class EndlessSkyParser {
     const hashes = new Set(candidates.map(s => s._hash));
     if (hashes.size === 1) return { baseShip: candidates[0], error: null };
 
-    // FIXED: `this._overrides` is keyed by the bare SOURCE name (plugins.json
-    // entry's `name` field — see setOverrides()), e.g. "Lemurias Extra ES
-    // Stuff". `variantPluginId` here is the full COMPOUND pluginId, e.g.
-    // "Lemurias Extra ES Stuff/Lemurias-Extra-ES-Stuff" (sourceName +
-    // "/" + plugin-folder-name — see the `pluginId = \`${sourceName}/...\``
-    // construction in parseRepository/parseArchiveSource). Looking the
-    // compound string up directly against a bare-source-name-keyed map
-    // NEVER matched, for any plugin, ever — the "overrides" feature this
-    // warning tells you to use was silently non-functional. Derive the
-    // bare source name (everything before the first "/") before looking up.
+    // overrides are keyed by the source name
     const variantSourceName = variantPluginId ? variantPluginId.split('/')[0] : null;
     const variantOverrides = this._overrides.get(variantSourceName);
     if (variantOverrides?.size) {
@@ -543,9 +380,7 @@ class EndlessSkyParser {
     });
     const winner = ranked[0];
     const losers = ranked.slice(1).map(s => s._pluginId).join(', ');
-    // Same base ship + same competing plugins → say it once (a plugin that
-    // redefines every base ship, like "1requiredcrew", used to print
-    // thousands of identical lines). The full count is in the summary.
+    // same ship + same plugins → mention once
     this._collisionSeen = this._collisionSeen || new Map();
     const ckey = `${baseName}|${losers}`;
     this._collisionSeen.set(ckey, (this._collisionSeen.get(ckey) || 0) + 1);
@@ -626,15 +461,7 @@ class EndlessSkyParser {
         const hasImages = allPaths.includes(imagesPath);
         plugins.push({ name: pluginName, pluginRootInRepo, hasImages });
       }
-      // Some plugins bundle a full nested copy of another plugin's data
-      // inside their own data/ folder (e.g. so they work standalone without
-      // requiring a separate install) — literally another "data/" +
-      // ".txt files" pair, one level deeper. The scan above finds every
-      // folder named "data" regardless of depth, so it correctly-but-
-      // wrongly also detects that nested copy as its own separate plugin.
-      // The outer plugin's own data/ scan already includes everything in
-      // its subfolders, so keep only the outermost match in any nested
-      // chain — the deeper ones would otherwise get parsed twice.
+      // some plugins bundle a copy of another plugin's data — skip the copy
       plugins.sort((a, b) => a.pluginRootInRepo.split('/').length - b.pluginRootInRepo.split('/').length);
       const kept = [];
       for (const p of plugins) {
@@ -664,10 +491,7 @@ class EndlessSkyParser {
         if (e.name.startsWith('.') || e.name === 'node_modules') continue;
         const fullPath = path.join(dir, e.name);
         if (e.name === 'data') {
-          // .txt files anywhere below data/ count — the same rule the
-          // ls-tree probe uses. Checking only data/'s top level made plugins
-          // that keep everything in data/<subfolder>/ "disappear" after
-          // cloning ("Could not locate plugin … in clone").
+          // .txt anywhere under data/ counts
           const hasTxtDeep = async d => {
             let es; try { es = await fs.readdir(d, { withFileTypes: true }); } catch { return false; }
             for (const x of es) {
@@ -693,21 +517,7 @@ class EndlessSkyParser {
     return plugins;
   }
 
-  /**
-   * Recursively copies every image file under sourceDir into destDir,
-   * preserving the folder structure exactly (images/ship/..., images/
-   * planet/..., images/star/..., images/land/..., images/map/..., etc.)
-   *
-   * Replaces the old sprite-by-sprite matching approach (previously
-   * copyMatchingImages + a hand-maintained list of "which fields on
-   * which parsed objects might reference a sprite"). That approach
-   * necessarily missed anything not explicitly enumerated — UI chrome,
-   * unreferenced-but-real art, and every new asset category the parser
-   * hadn't been taught about yet (this is literally how star/planet/
-   * landscape art got missed the first time around). Copying the whole
-   * folder means any future asset type just works, with no parser
-   * change needed the next time something new shows up in images/.
-   */
+  // copy every image into the output
   async copyAllImages(sourceDir, destDir) {
     const validExts = new Set(['.png', '.jpg', '.jpeg', '.gif', '.avif', '.webp']);
     let fileCount = 0;
@@ -742,17 +552,7 @@ class EndlessSkyParser {
     console.log(`  ✓ Copied ${fileCount} image files`);
   }
 
-  /**
-   * Shared per-plugin-folder processing, used by both the git sparse-clone
-   * path (parseRepository) and the archive path (parseArchiveSource).
-   * `clonedPlugin` is one entry as returned by detectPlugins():
-   *   { name, dataDir, imagesDir, pluginRootInRepo }
-   * `pluginRoot` is the absolute path to the plugin's root folder (parent of
-   * its data/ and images/ folders) — used to look for plugin.txt.
-   * Returns a "meta" object matching the shape used by parseRepository's
-   * pluginMeta array, minus the fields the caller fills in itself
-   * (cloneDir for later cleanup is left to the caller).
-   */
+  // parse one plugin folder (git or archive)
   async _parsePluginFolder(clonedPlugin, pluginId, pluginRoot) {
     const pluginData = await this.readPluginTxt(pluginRoot);
     if (pluginData?.name) {
@@ -787,13 +587,7 @@ class EndlessSkyParser {
     };
   }
 
-  /**
-   * Given a list of pluginMeta entries (as produced by _parsePluginFolder)
-   * that all belong to the same source, process pending variants, copy
-   * images, and build the final `results` array in the same shape
-   * parseRepository() returns — so callers (main()) don't need to branch
-   * on whether a source came from git or an archive.
-   */
+  // finish a batch of plugin folders
   async _finalisePluginBatch(pluginMeta, repoPendingBefore, sourceIdentifier) {
     this._currentPluginId = null;
 
@@ -818,16 +612,7 @@ class EndlessSkyParser {
         pluginShipNames.has(v.baseShip) || (v._variantPluginId === meta.pluginId)
       );
 
-      // A plugin with map or mission content but zero ships/outfits (a
-      // pure system-expansion or mission-pack plugin — a real, common
-      // category) was previously being dropped here entirely: `isEmpty`
-      // only checked ships/variants/outfits/effects, so `continue` below
-      // skipped it before it ever reached the later step that writes
-      // dataFiles/*.json or copies images. Both parsers have already
-      // recorded which plugin touched what by this point (mapParser's
-      // `_definedBy` and missionParser's `_pluginId` are set synchronously
-      // during parsing, not deferred to the later cross-plugin resolvers),
-      // so it's safe to check here.
+      // map- or mission-only plugins still count
       const metaMapSlice = this.mapParser.toPluginSlice(meta.pluginId);
       const metaMissionSlice = this.missionParser2.toPluginSlice(meta.pluginId);
       const hasMapOrMissionContent =
@@ -885,10 +670,7 @@ class EndlessSkyParser {
     const repoGitUrl = `https://github.com/${owner}/${repo}.git`;
     console.log(`\nScanning: ${owner}/${repo} @ ${branch}`);
 
-    // One blob-less clone per repository: used to list its plugins, then
-    // sparse-checked-out with every plugin's data/ and images/ at once.
-    // (Previously each plugin re-cloned the whole repository — 47 clones
-    // for a 47-plugin list.)
+    // one shallow clone per repository, then a sparse checkout per plugin
     const repoCloneDir = path.join(process.cwd(), `.tmp-repo-${repo}-${Date.now()}`);
     let probePlugins;
     try {
@@ -964,14 +746,7 @@ class EndlessSkyParser {
     }
   }
 
-  /**
-   * Archive-source counterpart to parseRepository(). `archiveUrl` should
-   * point at a downloadable .zip / .tar / .tar.gz / .tgz / .tar.bz2 file
-   * (typically something committed under rawData/ in the repo and served
-   * via raw.githubusercontent.com). The archive may contain MULTIPLE
-   * plugins (any number of data/ folders anywhere inside it) — every one
-   * found is parsed and returned, same as a multi-plugin git repository.
-   */
+  // parse an archive source (the archive version of parseRepository)
   async parseArchiveSource(archiveUrl, sourceName = null) {
     const ext = detectArchiveExtension(archiveUrl);
     if (!ext) {
@@ -1096,40 +871,7 @@ class EndlessSkyParser {
     }
   }
 
-  /**
-   * NEW (person-block pass).
-   *
-   * Parses a `person "X"` block (persons.txt-style unique/named ships).
-   * Real-world shape:
-   *
-   *   person "Cap'n Pester"
-   *       government "Parrot"
-   *       system "Sol"                (optional — restricts where it spawns)
-   *       frequency 300
-   *       personality
-   *           surveillance
-   *       ship "Wardragon" "Wardragon"
-   *           sprite "ship/wardragon"
-   *           "never disabled"
-   *
-   * A person block may list more than one `ship` line (a small named
-   * fleet of unique ships sharing one government), and a `ship` line's
-   * model name may be bare OR quoted, with an optional bare-or-quoted
-   * custom name after it — same accepted forms as `give ship` (see the
-   * fix in parseMissionBlock). A `ship` line may also be followed by an
-   * indented sub-block that fully overrides that ship's stats/sprite —
-   * we don't need any of that for government/location linking, so it's
-   * skipped wholesale via skipIndentedBlock; only the base model name is
-   * kept.
-   *
-   * Unlike a fleet or an npc block, a person's `government` line is
-   * authoritative on its own — there's no shipyard/planet chain to walk.
-   * Every ship name found is fed to speciesResolver.collectNpcRef() (the
-   * exact same collector used for npc-block ships), so
-   * _governmentsForShip() resolves it with no new lookup logic, plus
-   * speciesResolver.collectPerson()/locationResolver.collectPerson() for
-   * dedicated traceability and a "Persons" location category.
-   */
+  // person "X" blocks (named ships that fly around)
   parsePersonBlock(lines, i) {
     const headerLine = lines[i].trim();
     const nameMatch = headerLine.match(/^person\s+"([^"]+)"/) ||
@@ -1155,19 +897,14 @@ class EndlessSkyParser {
                           stripped.match(/^system\s+(\S+)\s*$/);
         if (sysMatch) { systemNames.push(sysMatch[1]); i++; continue; }
 
-        // `ship "Model" ["Custom Name"]` — model and custom name may each
-        // be bare or quoted/backticked, matching the bare-name fix already
-        // applied to `give ship` in parseMissionBlock.
+        // `ship "Model" ["Custom Name"]`
         const shipMatch = stripped.match(
           /^ship\s+(?:"([^"]+)"|`([^`]+)`|(\S+))(?:\s+(?:"([^"]*)"|`([^`]*)`|(\S+)))?\s*$/
         );
         if (shipMatch) {
           const model = shipMatch[1] ?? shipMatch[2] ?? shipMatch[3] ?? null;
           if (model) shipNames.push(model);
-          // A `ship` line commonly introduces an indented sub-block that
-          // overrides sprite/attributes/outfits for this specific unique
-          // ship. We only need the base model name here, so skip the
-          // whole sub-block rather than trying to parse it.
+          // a ship line may have its own sub-block
           if (i + 1 < lines.length) {
             const nextIndent = lines[i + 1].length - lines[i + 1].replace(/^\t+/, '').length;
             if (nextIndent > indent) {
@@ -1194,24 +931,7 @@ class EndlessSkyParser {
     return i;
   }
 
-  /**
-   * FIXED/EXTENDED:
-   *   - Previously used hardcoded absolute indents (`indent === 1` for
-   *     government, `indent === 2 || indent === 3` for ship names), which
-   *     only happened to be correct when a fleet is defined at the TOP
-   *     LEVEL (fleet header at indent 0). A fleet reopened from inside an
-   *     event (header at indent 1) shifted every child line's indent by
-   *     one, silently breaking both checks. Now computed relative to the
-   *     fleet header's own indent, so it works the same regardless of
-   *     nesting depth.
-   *   - Previously had NO understanding of `variant [<weight>]` /
-   *     `add variant [<weight>]` sub-blocks at all — the standard way a
-   *     fleet groups one or more ship names into a weighted loadout
-   *     option. Ship names inside them were only ever picked up by
-   *     accidental overlap with the flat "quoted name directly under the
-   *     fleet" pattern, which is real syntax on its own but a DIFFERENT
-   *     one. Now explicitly parsed.
-   */
+  // fleet blocks (relative indents, variants, governments)
   parseFleetBlock(lines, i) {
     const headerLine = lines[i].trim();
     const nameMatch = headerLine.match(/^fleet\s+"([^"]+)"/) ||
@@ -1231,11 +951,7 @@ class EndlessSkyParser {
         const govName = matchGovernmentLine(stripped);
         if (govName !== null) { government = govName; i++; continue; }
 
-        // NEW: `variant [<weight>]` / `add variant [<weight>]` — a group
-        // of one or more quoted ship names representing one weighted
-        // loadout option. `add` is the merge-patch form used when
-        // reopening an existing fleet (e.g. from inside an event) to add
-        // more options without clearing the ones already there.
+        // `variant [weight]` / `add variant [weight]`
         const variantMatch = stripped.match(/^(?:add\s+)?variant(?:\s+(\d+))?\s*$/);
         if (variantMatch) {
           const variantIndent = indent;
@@ -1253,9 +969,7 @@ class EndlessSkyParser {
         }
       }
 
-      // Flat form: `"ShipName" [weight]` directly under the fleet, with no
-      // `variant` wrapper — a real, simpler alternative syntax, still
-      // supported here (this was the ONLY form the old code understood).
+      // flat form: "Ship" [weight] under the fleet
       if (indent === fleetIndent + 1 || indent === fleetIndent + 2) {
         const shipMatch = stripped.match(/^"([^"]+)"(?:\s+\d+)?$/) ||
                           stripped.match(/^`([^`]+)`(?:\s+\d+)?$/);
@@ -1283,10 +997,7 @@ class EndlessSkyParser {
         i = this._parseMissionNpcBlock(lines, i, missionName); continue;
       }
 
-      // ── give/outfit — FIXED: previously required a quote immediately
-      //    after "give outfit "/"outfit ", so a bare (unquoted) outfit
-      //    name — just as common as bare ship model names — was silently
-      //    ignored. Now accepts quoted OR bare names.
+      // give outfit (quotes optional)
       if (missionName) {
         const om =
           stripped.match(/^give\s+outfit\s+(?:"([^"]+)"|`([^`]+)`|(\S+))(?:\s+(-?\d+))?\s*$/) ||
@@ -1303,20 +1014,14 @@ class EndlessSkyParser {
         }
       }
 
-      // ── give/ship — FIXED: this is the bug that dropped
-      //    `give ship Peregrine "Shadow Flight"` entirely, since
-      //    "Peregrine" is a bare model name with only the custom name
-      //    quoted. Now accepts a bare OR quoted model name, with an
-      //    optional bare-or-quoted custom name after it.
+      // give ship (quotes optional)
       if (missionName) {
         const sm =
           stripped.match(/^give\s+ship\s+(?:"([^"]+)"|`([^`]+)`|(\S+))(?:\s+(?:"([^"]*)"|`([^`]*)`|(\S+)))?\s*$/) ||
           stripped.match(/^ship\s+(?:"([^"]+)"|`([^`]+)`|(\S+))(?:\s+(?:"([^"]*)"|`([^`]*)`|(\S+)))?\s*$/);
         if (sm) {
           const shipModel = sm[1] ?? sm[2] ?? sm[3] ?? null;
-          // sm[4..6] would be the custom name — captured for completeness
-          // even though LocationResolver.collectMissionGiveShip doesn't
-          // currently store it separately from the mission name.
+          // custom name (kept even though unused)
           if (shipModel) {
             this.locationResolver.collectMissionGiveShip(missionName, shipModel, this._currentPluginId);
           }
@@ -1324,10 +1029,7 @@ class EndlessSkyParser {
         }
       }
 
-      // ── NEW: `event "X"` action line — records that this mission can
-      //    trigger event X (from any action trigger: on offer/accept/
-      //    complete/etc — we don't currently distinguish which trigger,
-      //    only that the mission and the event are linked).
+      // `event "X"` — this mission can trigger an event
       if (missionName) {
         const evM = stripped.match(/^event\s+"([^"]+)"(?:\s+-?\d+(?:\s+-?\d+)?)?\s*$/) ||
                     stripped.match(/^event\s+`([^`]+)`(?:\s+-?\d+(?:\s+-?\d+)?)?\s*$/);
@@ -1342,29 +1044,7 @@ class EndlessSkyParser {
     return i;
   }
 
-  /**
-   * Parse an `npc` block found inside a MISSION.
-   * `eventName`, if provided, records this npc block's fleet references as
-   * belonging to that event's context (used when this same parsing routine
-   * is reused for npc blocks inside EVENTS instead — see parseNpcBlock).
-   *
-   * FIXED (person-block pass): the anonymous inline `fleet` sub-block (as
-   * opposed to a named `fleet "X"` reference) is now scanned for its OWN
-   * `government` line before falling back to the npc's own government.
-   * This is real, distinct syntax — e.g.:
-   *
-   *   npc kill
-   *       government "Korath"
-   *       fleet
-   *           names "korath"
-   *           cargo 3
-   *           variant
-   *               "Korath Hunter" 5
-   *
-   * Previously any `government` line inside that nested `fleet` sub-block
-   * was silently ignored in favor of the npc-level one, which is only
-   * correct when the two happen to agree.
-   */
+  // npc block inside a mission
   _parseMissionNpcBlock(lines, i, missionName) {
     let government = null;
     const shipNames = [];
@@ -1389,13 +1069,7 @@ class EndlessSkyParser {
         if (shipTwoArg) { shipNames.push(shipTwoArg[1]); i++; continue; }
         if (shipOneArg) { shipNames.push(shipOneArg[1]); i++; continue; }
         if (stripped === 'fleet' || stripped.startsWith('fleet ')) {
-          // ── NEW: named fleet reference, e.g. `fleet "Marauder Raid"` —
-          //    the common way an npc spawns an existing fleet's ships. The
-          //    OLD code here only ever looked for indented child lines
-          //    (the rare inline-anonymous-list form), so this common named
-          //    form silently expanded to zero ships. Queue it for
-          //    resolveAllNpcFleetRefs() to resolve once all fleets across
-          //    all plugins/files have been parsed.
+          // named fleet, e.g. `fleet "Marauder Raid"`
           const namedMatch = stripped.match(/^fleet\s+"([^"]+)"\s*$/) || stripped.match(/^fleet\s+`([^`]+)`\s*$/);
           if (namedMatch) {
             this._pendingNpcFleetRefs.push({
@@ -1407,10 +1081,7 @@ class EndlessSkyParser {
             });
             i++; continue;
           }
-          // Anonymous inline fleet — collect any indented quoted ship-name
-          // children directly, AND (NEW) look for a `government` line local
-          // to this fleet sub-block, which takes precedence over the
-          // npc-level government for the ships gathered here.
+          // inline fleet: the ship names under it
           const fleetIndent = indent;
           let inlineGovernment = null;
           const inlineShipNames = [];
@@ -1434,9 +1105,7 @@ class EndlessSkyParser {
             }
             i++;
           }
-          // Ships gathered from THIS inline fleet use its own government
-          // if it declared one; otherwise they fall back to whatever
-          // government (if any) is already set at the npc level.
+          // inline fleet ships use its own government
           const effectiveGovernment = inlineGovernment ?? government;
           for (const shipName of inlineShipNames) {
             this.speciesResolver.collectNpcRef(effectiveGovernment, shipName, this._currentPluginId);
@@ -1454,13 +1123,7 @@ class EndlessSkyParser {
     return i;
   }
 
-  /**
-   * Parse an `npc` block found inside an EVENT (as opposed to a mission —
-   * see _parseMissionNpcBlock). `eventName`, when known, is threaded
-   * through so a named fleet reference here is traceable back to the
-   * event that spawns it, the same way _parseMissionNpcBlock traces back
-   * to a mission name.
-   */
+  // npc block inside an event
   parseNpcBlock(lines, i, eventName = null) {
     let government = null;
     const shipNames = [];
@@ -1496,10 +1159,7 @@ class EndlessSkyParser {
             });
             i++; continue;
           }
-          // Anonymous inline fleet — same local-government fix as
-          // _parseMissionNpcBlock above: ships found inside this specific
-          // inline fleet sub-block use ITS OWN government line if it has
-          // one, falling back to the npc-level government otherwise.
+          // inline fleet (same as missions)
           const fleetIndent = indent;
           let inlineGovernment = null;
           const inlineShipNames = [];
@@ -1570,15 +1230,7 @@ class EndlessSkyParser {
     return [outfitMap, i];
   }
 
-  /**
-   * FIXED: previously broke out of the loop only on `indent === 0`,
-   * which is correct for a top-level `shipyard "X"` block but wrong when
-   * this same block is reopened from inside an `event "X"` (header at
-   * indent 1) — in that case this would keep consuming lines past the
-   * shipyard's actual end, misreading anything else quoted at indent ≥ 1
-   * before the next TRUE top-level line as one of this shipyard's ships.
-   * Now relative to the shipyard header's own indent.
-   */
+  // shipyard block
   parseShipyardBlock(lines, i) {
     const headerMatch =
       lines[i].trim().match(/^shipyard\s+"([^"]+)"/) ||
@@ -1602,10 +1254,7 @@ class EndlessSkyParser {
     return i;
   }
 
-  /**
-   * FIXED: same relative-indent issue as parseShipyardBlock above, for
-   * the same reason (an `outfitter "X"` reopened inside an event).
-   */
+  // outfitter block
   parseOutfitterBlock(lines, i) {
     const headerMatch =
       lines[i].trim().match(/^outfitter\s+"([^"]+)"/) ||
@@ -1629,14 +1278,7 @@ class EndlessSkyParser {
     return i;
   }
 
-  /**
-   * `eventName`, when provided (i.e. this planet block was found inside an
-   * `event "X"` block), tags every add/remove change with the event that
-   * caused it, so it's traceable — separately from the unconditional base
-   * `add shipyard` behavior (kept exactly as before: still always merges
-   * into the base "this planet sells here" data, since that's how the
-   * ORIGINAL code already treated it).
-   */
+  // planet block (eventName = changed by that event)
   parsePlanetBlock(lines, i, eventName = null) {
     const headerMatch =
       lines[i].trim().match(/^(?:"planet"|planet)\s+"([^"]+)"/) ||
@@ -1739,22 +1381,7 @@ class EndlessSkyParser {
     return i;
   }
 
-  /**
-   * EXPANDED: previously only recognized fleet/planet/shipyard/outfitter/npc
-   * lines directly inside an event. Now also:
-   *   - extracts the event's own name (needed to tag every change it makes)
-   *   - understands a `system "X"` sub-block's `add fleet` / `remove fleet`
-   *     lines — this is how an event changes what spawns in a region
-   *   - understands a `government "X"` sub-block's `"attitude toward"`
-   *     changes — how an event shifts relations between governments
-   *   - threads the event's name through to parsePlanetBlock/parseNpcBlock
-   *     so every change is traceable back to the event that caused it
-   */
-  /**
-   * Keeps the verbatim text of every named `event "X"` block so the site
-   * can replay a save file's `changes` (which mostly store just
-   * `event "X"`) the same way the game does. Stored in `game_events`.
-   */
+  // capture an event's raw changes (for the map timeline)
   _captureRawEvent(lines, i) {
     const header = lines[i].trim();
     const m = header.match(/^event\s+"([^"]+)"/) || header.match(/^event\s+`([^`]+)`/) || header.match(/^event\s+(\S+)/);
@@ -1832,9 +1459,7 @@ class EndlessSkyParser {
               inAttitude = true; i++; continue;
             }
             if (inAttitude && gi > govIndent + 1) {
-              // FIXED: previously required quotes around the target
-              // government name too — same bare-name bug as everywhere
-              // else. Now accepts bare or quoted.
+              // target government without quotes too
               const atM = gs.match(/^(?:"([^"]+)"|`([^`]+)`|(\S+))\s+(-?[\d.]+)/);
               if (atM) {
                 const targetGov = atM[1] ?? atM[2] ?? atM[3];
@@ -1896,10 +1521,7 @@ class EndlessSkyParser {
           const nextIndent = lines[i + 1].length - lines[i + 1].replace(/^\t+/, '').length;
           if (nextIndent > currentIndent) {
             const key = stripped.replace(/["`]/g, '');
-            // Weapon blocks (on outfits AND on ships, e.g. self-destruct/
-            // collision damage) commonly carry multi-number attributes.
-            // Turn on the same non-hardcoded, numeric-aware parsing used
-            // for hardpoints for this key and everything nested inside it.
+            // weapon blocks (outfits and ships)
             const nestedOptions = (key === 'weapon') ? { ...options, numericAware: true } : options;
             const [nd, ni] = this.parseBlock(lines, i + 1, nestedOptions);
             if (key in data) {
@@ -2056,50 +1678,7 @@ class EndlessSkyParser {
     return [{}, i + 1];
   }
 
-  /**
-   * Consume an indented sub-block that follows a hardpoint line (engine,
-   * reverse/steering engine, gun, turret, bay) and merge every key/value
-   * pair it contains into `data`.
-   *
-   * Handles both forms found in the data files:
-   *   - bare boolean flags, e.g. `under`, `over`, `parallel`
-   *   - "key value" pairs, e.g. `zoom 1.3`, `angle 90`, `"launch effect" "human internal"`
-   *
-   * A repeated key becomes an array (matching the convention used by
-   * parseBlock elsewhere), so nothing is silently overwritten.
-   *
-   * Without this, sub-block lines like `zoom 1` or `under` were left
-   * dangling for the caller's generic line-by-line parser to pick up,
-   * which caused them to be mis-attributed as top-level ship/variant
-   * attributes (e.g. a stray `zoom` or `under` key on the ship itself)
-   * instead of being attached to the specific hardpoint they belong to.
-   */
-  /**
-   * Parse a single attribute line into a [key, values] pair, where
-   * `values` is always an array — one entry per number/word found on the
-   * line — so the caller can tell "one line with several numbers" apart
-   * from "a single value" without losing anything.
-   *
-   * Unlike parseKeyValue (built for simple single-value "key value"
-   * lines), attributes on weapons, turrets, guns, engines, and bays
-   * frequently carry MULTIPLE numeric values on a single line — most
-   * notably `arc <minAngle> <maxAngle>`, e.g. `arc -90 50`. Routing
-   * these through parseKeyValue silently drops everything after the
-   * first number (parseFloat stops at the first space), so `arc -90 50`
-   * was becoming `arc: -90` with the 50 lost entirely. This parser keeps
-   * every numeric token, however many there are, with no attribute name
-   * hardcoded anywhere — it works the same way for any key.
-   *
-   * Handles:
-   *   - bare flags:        under / over / parallel / left / right → [true]
-   *   - single numeric:    zoom 1.3 / angle -50                  → [1.3]
-   *   - multi numeric:     arc -90 50                            → [-90, 50]
-   *     (any count of numbers is supported, not just two or three)
-   *   - quoted string:     "launch effect" "human internal"      → ["human internal"]
-   *   - quoted + trailing extra (e.g. a count) → just the quoted value,
-   *     matching this parser's existing behavior elsewhere of not
-   *     tracking that trailing count.
-   */
+  // hardpoint sub-block (angle, arc, zoom …)
   parseNumericAwareLine(stripped) {
     let key, rest;
     const qk = stripped.match(/^"([^"]+)"\s*(.*)$/) ||
@@ -2134,35 +1713,7 @@ class EndlessSkyParser {
     return [key, [rest]];
   }
 
-  /**
-   * Merge a parsed attribute occurrence into an attributes object using a
-   * generic, NON-HARDCODED naming convention that distinguishes two
-   * different situations:
-   *
-   *   1. MULTIPLE NUMBERS ON ONE LINE (e.g. `arc -90 50`) become a nested
-   *      object, keyed the same as the attribute, with one numbered
-   *      sub-field per value:
-   *          "arc": { "arc_1": -90, "arc_2": 50 }
-   *      This keeps every value individually named — "even if there are
-   *      three numbers in a row" (e.g. `velocity 12 5 3`) each one gets
-   *      its own suitably-named field: velocity_1, velocity_2, velocity_3.
-   *
-   *   2. THE SAME KEY APPEARING AGAIN ON A LATER, SEPARATE LINE (e.g. two
-   *      independent `"hit force" ...` lines with different values)
-   *      becomes a flat SIBLING key instead of overwriting the first:
-   *      the first occurrence keeps the plain name, and every occurrence
-   *      after that gets a numbered suffix:
-   *          "hit force": 300, "hit force_2": 450
-   *
-   *   These two rules combine cleanly: if a REPEATED line also happens to
-   *   carry multiple numbers itself, that occurrence's nested sub-fields
-   *   are named off of ITS OWN (possibly suffixed) key, e.g. a second
-   *   `arc -10 10` line would produce
-   *          "arc_2": { "arc_2_1": -10, "arc_2_2": 10 }
-   *
-   * Nothing about specific attribute names (arc, zoom, angle, hit force...)
-   * is special-cased — this works identically for any key.
-   */
+  // merge a repeated attribute (add up or keep a list)
   mergeAttributeValue(data, key, values) {
     let outerKey = key;
     if (outerKey in data) {
@@ -2254,11 +1805,7 @@ class EndlessSkyParser {
     return null;
   }
 
-  /**
-   * Parse a single `leak` line.
-   * Syntax: leak "effectName" <openChance> <spreadChance>
-   * Returns { effect, openChance, spreadChance } or null if the line is not a leak.
-   */
+  // one leak line: leak "effect" open spread
   parseLeak(stripped) {
     const m =
       stripped.match(/^leak\s+"([^"]+)"\s+(\d+)\s+(\d+)$/) ||
@@ -2338,7 +1885,7 @@ class EndlessSkyParser {
         i = this.skipIndentedBlock(lines, i, indent); continue;
       }
 
-      // ── Hardpoints (engine / gun / turret / bay) ──────────────────────────
+      // hardpoints
       const hr = this.parseHardpoint(stripped, lines, i, indent);
       if (hr) {
         const [type, hdata, ni] = hr;
@@ -2347,9 +1894,7 @@ class EndlessSkyParser {
         i = ni; continue;
       }
 
-      // ── Leak lines ─────────────────────────────────────────────────────────
-      // Format: leak "effectName" <openChance> <spreadChance>
-      // Multiple leak lines are valid and must all be collected.
+      // leak lines
       const leak = this.parseLeak(stripped);
       if (leak) { shipData.leaks.push(leak); i++; continue; }
 
@@ -2468,9 +2013,7 @@ class EndlessSkyParser {
         i = ni; continue;
       }
 
-      // ── Leak lines in variants ─────────────────────────────────────────────
-      // A variant that specifies any leak lines replaces the base ship's leaks
-      // entirely (the game engine uses the same semantics — no merging).
+      // leak lines in variants
       const leak = this.parseLeak(stripped);
       if (leak) {
         if (!variantLeaksStarted) { v.leaks = []; variantLeaksStarted = true; }
@@ -2537,17 +2080,7 @@ class EndlessSkyParser {
     console.log(`  Variants: ${kept} kept, ${skippedNoChange} skipped, ${skippedDuplicate} duplicates removed`);
   }
 
-  /**
-   * Re-scans raw lines to correctly extract submunition and ammo entries
-   * from a weapon block, handling:
-   *   - "submunition" "Name"  (with optional indented offset sub-block)  → count 1 per line
-   *   - "submunition" "Name" N                                           → count N
-   *   - ammo "Name" N                                                    → count N
-   *   - ammo "Name"                                                      → count 1
-   *
-   * Returns { submunitions: [{type,count},...], ammunition: [{type,count},...] }
-   * to be merged into the weapon object after parseBlock runs.
-   */
+  // submunitions and ammo from the raw lines
   _parseWeaponLines(lines, outfitStartIdx, outfitEndIdx) {
       const submunitions = [];
       const ammunition   = [];
@@ -2578,8 +2111,7 @@ class EndlessSkyParser {
 
           const stripped = line.trim();
 
-          // ── submunition "Name" [N] ────────────────────────────────────────────
-          // Matches: submunition "Name", "submunition" "Name", submunition "Name" 3
+          // submunition "Name" [N]
           const subMatch =
               stripped.match(/^(?:"submunition"|submunition)\s+"([^"]+)"(?:\s+(\d+))?$/) ||
               stripped.match(/^(?:"submunition"|submunition)\s+`([^`]+)`(?:\s+(\d+))?$/);
@@ -2599,7 +2131,7 @@ class EndlessSkyParser {
               continue;
           }
 
-          // ── ammo "Name" [N] ───────────────────────────────────────────────────
+          // ammo "Name" [N]
           const ammoMatch =
               stripped.match(/^(?:"ammo"|ammo)\s+"([^"]+)"(?:\s+(\d+))?$/) ||
               stripped.match(/^(?:"ammo"|ammo)\s+`([^`]+)`(?:\s+(\d+))?$/);
@@ -2706,27 +2238,11 @@ class EndlessSkyParser {
     }
   }
 
-  /**
-   * NEW: resolves every named-fleet reference found inside an `npc` block
-   * (queued into `_pendingNpcFleetRefs` by _parseMissionNpcBlock/parseNpcBlock)
-   * to that fleet's actual government + ship list, then feeds those ships
-   * into the resolvers exactly as if they'd been listed inline.
-   *
-   * Must run AFTER every file in every plugin has been parsed (i.e. after
-   * all parseRepository/parseArchiveSource calls, alongside
-   * resolveAllOutfitPluginIds) — a referenced fleet's own `fleet "X" ...`
-   * definition can live in a file parsed before OR after the mission/event
-   * that references it, so this can't be resolved inline during the first
-   * pass.
-   */
+  // resolve every named fleet in npc blocks
   resolveAllNpcFleetRefs() {
     let resolved = 0, missing = 0;
     for (const ref of this._pendingNpcFleetRefs) {
-      // Prefer a fleet defined by the SAME plugin as the reference (a
-      // mission/event referencing a named fleet is almost always
-      // referencing one from its own plugin) — same priority rule as
-      // _resolveOutfitPluginId. Fall back to a cross-plugin search (e.g. a
-      // plugin's mission referencing a vanilla fleet by name) if that fails.
+      // prefer a fleet from the same plugin
       let match = this.speciesResolver.fleets.find(
         f => f.name === ref.fleetName && f.pluginId === ref.pluginId
       );
@@ -2755,40 +2271,7 @@ class EndlessSkyParser {
     console.log(`  NPC fleet-reference resolution: ${resolved} resolved, ${missing} missing`);
   }
 
-  /**
-   * NEW: the actual event → fleet → government join.
-   *
-   * Two things are true separately but were never stitched together:
-   *   - locationResolver.eventSystemFleetChanges records
-   *     "event E adds/removes fleet F in system S" (from a `system "X"` >
-   *     `add/remove fleet "F"` sub-block inside an event).
-   *   - speciesResolver.fleets records "fleet F belongs to government G"
-   *     (from that fleet's own top-level `fleet "F" ... government "G" ...`
-   *     definition — collectFleet() now also stores the fleet's NAME
-   *     specifically so this join is possible).
-   *
-   * This method walks every recorded event/fleet/system change, looks up
-   * that fleet's government, and produces one flat, directly-usable record
-   * per change — "event E gives government G a fleet in system S" — plus,
-   * where a mission is known to trigger that event
-   * (locationResolver.missionEventTriggers), which mission is responsible.
-   *
-   * Must run AFTER parseEventBlock/parseFleetBlock have processed every
-   * file in every plugin (i.e. after resolveAllNpcFleetRefs, in main()) —
-   * same ordering reason as that method: a fleet referenced by an event in
-   * one file may be DEFINED in a file parsed earlier or later, in any plugin.
-   *
-   * Output shape (also stored on this.eventGovernmentImpacts):
-   *   {
-   *     eventName, systemName, fleetName,
-   *     government: string | null,   // null if the fleet's own government couldn't be resolved
-   *     action: 'add' | 'remove',
-   *     rate: number | null,         // spawn rate, only meaningful for 'add'
-   *     pluginId,                    // the plugin that defined this event/system change
-   *     fleetPluginId: string | null,// the plugin that actually defines the fleet (may differ — cross-plugin fleet references are legal)
-   *     triggeringMissions: string[] // mission names known to trigger this event, via locationResolver.missionEventTriggers — [] if none found (e.g. the event fires on its own schedule/date, or via a trigger this parser doesn't track)
-   *   }
-   */
+  // event → fleet → government (who an event affects)
   resolveEventGovernmentImpact() {
     this.eventGovernmentImpacts = [];
     let resolvedGov = 0, unresolvedGov = 0;
@@ -2796,10 +2279,7 @@ class EndlessSkyParser {
     for (const change of this.locationResolver.eventSystemFleetChanges) {
       const { eventName, systemName, fleetName, action, rate, pluginId } = change;
 
-      // Same plugin-priority rule as resolveAllNpcFleetRefs: prefer a
-      // fleet defined by the same plugin as the event, fall back to a
-      // cross-plugin match (an event legitimately CAN reference another
-      // plugin's — or vanilla's — fleet by name).
+      // same plugin rule
       let fleetMatch = this.speciesResolver.fleets.find(
         f => f.name === fleetName && f.pluginId === pluginId
       );
@@ -2810,10 +2290,7 @@ class EndlessSkyParser {
       const government = fleetMatch?.government ?? null;
       if (government) resolvedGov++; else unresolvedGov++;
 
-      // Which missions (if any) are known to trigger this specific event,
-      // scoped to the same plugin as the event itself — a mission in
-      // Plugin A triggering an event by a name that happens to collide
-      // with an unrelated Plugin B event should not be joined here.
+      // missions known to trigger this event
       const triggeringMissions = this.locationResolver.missionEventTriggers
         .filter(t => t.eventName === eventName && t.pluginId === pluginId)
         .map(t => t.missionName);
@@ -2874,26 +2351,14 @@ async readPluginTxt(pluginRootDir) {
   
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-/**
- * The game's "display name" for a ship (what the player sees instead of the
- * internal name, e.g. variant "Carrier (Alpha)" shows as "Modified Carrier").
- * Stored inside the attributes as "display name" so no new column is needed.
- */
+// keep the display name
 function withDisplayName(attributes, ship) {
   const dn = ship && (ship.displayName || ship['display name']);
   if (!dn || dn === ship.name) return attributes;
   return { ...(attributes || {}), 'display name': String(dn) };
 }
 
-/**
- * Keep which governments fly/sell an item: added to its locations as a
- * "Governments" list per plugin ({ pluginId: { …, Governments: [...] } }),
- * which the site shows like any other location and the auto-fitter uses
- * to tell what stealing an outfit would cost in reputation.
- */
+// keep which governments fly/sell an item
 function withGovernments(locations, governments) {
   if (!governments || typeof governments !== 'object') return locations;
   const out = { ...(locations || {}) };
@@ -2906,6 +2371,7 @@ function withGovernments(locations, governments) {
   return out;
 }
 
+// the whole run. Called by: the Parse workflow
 async function main() {
   try {
     const config = JSON.parse(await fs.readFile(path.join(process.cwd(), 'plugins.json'), 'utf8'));
@@ -2934,12 +2400,7 @@ async function main() {
       console.log(`Source: ${source.name}  |  ${source.repository}`);
       console.log('='.repeat(60));
 
-      // "archive" sources (or a repository URL ending in a known archive
-      // extension, as a fallback if `type` wasn't set) are parsed via the
-      // download+extract path instead of git sparse-clone. Everything
-      // downstream (dataIndex, file writing, species/location resolution)
-      // is identical — parseArchiveSource returns the same result shape
-      // as parseRepository.
+      // archive sources (or URLs ending in an archive extension)
       const isArchive =
         source.type === 'archive' ||
         detectArchiveExtension(source.repository || '') !== null;
@@ -3009,17 +2470,14 @@ async function main() {
     const planetRefStats = sharedParser.missionParser2.resolvePlanetRefs(sharedParser.mapParser);
     console.log(`  rewards: ${JSON.stringify(rewardStats)}, planet refs: ${JSON.stringify(planetRefStats)}`);
     
-    // Which plugin's definition a reference from another plugin actually
-    // uses: its own if it has one, otherwise the highest-priority plugin's
-    // (the same rule mission rewards and variants use). Lets e.g. a mission
-    // in plugin B that gives plugin A's ship show up on A's ship.
+    // which plugin's version a cross-plugin reference uses
     sharedParser.locationResolver.setOwnerResolver((kind, name, fromPluginId) => {
       if (kind === 'outfit') return sharedParser._resolveOutfitPluginId(name, fromPluginId);
       const candidates = sharedParser.shipsByName.get(name);
       if (!candidates || !candidates.length) return null;
       const local = candidates.find(c => c._pluginId === fromPluginId);
       if (local) return local._pluginId;
-      // priority is stored per source name; a plugin id is "<source name>/<folder>"
+      // priority per source name
       const prio = id => sharedParser._sourcePriority.get(id)
         ?? sharedParser._sourcePriority.get(String(id).slice(0, String(id).lastIndexOf('/'))) ?? Infinity;
       return [...candidates].sort((a, b) => prio(a._pluginId) - prio(b._pluginId))[0]._pluginId;
@@ -3046,55 +2504,36 @@ async function main() {
     console.log(cache.usable ? `\nUsing the cache from the last run — only changed rows will be pushed.`
                              : `\nFull push (${cache.reason}).`);
 
-    // ── Chunked upsert/insert/delete helpers ──
-    // Supabase requests have a practical payload-size ceiling, so even a
-    // "one go at the end" push still goes out in batches — just large ones
-    // (hundreds of rows per request) instead of one row per request.
+    // ── chunked Supabase writes ──
     const CHUNK_SIZE = 500;
+    // split into chunks
     function chunk(arr, size) {
       const out = [];
       for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
       return out;
     }
-    // If the same internal_id ends up in an array twice — most likely because
-    // a plugin got processed more than once (e.g. listed directly AND pulled
-    // in as another plugin's dependency) — a single upsert touching that key
-    // twice makes Postgres error with "ON CONFLICT DO UPDATE command cannot
-    // affect row a second time". Everything here IS uniquely keyed by design;
-    // this just guards against the same key appearing twice in one batch.
-    // Keeps the last occurrence, so a later/more-complete copy wins.
+    // same internal_id twice → keep the last
     function dedupeByKey(rows, key) {
       const map = new Map();
       for (const row of rows) map.set(row[key], row);
       return [...map.values()];
     }
-    // Same idea as dedupeByKey, but for junction tables whose uniqueness is
-    // two columns together (e.g. ship_id + outfit_id) rather than one.
+    // same for two-column keys
     function dedupeByComposite(rows, keys) {
       const map = new Map();
       for (const row of rows) map.set(keys.map(k => row[k]).join('|'), row);
       return [...map.values()];
     }
-    // cost/mass are sometimes an array (e.g. [1073000, 584150]) rather than a
-    // plain number — this happens when the same item is genuinely redefined
-    // with a different value across plugins/files and the merge step keeps
-    // both instead of picking one. Postgres's numeric column can't store an
-    // array, so take the first value for the filterable column; the full
-    // original value (array and all) still lives untouched in `attributes`.
+    // cost/mass sometimes come as a list — use the first
     function toNumeric(val) {
       if (Array.isArray(val)) return typeof val[0] === 'number' ? val[0] : null;
       return typeof val === 'number' ? val : null;
     }
-    // Wraps any Supabase call so a transient network blip (dropped
-    // connection, DNS hiccup, connection-pool exhaustion under a burst of
-    // concurrent requests) gets retried automatically instead of failing
-    // the whole run. Only retries — it never swallows a real data/schema
-    // error, those still throw immediately.
-    // Errors that mean "Supabase (or the network) is busy right now", not "this
-    // request is wrong": dropped connections and the gateway's 502/503/504.
+    // dropped connection or 502/503/504 = busy, not wrong
     const isTransient = err => /fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|network|Bad Gateway|Service Unavailable|Gateway Time-?out|upstream|\b50[234]\b/i
       .test((err && err.message) || '');
     let busyUntil = 0;   // after a gateway error everyone slows down for a while
+    // retry busy errors
     async function withRetry(fn, { retries = 6, label = 'request' } = {}) {
       let lastErr;
       for (let attempt = 1; attempt <= retries; attempt++) {
@@ -3115,9 +2554,10 @@ async function main() {
     // Up to this many requests in flight at once — Supabase handles a few
     // concurrent requests fine, and this is most of the push's wall time.
     const CONCURRENCY = 4;
+    // run a few at a time
     async function inPool(items, worker, limit = CONCURRENCY) {
       let next = 0;
-      // while Supabase is busy (a recent 502/503/504), only one worker keeps going
+      // while Supabase is busy only one worker keeps going
       const run = async slot => {
         while (next < items.length) {
           if (slot > 0 && Date.now() < busyUntil) { await new Promise(r => setTimeout(r, 1000)); continue; }
@@ -3126,13 +2566,9 @@ async function main() {
       };
       await Promise.all(Array.from({ length: Math.min(limit, items.length) }, (_, slot) => run(slot)));
     }
-    // Supabase cancels any statement that runs too long. Big rows (systems,
-    // planets, missions carry large JSON) can hit that, especially with
-    // several requests at once — so on a timeout the batch is split in half
-    // and each half sent on its own, down to single rows if need be.
-    // too slow or too big — or the gateway gave up on it even after retries:
-    // smaller batches are lighter, so split and try again
+    // too slow or too big → split and retry
     const isTimeout = err => /statement timeout|canceling statement|57014|timed out|payload too large|413/i.test(err && err.message || '') || isTransient(err);
+    // send, splitting batches that time out
     async function sendSplitting(part, send, label) {
       try {
         return await withRetry(() => send(part), { label });
@@ -3145,6 +2581,7 @@ async function main() {
         return [...(a || []), ...(b || [])];
       }
     }
+    // upsert in chunks
     async function upsertChunked(table, rows, { onConflict, select, size = CHUNK_SIZE, concurrency = CONCURRENCY } = {}) {
       const results = [];
       await inPool(chunk(rows, size), async part => {
@@ -3160,6 +2597,7 @@ async function main() {
       }, concurrency);
       return results;
     }
+    // insert in chunks
     async function insertChunked(table, rows) {
       await inPool(chunk(rows, CHUNK_SIZE), async part => {
         if (!part.length) return;
@@ -3170,6 +2608,7 @@ async function main() {
         }, `insert ${table}`);
       });
     }
+    // delete in chunks
     async function deleteInChunked(table, column, ids) {
       // ids can be long uuids — keep each request's URL short
       await inPool(chunk(ids, 200), async part => {
@@ -3181,8 +2620,7 @@ async function main() {
         }, `delete ${table}`);
       }, 2);
     }
-    // id ↔ internal_id for every row of a table (paged) — needed when
-    // unchanged rows were skipped and so didn't come back from the upsert.
+    // id ↔ internal_id for a whole table
     async function fetchAll(table, cols, orderCol = 'id') {
       const rows = [];
       for (let from = 0; ; from += 1000) {
@@ -3195,17 +2633,14 @@ async function main() {
       return rows;
     }
     const dbRows = {};   // table → [{ id, internal_id, plugin_id }] as they are in Supabase now (used by cleanup)
+    // id map for a table
     async function fetchIdMap(table) {
       const rows = await fetchAll(table, 'id, internal_id, plugin_id');
       dbRows[table] = rows;
       return new Map(rows.map(r => [r.internal_id, r.id]));
     }
 
-    // ══════════════════════════════════════════════════════════════════
-    // PHASE 1 — pure in-memory accumulation. No network calls happen here
-    // at all; this just gathers every row, from every plugin, into flat
-    // arrays first.
-    // ══════════════════════════════════════════════════════════════════
+    // ══ PHASE 1: gather every row in memory ══
     console.log(`\nPhase 1: gathering rows in memory (no network yet)...`);
     const allPluginRows = [], allOutfitRows = [], allShipRows = [], allVariantRows = [],
           allEffectRows = [], allStarRows = [], allGalaxyRows = [], allGovernmentRows = [],
@@ -3347,10 +2782,7 @@ async function main() {
     console.log(`  ✓ gathered ${allShipRows.length} ships | ${allVariantRows.length} variants | ${allOutfitRows.length} outfits | ${allEffectRows.length} effects`);
     console.log(`  ✓ gathered ${allSystemRows.length} systems | ${allPlanetRows.length} planets | ${allWormholeRows.length} wormholes | ${allMissionRows.length} missions`);
 
-    // ══════════════════════════════════════════════════════════════════
-    // PHASE 2 — push every "parent" table in large chunked batches, once,
-    // across the whole dataset — this is the actual "one go at the end".
-    // ══════════════════════════════════════════════════════════════════
+    // ══ PHASE 2: push rows to Supabase ══
     console.log(`\nPhase 2: bulk-pushing to Supabase...`);
     const dedupedOutfitRows   = dedupeByKey(allOutfitRows, 'internal_id');
     const dedupedShipRows     = dedupeByKey(allShipRows, 'internal_id');
@@ -3376,6 +2808,7 @@ async function main() {
 
     // Each table: push only rows whose content changed since the last run.
     const pushed = {};
+    // push one table
     async function pushTable(table, rows, keyOf, opts = {}) {
       const { changed, skipped } = cache.diff(table, rows, keyOf);
       pushed[table] = { changed: changed.length, skipped };
@@ -3402,10 +2835,7 @@ async function main() {
     await pushTable('systems', dedupedSystemRows, ik, { onConflict: 'internal_id', size: 100, concurrency: 2 });
     await pushTable('missions', dedupedMissionRows, ik, { onConflict: 'internal_id', size: 50, concurrency: 2 });
 
-    // Raw event definitions (for replaying a save's changes on the Systems
-    // map). One row per plugin + event name; if a plugin defines the same
-    // event twice the blocks are joined, like the game merging them.
-    // Needs supabase/game_events.sql.
+    // raw event definitions (for the map's save replay)
     try {
       const knownPlugins = new Set(allPluginRows.map(p => p.plugin_id));
       const merged = new Map();
@@ -3433,28 +2863,11 @@ async function main() {
     console.log(`  ✓ parent tables pushed (${secs(pushStart)})`);
     timings.push(['push parent tables', (Date.now() - pushStart) / 1000]);
 
-    // ══════════════════════════════════════════════════════════════════
-    // PHASE 3 — junction tables. Only possible now, since a ship's outfit
-    // (or a variant's base ship, or a wormhole's linked system) can live in
-    // a different plugin than the record referencing it — every plugin's
-    // ids need to exist before any of these can be built correctly.
-    //
-    // Each parent's children are rebuilt only if they changed since the
-    // last run (compared by content, not ids).
-    // ══════════════════════════════════════════════════════════════════
+    // ══ PHASE 3: junction tables (outfits on ships, links, shipyards …) ══
     console.log(`\nPhase 3: building junction tables...`);
     const junctionStart = Date.now();
 
-    // Self-check: the cache says which children were already pushed, but if the
-    // database has lost rows since (e.g. a run that stopped half-way through a
-    // rebuild), trusting it would leave them missing for good — jump links,
-    // shipyards and so on. Compare row counts with last run's and rebuild any
-    // family that comes up short.
-    // Each plugin's map slice only carries the parts of a system/planet/wormhole
-    // THAT plugin contributed (mapParser.toPluginSlice). A plugin that adds, say,
-    // minables to the base game's Sol therefore has a "Sol" with no links — and
-    // used to replace the base game's Sol here, wiping its jump links, planets,
-    // fleets and trade. Combine the pieces from every plugin instead.
+    // self-check: rebuild anything whose rows have gone missing
     function addChildren(map, key, part) {
       const cur = map.get(key);
       if (!cur) { map.set(key, part); return; }
@@ -3467,9 +2880,7 @@ async function main() {
       planet_children: ['planet_shipyards', 'planet_outfitters'],
       system_children: ['system_fleets', 'system_hazards', 'system_asteroids', 'system_minables', 'system_links', 'system_planets', 'system_trade'],
     };
-    // Per-parent check: a parent that should have rows in a child table but has
-    // none is rebuilt, however the cache feels about it. (Totals alone can miss
-    // a whole plugin's rows going missing.)
+    // ids that have rows in a child table
     async function idsWithRows(table, col) {
       const have = new Set();
       for (let from = 0; ; from += 1000) {
@@ -3481,6 +2892,7 @@ async function main() {
       return have;
     }
     const forceRebuild = { ships: new Set(), variants: new Set(), planets: new Set(), systems: new Set(), wormholes: new Set() };
+    // rebuild parents with missing child rows
     async function checkCoverage(kind, childTable, col, childrenMap, idByKey, hasRows, label) {
       if (!cache.usable) return;          // no cache = everything is rebuilt anyway
       const have = await idsWithRows(childTable, col);
@@ -3553,10 +2965,7 @@ async function main() {
     await upsertChunked('variant_outfits', dedupeByComposite(variantOutfitRows, ['variant_id', 'outfit_id']), { onConflict: 'variant_id,outfit_id' });
     cache.accept('ship_outfits', 'variant_outfits');
 
-    // ── variant → base ship ──
-    // Look-up by "::<ship name>" suffix, built once (this was a scan over
-    // every ship for every variant — millions of comparisons).
-    // In source-priority order, so the first plugin defining a ship name wins (as before).
+    // variant → base ship
     const shipIdBySuffix = new Map();
     for (const row of dedupedShipRows) {
       const internalId = row.internal_id, id = shipIdByInternalId.get(internalId);
@@ -3669,16 +3078,7 @@ async function main() {
       `${changedSystems.size} systems, ${changedWormholes.size} wormholes (${secs(junctionStart)})`);
     timings.push(['junction tables', (Date.now() - junctionStart) / 1000]);
 
-    // ══════════════════════════════════════════════════════════════════
-    // PHASE 4 — cleanup: remove game data that no longer exists.
-    //   • a plugin taken out of plugins.json, or gone from its repository
-    //     → all of its rows go, and it's recorded in removed_plugins so
-    //       people's ships that use it can say what's missing;
-    //   • items removed from a plugin that's still listed → those rows go.
-    // Only sources that were read successfully THIS run count — a source
-    // that failed to download never causes deletions. Large deletions are
-    // refused as a safety net (set PARSE_ALLOW_MASS_DELETE=1 to override).
-    // ══════════════════════════════════════════════════════════════════
+    // ══ PHASE 4: remove what no longer exists ══
     console.log(`\nPhase 4: removing data that no longer exists...`);
     const cleanupStart = Date.now();
     const cleanup = { pluginsRemoved: [], staleRows: 0, flaggedShips: 0, flaggedFleets: 0, reAdded: 0 };
@@ -3692,6 +3092,7 @@ async function main() {
       systems:   Object.values(SYS_TABLES).map(t => [t, 'system_id']),
       wormholes: [['wormhole_links', 'wormhole_id']],
     };
+    // delete rows and their children
     async function deleteByIds(table, ids) {
       if (!ids.length) return;
       for (const [child, col] of CHILDREN[table] || []) await deleteInChunked(child, col, ids);
@@ -3835,10 +3236,7 @@ async function main() {
       `${cleanup.flaggedShips} shared ship(s) and ${cleanup.flaggedFleets} fleet(s) flagged as needing a removed plugin (${secs(cleanupStart)})`);
     timings.push(['cleanup', (Date.now() - cleanupStart) / 1000]);
 
-    // A fingerprint per plugin of everything its ready-made data files contain
-    // (build/makeBundles.mjs). If a plugin's fingerprint hasn't changed, the
-    // Cloudflare build reuses its files from the live site instead of asking
-    // Supabase again — most deploys then take seconds, not minutes.
+    // a fingerprint per plugin (lets the deploy reuse unchanged ready-made files)
     {
       const crypto = require('crypto');
       const pidOf = key => String(key).split('::')[0];
@@ -3896,23 +3294,11 @@ async function main() {
     else console.log(`  Nothing changed since the last run.`);
     console.log(`\nAll Supabase writes complete.`);
 
-    // index.json, eventGovernmentImpact.json, map.json, and missionCollisions.json
-    // used to be written here. index.json's only two real consumers
-    // (computedStats.js, saveManager.js) now query the `plugins` table
-    // directly instead — see source_priority above, which replaces the
-    // ordering index.json used to encode. The other three had no frontend
-    // consumer at all (checked across every file in Display/JavaScript),
-    // so they're just not generated any more rather than migrated.
+    // json outputs the site still reads
 
     const dataDir = path.join(process.cwd(), 'data');
     await fs.mkdir(dataDir, { recursive: true });
-    // Attribute definitions go straight from memory into Supabase — no
-    // attributeDefinitions.json is written. (data/ is still passed because
-    // the attribute parser keeps its source-discovery caches there.)
-    // The attribute parser reads ~700 files from the game's repository and
-    // only depends on the game's code/data, the parser itself and the ship
-    // rows (for attribute coverage). If none of those changed since the last
-    // run, its output would be identical — skip it.
+    // attribute definitions go straight to Supabase
     const attrStart = Date.now();
     let gameSha = null;
     try {
@@ -3940,9 +3326,7 @@ async function main() {
       // tables. Safe to remove once nothing reads app_config.attributeDefinitions.
       await supabase.from('app_config').upsert({ key: 'attributeDefinitions', value: attrDefsJson });
 
-      // A single cheap value the frontend can check before doing its big
-      // bulk fetch — if this matches what it already has cached, it can
-      // skip re-fetching everything entirely.
+      // the data version the site checks
       await supabase.from('app_config').upsert({ key: 'dataVersion', value: { updatedAt: new Date().toISOString() } });
       console.log(`\nPushed attribute definitions to Supabase.`);
       if (gameSha) cache.setMeta('attributes', { gameSha, at: new Date().toISOString() });

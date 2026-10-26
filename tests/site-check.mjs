@@ -1,15 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════════════
-//  tests/site-check.mjs — automatic checks for Endless Sky Nexus
-//
-//  Opens the site in a real browser (Chromium, via Playwright) and runs the
-//  main things a visitor does. Fails if any page throws an error or a flow
-//  doesn't work. Uses the live Supabase data (read-only — it never logs in
-//  and never writes anything).
-//
-//  Run locally:   python3 -m http.server 8080 &   then   node tests/site-check.mjs
-//  In GitHub:     .github/workflows/site-checks.yml runs it on every change.
-//  SITE_URL=https://… node tests/site-check.mjs  checks a deployed copy instead.
-// ═══════════════════════════════════════════════════════════════════════════
+// Automatic site checks: opens every page and the main features in a real browser and fails on any error (run by .github/workflows/site-checks.yml).
 
 import { chromium } from 'playwright';
 import fs from 'node:fs';
@@ -26,6 +15,7 @@ const IGNORE = [/Failed to load resource/i, /ERR_|net::/i, /favicon/i, /ImageGra
 const results = [];
 let browser, context;
 
+// collect page errors
 function watch(page) {
   const errors = [];
   page.on('pageerror', e => errors.push(`page error: ${e.message}`));
@@ -38,6 +28,7 @@ function watch(page) {
   return errors;
 }
 
+// run one check, screenshot if it fails
 async function check(name, fn) {
   const page = await context.newPage();
   const errors = watch(page);
@@ -56,11 +47,12 @@ async function check(name, fn) {
     await page.close();
   }
 }
+// fail with a message
 const expect = (cond, msg) => { if (!cond) throw new Error(msg); };
 const dataReady = page => page.waitForFunction(() => window.DataLoader && window.DataLoader.isReady && window.DataLoader.isReady(), null, { timeout: 90000 });
 
 browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
-// For offline testing only: FAKE_SUPABASE=path/to/fake.js swaps the live database for a fake one.
+// offline testing only: FAKE_SUPABASE swaps the database for a fake
 async function newContext(opts) {
   const ctx = await browser.newContext(opts);
   if (process.env.FAKE_SUPABASE) {

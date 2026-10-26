@@ -1,165 +1,6 @@
 'use strict';
 
-/**
- * attributeParser.js — Endless Sky Attribute Parser
- *
- * ─────────────────────────────────────────────────────────────────────────
- *  NEW IN THIS VERSION: full-codebase discovery before targeted parsing
- * ─────────────────────────────────────────────────────────────────────────
- *
- *  Previously this parser only ever looked at a hardcoded list of ~12 files
- *  (SOURCE_FILES). Anything that reads or writes outfit/ship attributes
- *  outside those files — e.g. Armament/Hardpoint gun & turret handling,
- *  AI combat-behaviour thresholds, boarding-combat code, cargo/crew
- *  handling — was invisible to the dictionary, forever, silently.
- *
- *  This version adds a DISCOVERY PHASE that runs before any targeted
- *  parsing:
- *
- *    1. discoverRelevantSourceFiles() pulls the full recursive file tree
- *       of the live repo (one GitHub Trees API call), filters to every
- *       .cpp/.h under source/, fetches each candidate's raw content, and
- *       tests it against a set of attribute-access patterns
- *       (attributes.Get(, Attributes().Get(, .Set(", Attributes().Mass(),
- *       etc). Anything that matches is "relevant" — regardless of whether
- *       a human ever added it to a hardcoded list.
- *
- *    2. The result is cached to disk (discoveredSourceFiles.json) with a
- *       timestamp, so routine runs don't re-scan ~300 files every time.
- *       Re-discovery happens automatically once the cache is stale
- *       (default 7 days) or when --rescan is passed on the CLI.
- *
- *    3. The dozen "seed" files that already have bespoke parsers
- *       (Ship.cpp, Outfit.cpp/h, Weapon.cpp/h, OutfitInfoDisplay.cpp,
- *       ShipInfoDisplay.cpp, DamageDealt.cpp/h, ShipJumpNavigation.cpp/h)
- *       keep their hand-tuned extraction logic untouched — those follow
- *       hand-authored formats (SCALE_LABELS, BOOLEAN_ATTRIBUTES,
- *       VALUE_NAMES, MINIMUM_OVERRIDES) that only targeted regexes can
- *       read correctly. They are excluded from the generic discovery
- *       pass so they don't get parsed twice / conflictingly.
- *
- *    4. Every OTHER discovered file is parsed generically via
- *       extractAllClassFunctionBodies() / parseGenericSourceFile() — a
- *       version of the existing function-body extractor that is not
- *       locked to one class prefix, so it will pick up e.g. Armament::,
- *       Hardpoint::, AI::, CargoHold::, or any future class without
- *       needing to be told its name in advance.
- *
- *    5. Any attribute key found only in a newly-discovered file (i.e. it
- *       never showed up in OutfitInfoDisplay/ShipInfoDisplay/etc.) gets
- *       a dictionary entry created for it on the spot, tagged
- *       `usedInOtherSystems: ["ClassName::fnName", ...]` and
- *       `discoveredOnly: true` so you can immediately see what the old
- *       hardcoded-file-list approach was missing.
- *
- *  Everything from the previous version (tooltip parsing, damage-type
- *  detail building, status-effect decay modelling, system-aware solar
- *  formulas) is unchanged and still runs exactly as before.
- *
- * ─────────────────────────────────────────────────────────────────────────
- *  NEW: movement-system derivation (zero hardcoded keyword lists)
- * ─────────────────────────────────────────────────────────────────────────
- *
- *  Attributes like "turn" are ambiguous by NAME ALONE — the same key is
- *  used for a ship's engine turning-force AND (in a different struct path,
- *  outfit.weapon.turn) a missile/turret's turn rate. Rather than maintain
- *  a hand-picked list of "movement attribute names" (which "turn" would
- *  break), this pass derives ship-physics relevance structurally:
- *
- *    1. Build a call graph between ship functions purely from formula text
- *       already in shipFunctions (every "FnName()" reference found there
- *       IS a real call, extracted with zero guessing).
- *    2. Seed the traversal from InertialMass / Drag / DragForce — three
- *       functions that exist for exactly one reason in this engine
- *       (motion physics). Nothing else has any reason to call them.
- *    3. Any ship function that calls a seed function, directly or
- *       transitively, is a physics/movement function. Collect every
- *       attribute referenced (via "[attr]" in its formula) across that
- *       whole closure.
- *    4. Tag each such attribute `isMovementRelevant: true` in the
- *       dictionary — additively, alongside whatever other flags it
- *       already has (e.g. "turn" keeps isWeaponDataKey: true from its
- *       missile-turn-rate role AND gains isMovementRelevant: true from
- *       its ship-engine role — both are correct, for different contexts).
- *
- *  The only "seed" is three function names that are structurally
- *  unambiguous (mass/drag mean nothing except motion) — not a curated
- *  glossary of movement-sounding words.
- * ─────────────────────────────────────────────────────────────────────────
- *
- * ─────────────────────────────────────────────────────────────────────────
- *  NEW: front-end "area" derivation (see attribute-area-classification.md)
- * ─────────────────────────────────────────────────────────────────────────
- *
- *  Everything above produces a rich set of per-attribute BOOLEAN flags
- *  (isStatusEffect, isWeaponDataKey, isMovementRelevant, isProtection,
- *  isBoolean, discoveredOnly, usedInOtherSystems, shownInOutfitPanel,
- *  shownInShipPanel, ...) but leaves it to every downstream consumer to
- *  re-derive a single "which UI bucket does this go in" answer from that
- *  flag soup, independently, over and over.
- *
- *  deriveFrontendArea() does that derivation exactly ONCE, here, following
- *  the priority list documented in attribute-area-classification.md §3 —
- *  itself written to describe exactly the flags this file already
- *  produces, so there is nothing new being guessed. Each attribute gets:
- *
- *    - `area`        — the single primary bucket, chosen by walking the
- *                       priority list top to bottom and taking the first
- *                       rule that matches.
- *    - `areaBadges`   — every OTHER rule that also matched (dual-role
- *                       attributes like "turn" — Weapons AND Movement).
- *
- *  This is intentionally a COARSE ~10-bucket taxonomy, useful for a
- *  front end that wants "which broad category" without re-deriving it.
- *  Front ends wanting finer buckets (e.g. splitting "Power, Heat & Life
- *  Support" into separate Shields/Energy/Heat sections) should keep using
- *  the underlying flags directly — `area` is a floor, not a ceiling.
- * ─────────────────────────────────────────────────────────────────────────
- *
- * ─────────────────────────────────────────────────────────────────────────
- *  NEW: structural (zero-hardcoded-type-list) damage-type discovery
- * ─────────────────────────────────────────────────────────────────────────
- *
- *  parseDamageDealt() used to find "damage types" by regex-matching every
- *  zero-arg `double`-returning (or, via the inline-definition regex, ANY
- *  zero-arg const-noexcept) method declared on the DamageDealt class. That
- *  worked when DamageDealt exposed one accessor per damage type directly.
- *  It no longer does — current DamageDealt.h exposes exactly four
- *  accessors (GetWeapon, Scaling, Levels, HitForce), none of which are
- *  damage types; the real per-resource values live one level deeper, as
- *  fields on the struct Levels() returns (currently ResourceLevels).
- *
- *  deriveDamageTypesStructurally() (added below, alongside — not
- *  replacing — parseDamageDealt()/parseShipTakeDamage()) finds this
- *  correctly regardless of naming, by:
- *
- *    A. Structurally locating DamageDealt's "aggregate resource accessor"
- *       — not by name, but by finding the public zero-arg const method
- *       whose declared return type matches a PRIVATE member's declared
- *       type (the ordinary C++ getter pattern).
- *    B. Following DamageDealt.h's own #include lines to the header that
- *       defines that return type, fetching it, and parsing its
- *       double-typed member fields — the raw, current per-resource names.
- *    C. Cross-referencing against Weapon::Load's own literal
- *       `key == "..."` data-file keys (already parsed elsewhere in this
- *       file, zero hardcoding) that end in " damage" — this supplies the
- *       correctly-cased canonical type names ("Shield", "Ion", ...) the
- *       rest of the app expects, since raw struct field names don't match
- *       1:1 (shields/ionization/leakage/burning vs. the attribute-key
- *       convention shield/ion/leak/burn).
- *    D. Reconciling B onto C via a generic shared-prefix similarity check
- *       — not a synonym table — to carry shieldInteraction/category info
- *       across. Union, not intersection: anything Step C finds that Step
- *       B can't confirm is still kept, since an extra type is harmless
- *       downstream while a missing real one silently breaks combat math.
- *
- *  parseDamageDealt() and parseShipTakeDamage() are left completely
- *  unmodified (anything else that imports them directly keeps working
- *  unchanged) and are used as the fallback if structural discovery fails
- *  for any reason (network hiccup, a future upstream refactor that breaks
- *  the getter-pattern assumption, etc.) — see parseAttributes() below.
- * ─────────────────────────────────────────────────────────────────────────
- */
+// Reads the game's C++ source to learn every attribute: what it does, its units, formulas, display rules and game rules. Run by parser.js.
 
 const https = require('https');
 const fs    = require('fs').promises;
@@ -209,9 +50,7 @@ const DATA_FILES = {
   tooltips:  `${ES_DATA}/_ui/tooltips.txt`,
 };
 
-// ---------------------------------------------------------------------------
-// HTTP fetch
-// ---------------------------------------------------------------------------
+// fetch a text file (raw GitHub)
 
 function fetchText(url, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -237,8 +76,7 @@ function fetchText(url, headers = {}) {
   });
 }
 
-// Simple bounded-concurrency worker pool. Keeps discovery well under
-// GitHub's abuse-detection thresholds without needing a queue library.
+// run tasks a few at a time
 async function withPool(items, worker, concurrency = 8, onProgress) {
   const results = new Array(items.length);
   let idx = 0, done = 0;
@@ -255,18 +93,10 @@ async function withPool(items, worker, concurrency = 8, onProgress) {
   return results;
 }
 
-// Instantiated here (not inside dataFolderScanner.js) so the data/ scan
-// shares this file's own fetchText/withPool instead of duplicating HTTP
-// plumbing in a second file.
+// shared with dataFolderScanner (one GitHub fetch budget)
 const { scanDataFolderUsage, deriveCategoryAreaHints } = createDataFolderScanner({ fetchText, withPool });
 
-// ---------------------------------------------------------------------------
-// NEW: discoverRelevantSourceFiles(cacheFile, opts)
-//
-// Scans the ENTIRE live source/ tree (not just SOURCE_FILES) and returns
-// every .cpp/.h file that actually touches outfit/ship attributes, whether
-// or not a human ever added it to a hardcoded list.
-// ---------------------------------------------------------------------------
+// ── find every source file that reads attributes ──
 
 const ATTR_ACCESS_PATTERNS = [
   /\battributes?(?:\.|->)Get\s*\(/,
@@ -279,10 +109,12 @@ const ATTR_ACCESS_PATTERNS = [
   /\boutfit(?:\.|->)Get\s*\(\s*"/,
 ];
 
+// could this file read attributes?
 function looksAttributeRelevant(src) {
   return ATTR_ACCESS_PATTERNS.some(re => re.test(src));
 }
 
+// find the relevant source files
 async function discoverRelevantSourceFiles(cacheFile, opts = {}) {
   const maxAgeMs = opts.maxAgeMs ?? 7 * 24 * 60 * 60 * 1000; // 7 days
   const forceRescan = !!opts.forceRescan;
@@ -353,13 +185,7 @@ async function discoverRelevantSourceFiles(cacheFile, opts = {}) {
   return record;
 }
 
-// ---------------------------------------------------------------------------
-// parseTooltips(src)
-//
-// Parses data/_ui/tooltips.txt into a Map: attributeKey → tooltip string.
-// Keys are normalised: trailing colon stripped, lowercased, trimmed.
-// Multi-paragraph tips are joined with a single newline.
-// ---------------------------------------------------------------------------
+// tooltips.txt → descriptions
 
 function parseTooltips(src) {
   const tooltipMap = new Map();
@@ -403,9 +229,7 @@ function parseTooltips(src) {
   return tooltipMap;
 }
 
-// ---------------------------------------------------------------------------
-// mergeTooltipsIntoAttributes(attrs, tooltipMap)
-// ---------------------------------------------------------------------------
+// add the descriptions to the attributes
 
 function mergeTooltipsIntoAttributes(attrs, tooltipMap) {
   for (const [key, entry] of Object.entries(attrs)) {
@@ -414,15 +238,9 @@ function mergeTooltipsIntoAttributes(attrs, tooltipMap) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Sentinelizer — replaces attributes.Get("key") with ⟦key⟧ brackets
-// ---------------------------------------------------------------------------
+// ── stand-ins for attribute reads, so formulas can be followed ──
 
-// Matches both dot (ship.Attributes()) and arrow (outfit->Attributes())
-// accessors — arrow notation is extremely common in pointer-heavy code like
-// Armament/Hardpoint, which the discovery phase now reaches, so both forms
-// need to sentinelize identically or those files silently lose every
-// attribute reference.
+// ship.Attributes().Get("x") / outfit->Get("x") → [x]
 function sentinelizeGetCalls(src) {
   return src
     .replace(/\battributes?(?:\.|->)Get\s*\(\s*"([^"]+)"\s*\)/g,                 (_, k) => `\u27e6${k}\u27e7`)
@@ -432,6 +250,7 @@ function sentinelizeGetCalls(src) {
     .replace(/\b\w+(?:\.|->)Attributes\s*\(\s*\)(?:\.|->)Mass\s*\(\s*\)/g, () => `\u27e6mass\u27e7`);
 }
 
+// local variable → expression
 function extractVarMap(sentBody) {
   const vars  = {};
   const lines = sentBody.split('\n');
@@ -456,6 +275,7 @@ function extractVarMap(sentBody) {
   return vars;
 }
 
+// substitute variables into a formula
 function substituteVars(expr, vars) {
   const sorted = Object.entries(vars).sort((a, b) => b[0].length - a[0].length);
   for (const [name, def] of sorted) {
@@ -472,6 +292,7 @@ function substituteVars(expr, vars) {
   return expr;
 }
 
+// a formula with variables filled in
 function buildFormula(rawReturn, rawBody) {
   const sentBody   = sentinelizeGetCalls(rawBody);
   const sentReturn = sentinelizeGetCalls(rawReturn);
@@ -485,6 +306,7 @@ function buildFormula(rawReturn, rawBody) {
     .trim();
 }
 
+// every attribute key in a body
 function extractAllAttributeKeys(src) {
   const keys = new Set();
   const sentSrc = sentinelizeGetCalls(src);
@@ -501,6 +323,7 @@ function extractAllAttributeKeys(src) {
   return [...keys].sort();
 }
 
+// keys that get set
 function extractSetKeys(src) {
   const keys = new Set();
   const re = /\battributes?(?:\.|->)Set\s*\(\s*"([^"]+)"\s*/g;
@@ -509,9 +332,7 @@ function extractSetKeys(src) {
   return [...keys].sort();
 }
 
-// ---------------------------------------------------------------------------
-// C++ function body extractor — fixed class prefix (used for seed files)
-// ---------------------------------------------------------------------------
+// function name → body
 
 function extractFunctionBodies(src, classPrefix) {
   const bodies = {};
@@ -536,18 +357,11 @@ function extractFunctionBodies(src, classPrefix) {
   return bodies;
 }
 
-// ---------------------------------------------------------------------------
-// NEW: extractAllClassFunctionBodies(src)
-//
-// Class-agnostic version of extractFunctionBodies. Matches
-// "AnyClassName::AnyMethodName(...) { ... }" for EVERY class defined in
-// the file, without needing to be told the class name in advance. This is
-// what lets a newly-discovered file (Armament.cpp, AI.cpp, whatever) get
-// parsed correctly with zero prior knowledge of what classes it contains.
-// ---------------------------------------------------------------------------
+// ── any source file: which attributes each function reads ──
 
 const NON_CLASS_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'else']);
 
+// every Class::Function body
 function extractAllClassFunctionBodies(src) {
   const bodies = {};
   const sigRe = /(?:^|\n)[ \t]*((?:[\w:<>*&~][ \w:<>*&~]*?)\s+)(\w+)::(\w+)\s*\(([^)]*)\)\s*(const\s*)?(?:noexcept\s*)?\{/g;
@@ -571,14 +385,7 @@ function extractAllClassFunctionBodies(src) {
   return bodies;
 }
 
-// ---------------------------------------------------------------------------
-// NEW: parseGenericSourceFile(src, filePath)
-//
-// Runs a newly-discovered file through the class-agnostic extractor and
-// returns { ClassName: { fnName: {...} } } in the same shape parseShipCpp
-// already produces for Ship::, so downstream code (annotateShipFunctionScales
-// etc.) can be reused unmodified if you ever want to fold these in further.
-// ---------------------------------------------------------------------------
+// one generic source file
 
 function parseGenericSourceFile(src, filePath) {
   const bodies  = extractAllClassFunctionBodies(src);
@@ -600,6 +407,7 @@ function parseGenericSourceFile(src, filePath) {
   return byClass;
 }
 
+// return expressions
 function extractReturns(body) {
   const returns = [];
   const re = /\breturn\s+((?:[^;{}]|\{[^}]*\})+);/g;
@@ -612,6 +420,7 @@ function extractReturns(body) {
   return returns;
 }
 
+// label argument
 function parseLabelArg(arg) {
   const trimmed  = arg.trim();
   const litMatch = trimmed.match(/^"([^"]*)"$/);
@@ -621,6 +430,7 @@ function parseLabelArg(arg) {
   return unique.length > 0 ? unique.join(' / ') : trimmed;
 }
 
+// text inside parentheses
 function extractParenArg(src, start) {
   let depth = 1, i = start;
   while (i < src.length && depth > 0) {
@@ -631,9 +441,7 @@ function extractParenArg(src, start) {
   return { arg: src.slice(start, i - 1).trim(), end: i };
 }
 
-// ---------------------------------------------------------------------------
-// Parse OutfitInfoDisplay.cpp
-// ---------------------------------------------------------------------------
+// OutfitInfoDisplay.cpp: display scales and units
 
 function parseOutfitInfoDisplay(src) {
   const r = {
@@ -730,20 +538,9 @@ function parseOutfitInfoDisplay(src) {
   return r;
 }
 
-// ---------------------------------------------------------------------------
-// Parse Ship.cpp
-// ---------------------------------------------------------------------------
+// ── ship attribute cache ──
 
-// ---------------------------------------------------------------------------
-// Ship attribute cache (newer game versions)
-//
-// Ship.cpp now reads most attributes as `cache.<member>` instead of
-// `attributes.Get("…")`; ship/ShipAttributeCache.cpp fills those members
-// (`drag = attributes.Get("drag");`, `hullRepairRate = (…Get("hull repair
-// rate")…) * (1. + …)`). Inlining each member's expression back into
-// Ship.cpp lets every existing extractor see which attributes a function
-// really uses. With an older game (no cache file) this does nothing.
-// ---------------------------------------------------------------------------
+// cached attribute fields → the keys behind them
 function parseAttributeCache(src) {
   const map = new Map();
   if (!src) return map;
@@ -755,6 +552,7 @@ function parseAttributeCache(src) {
   }
   return map;
 }
+// inline the attribute cache
 function inlineAttributeCache(shipSrc, cacheMap) {
   if (!shipSrc || !cacheMap || !cacheMap.size) return shipSrc;
   return shipSrc.replace(/\bcache\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)/g, (whole, path) => {
@@ -768,6 +566,7 @@ function inlineAttributeCache(shipSrc, cacheMap) {
   });
 }
 
+// Ship.cpp
 function parseShipCpp(src) {
   const allFnBodies = extractFunctionBodies(src, 'Ship::');
   const parsed      = {};
@@ -797,9 +596,7 @@ function parseShipCpp(src) {
   return parsed;
 }
 
-// ---------------------------------------------------------------------------
-// Parse ShipInfoDisplay.cpp
-// ---------------------------------------------------------------------------
+// ShipInfoDisplay.cpp: the ship info tables
 
 function parseShipInfoDisplay(src) {
   const r = {
@@ -883,9 +680,7 @@ function parseShipInfoDisplay(src) {
   return r;
 }
 
-// ---------------------------------------------------------------------------
-// Parse Outfit.cpp
-// ---------------------------------------------------------------------------
+// Outfit.cpp
 
 function parseOutfitCpp(src) {
   const stackingRules = {};
@@ -929,9 +724,7 @@ function parseOutfitCpp(src) {
   return stackingRules;
 }
 
-// ---------------------------------------------------------------------------
-// Parse Weapon.cpp, DamageDealt, JumpNav
-// ---------------------------------------------------------------------------
+// Weapon.cpp
 
 function parseWeaponCpp(src) {
   const fnBodies     = extractFunctionBodies(src, 'Weapon::');
@@ -955,6 +748,7 @@ function parseWeaponCpp(src) {
   return { functions, dataFileKeys: [...dataFileKeys].sort(), submunitionKeys };
 }
 
+// DamageDealt
 function parseDamageDealt(hSrc, cppSrc) {
   const types   = new Set();
   const combined = (hSrc || '') + '\n' + (cppSrc || '');
@@ -968,6 +762,7 @@ function parseDamageDealt(hSrc, cppSrc) {
   return [...types].sort();
 }
 
+// ShipJumpNavigation
 function parseJumpNav(src) {
   if (!src) return {};
   const parsed = {};
@@ -982,9 +777,7 @@ function parseJumpNav(src) {
   return parsed;
 }
 
-// ---------------------------------------------------------------------------
-// Parse system data
-// ---------------------------------------------------------------------------
+// system context (solar, ramscoop)
 
 function parseSystemContext(solText) {
   const context = {
@@ -1002,9 +795,7 @@ function parseSystemContext(solText) {
   return context;
 }
 
-// ---------------------------------------------------------------------------
-// Status effect decay (unchanged)
-// ---------------------------------------------------------------------------
+// status effect decay
 
 function parseStatusEffectDecay(shipCppSrc) {
   const CANONICAL_EFFECTS = [
@@ -1057,9 +848,7 @@ function parseStatusEffectDecay(shipCppSrc) {
   return { decayMap, descriptors };
 }
 
-// ---------------------------------------------------------------------------
-// parseShipTakeDamage (unchanged)
-// ---------------------------------------------------------------------------
+// Ship::TakeDamage: how each damage type is applied
 
 function parseShipTakeDamage(shipCppSrc) {
   const details = new Map();
@@ -1124,50 +913,7 @@ function parseShipTakeDamage(shipCppSrc) {
   return details;
 }
 
-// ---------------------------------------------------------------------------
-// NEW: deriveDamageTypesStructurally(opts)
-//
-// Zero-hardcoded-type-list discovery of DamageDealt's real per-resource
-// damage types, ADDED alongside (not replacing) parseDamageDealt() and
-// parseShipTakeDamage() above — both of those stay completely untouched,
-// still exported, still usable by anything that already depends on them.
-// This function returns the SAME two pieces of information those two
-// functions together used to produce — { damageTypes, shipCppDetails } —
-// in the same shapes buildDamageTypeDetails() already expects, so it's a
-// drop-in substitute at the one call site in parseAttributes() below, with
-// no changes needed anywhere further downstream.
-//
-// Method (see the header comment block at the top of this file for the
-// full rationale):
-//   A. Structurally locate DamageDealt's "aggregate resource accessor" —
-//      not by name, but by finding the public zero-arg const method whose
-//      declared return type matches a PRIVATE member's declared type (the
-//      ordinary C++ getter pattern). Whatever that accessor is called
-//      this year, this finds it without hardcoding "Levels".
-//   B. Follow DamageDealt.h's own #include lines to the header that
-//      defines that return type, fetch it, and parse its double-typed
-//      member fields — the raw, current per-resource field names.
-//   C. Cross-reference against Weapon::Load's own literal `key == "..."`
-//      data-file keys (already parsed by parseWeaponCpp above with zero
-//      hardcoding) that end in " damage" — this supplies the correctly
-//      cased canonical type names ("Shield", "Ion", "Scrambling", ...)
-//      the rest of the app expects, since raw struct field names don't
-//      match 1:1 (shields/ionization/leakage/burning vs. the attribute-
-//      key convention shield/ion/leak/burn).
-//   D. Reconcile B onto C via a generic shared-prefix similarity check —
-//      not a synonym table — to carry shieldInteraction/category info
-//      across. Union, not intersection: any canonical type Step C finds
-//      that Step B can't confirm (e.g. "Minable", "Disabled", which
-//      aren't ResourceLevels fields at all) is still kept, since an extra
-//      entry is harmless downstream (the battle simulator's damage-apply
-//      switch just no-ops on types it doesn't recognize) while a missing
-//      real type silently breaks combat math — which is exactly the bug
-//      this function exists to fix.
-//
-// Never throws. On any failure (network, unexpected header shape, pattern
-// not found) it returns { ok: false, warnings: [...] } and the caller
-// falls back to the existing parseDamageDealt()/parseShipTakeDamage() pair.
-// ---------------------------------------------------------------------------
+// damage types worked out from the damage code (not a fixed list)
 
 async function deriveDamageTypesStructurally(opts) {
   const { damageDealtHSrc, shipCppSrc, weaponDataFileKeys, fetchTextFn, esRawBase } = opts;
@@ -1293,9 +1039,7 @@ async function deriveDamageTypesStructurally(opts) {
 
       const hpFields = new Set(structFields.filter(f => /^(shields?|hull)$/i.test(f)));
 
-      // Generic shared-prefix fuzzy match — NOT a hardcoded synonym table.
-      // Correctly lines up e.g. "ionization"<->"Ion", "leakage"<->"Leak",
-      // "burning"<->"Burn", "shields"<->"Shield", "slowness"<->"Slowing".
+      // shared-prefix match (no synonym table)
       const fuzzyMatch = (canonical, raw) => {
         const a = canonical.toLowerCase().replace(/\s+/g, '');
         const b = raw.toLowerCase();
@@ -1324,9 +1068,7 @@ async function deriveDamageTypesStructurally(opts) {
   return { ok: true, damageTypes: canonicalTypes, shipCppDetails, discovered, warnings };
 }
 
-// ---------------------------------------------------------------------------
-// buildDamageTypeDetails (unchanged)
-// ---------------------------------------------------------------------------
+// details for each damage type
 
 function buildDamageTypeDetails(damageTypeNames, statusDescriptors, shipCppDetails) {
   const result = [];
@@ -1422,9 +1164,7 @@ function buildDamageTypeDetails(damageTypeNames, statusDescriptors, shipCppDetai
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// inferFunctionDisplayScale (unchanged)
-// ---------------------------------------------------------------------------
+// a function's display scale from its formula
 
 function inferFunctionDisplayScale(attributesRead, attrDict, formula, fnName) {
   const primaryMultipliers = [];
@@ -1445,6 +1185,7 @@ function inferFunctionDisplayScale(attributesRead, attrDict, formula, fnName) {
   return { displayScale: scale, displayUnit: unit, labelPrefix };
 }
 
+// display scales for ship functions
 function annotateShipFunctionScales(shipFns, attrs) {
   for (const [fnName, fnData] of Object.entries(shipFns)) {
     if (!fnData) continue;
@@ -1463,20 +1204,11 @@ function annotateShipFunctionScales(shipFns, attrs) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// NEW: deriveMovementSystem(shipFns)
-//
-// See the header comment at the top of this file for the full rationale.
-// Summary: build a call graph purely from formula text already present in
-// shipFns, seed it with the three functions that exist ONLY for motion
-// physics (InertialMass, Drag, DragForce), and take the reverse-reachable
-// closure — every function that calls one of those, directly or through a
-// chain of other ship-function calls. The attributes referenced anywhere
-// in that closure are the ship-movement-relevant attribute set.
-// ---------------------------------------------------------------------------
+// ── the movement system: every attribute motion depends on ──
 
 const MOVEMENT_SEED_FUNCTIONS = ['InertialMass', 'Drag', 'DragForce'];
 
+// functions a formula calls
 function _extractFnCalls(text, knownFnNames) {
   const calls = new Set();
   if (!text) return calls;
@@ -1488,14 +1220,11 @@ function _extractFnCalls(text, knownFnNames) {
   return calls;
 }
 
+// the movement system
 function deriveMovementSystem(shipFns) {
   const fnNames = new Set(Object.keys(shipFns));
 
-  // 1. Build the call graph: fnName -> Set(calleeNames), scanning every
-  //    formula string and every attributeVariable definition for
-  //    "OtherFunction()" references that are themselves known ship
-  //    functions. Nothing here is a hardcoded name — it's pattern-matched
-  //    against the actual set of parsed function names.
+  // 1. who calls whom
   const callGraph = {};
   for (const [fnName, fnData] of Object.entries(shipFns)) {
     const callees = new Set();
@@ -1528,11 +1257,7 @@ function deriveMovementSystem(shipFns) {
     }
   }
 
-  // 4. Collect every attribute referenced anywhere in that closure —
-  //    both from attributesRead (already extracted by the seed-file
-  //    parsers) and by re-scanning formula text directly for "[attr]"
-  //    references, so nothing is missed even if attributesRead happened
-  //    to come back empty for a given function.
+  // 4. every attribute reached from movement
   const movementAttrs = new Set();
   for (const fnName of movementFns) {
     const fnData = shipFns[fnName];
@@ -1562,9 +1287,7 @@ function deriveMovementSystem(shipFns) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// buildAttributeDictionary (unchanged aside from the new movement tagging)
-// ---------------------------------------------------------------------------
+// display unit for an attribute
 
 function deriveDisplayUnit(multiplier) {
   if (multiplier === 60)   return '/s';
@@ -1574,6 +1297,7 @@ function deriveDisplayUnit(multiplier) {
   return '';
 }
 
+// the dictionary
 function buildAttributeDictionary(oidData, shipFns, shipDisplay, outfitStacking, weaponData, jumpNavFns, statusEffectDecay) {
   const attrs  = {};
   const ensure = key => { if (!attrs[key]) attrs[key] = { key }; return attrs[key]; };
@@ -1652,9 +1376,7 @@ function buildAttributeDictionary(oidData, shipFns, shipDisplay, outfitStacking,
   return attrs;
 }
 
-// ---------------------------------------------------------------------------
-// buildAttributeDictionary_withDmgTypes (unchanged)
-// ---------------------------------------------------------------------------
+// the dictionary, with damage types
 
 function buildAttributeDictionary_withDmgTypes(
     oidData, shipFns, shipDisplay, outfitStacking, weaponData, jumpNavFns,
@@ -1692,17 +1414,7 @@ function buildAttributeDictionary_withDmgTypes(
   return attrs;
 }
 
-// ---------------------------------------------------------------------------
-// NEW: mergeDiscoveredSystemsIntoAttributes(attrs, otherSystems)
-//
-// Walks every class/function found by the generic discovery pass and:
-//   - creates a bare dictionary entry for any attribute key that ISN'T
-//     already known (tagged discoveredOnly: true) — these are exactly the
-//     attributes the old hardcoded-file-list approach would have silently
-//     missed entirely.
-//   - tags every attribute (known or new) with usedInOtherSystems so you
-//     can see every class/function outside Ship/Outfit/Weapon that reads it.
-// ---------------------------------------------------------------------------
+// add the discovered source files' findings
 
 function mergeDiscoveredSystemsIntoAttributes(attrs, otherSystems) {
   const newlyDiscovered = new Set();
@@ -1728,17 +1440,7 @@ function mergeDiscoveredSystemsIntoAttributes(attrs, otherSystems) {
   return [...newlyDiscovered].sort();
 }
 
-// ---------------------------------------------------------------------------
-// NEW: mergeDataUsageIntoAttributes(attrs, perKey)
-//
-// The data/-side counterpart to mergeDiscoveredSystemsIntoAttributes above.
-// Same additive philosophy: existing entries just gain new fields; keys
-// found ONLY here (never touched by any source-code layer) get a bare
-// entry created on the spot, tagged `dataOnly: true`. A key ending up with
-// dataOnly still set at classification time means it has real usage in
-// shipped content but zero corresponding C++ logic anywhere — the
-// "Custom / Modder-Defined" case from attribute-area-classification.md §5.3.
-// ---------------------------------------------------------------------------
+// add what the game's data/ files use
 
 function mergeDataUsageIntoAttributes(attrs, perKey) {
   const newlyDiscovered = new Set();
@@ -1756,23 +1458,7 @@ function mergeDataUsageIntoAttributes(attrs, perKey) {
   return [...newlyDiscovered].sort();
 }
 
-// ---------------------------------------------------------------------------
-// NEW: deriveGameRules(sources)
-//
-// Game rules the website needs that aren't attributes, read straight from
-// the engine source so they follow game updates instead of being typed into
-// the front end:
-//
-//   derivedConditions — every condition the game computes instead of storing
-//     (PlayerInfo.cpp / AI.cpp: conditions["x"].ProvideNamed / ProvidePrefixed).
-//     The mission helper treats these as "can't know from the save" unless it
-//     knows how to work one out itself.
-//   universeChanges   — keys whose first un-prefixed line in an event REPLACES
-//     the list instead of adding to it (System::Load / Planet::Load
-//     `shouldOverwrite`). Used to replay a save's story changes on the map.
-//   trade             — commodity price model (System::Price::Update):
-//     price = base + trunc(priceScale · erf(supply / supplyLimit)).
-// ---------------------------------------------------------------------------
+// game rules the site needs (overwrite keys, decay, …)
 function deriveGameRules(sources) {
   const rules = { derivedConditions: { named: [], prefixed: [], sources: [] }, universeChanges: {}, trade: {} };
 
@@ -1812,49 +1498,12 @@ function deriveGameRules(sources) {
   return rules;
 }
 
-// ---------------------------------------------------------------------------
-// NEW: deriveShipRequirements(attrs, shipCppSrc, shipCoverage)
-//
-// Answers "must this attribute be present on a ship?" and tags each
-// attribute with `shipRequirement` so the ship builder can lock it.
-// Two independent evidence sources, no hardcoded attribute names:
-//
-//   1. ENGINE ENFORCEMENT — parsed from Ship::FinishLoading(), the block
-//      the source itself comments as "Issue warnings if this ship ... is
-//      missing required values or has negative ... capacity":
-//        - `if(attributes.Get("X") <= 0.) { warning ...; Set("X", N); }`
-//          → X is REQUIRED, must be > 0, engine falls back to N.
-//        - `for(attr : set<string>{"a","b"}) if(Get(attr) < 0) warning`
-//          → each key must be ≥ 0 (min constraint only; missing = 0 is legal).
-//        - `baseAttributes.Set("X", <non-literal expr>)`
-//          → X is ENGINE-DERIVED (e.g. gun ports from hardpoints). The
-//            builder must never require the user to type it.
-//
-//   2. DATA COVERAGE — fraction of base-game ship definitions that set the
-//      key (dataFolderScanner aggregateShipCoverage). Covers things the
-//      engine uses without a warning (mass is a divisor in TurnRate /
-//      Acceleration, hull 0 means no durability, category decides the
-//      shipyard tab and whether bays can carry it, ...).
-//        coverage ≥ REQUIRED_COVERAGE     → required
-//        coverage ≥ RECOMMENDED_COVERAGE  → recommended
-//      Thresholds are the only tunables. Real ships that legitimately omit
-//      a "recommended" key exist (e.g. sail ships with no engine capacity,
-//      drones with no bunks), which is exactly why they aren't locked.
-//
-// Output on each affected attribute:
-//   shipRequirement: {
-//     level: 'required' | 'recommended' | 'engineDerived',
-//     reasons: [...human-readable evidence...],
-//     coverage: 0..1 | null,
-//     min: number | undefined, minExclusive: bool | undefined,
-//     engineDefault: number | undefined,
-//   }
-// plus flat conveniences isRequiredOnShip / isRecommendedOnShip.
-// ---------------------------------------------------------------------------
+// ── required ship attributes (from FinishLoading) ──
 
 const REQUIRED_COVERAGE    = 0.98;
 const RECOMMENDED_COVERAGE = 0.80;
 
+// FinishLoading requirements
 function parseFinishLoadingRequirements(shipCppSrc) {
   const result = { required: {}, nonNegative: new Set(), derived: {} };
   if (!shipCppSrc) return result;
@@ -1895,6 +1544,7 @@ function parseFinishLoadingRequirements(shipCppSrc) {
   return result;
 }
 
+// required ship attributes
 function deriveShipRequirements(attrs, shipCppSrc, shipCoverage) {
   const engine   = parseFinishLoadingRequirements(shipCppSrc);
   const total    = shipCoverage?.baseShipCount || 0;
@@ -1954,31 +1604,7 @@ function deriveShipRequirements(attrs, shipCppSrc, shipCoverage) {
   return summary;
 }
 
-// ---------------------------------------------------------------------------
-// NEW: deriveFrontendArea(attrs, categoryAreaHints)
-//
-// Implements attribute-area-classification.md §3's priority list verbatim,
-// PLUS the category-co-occurrence signal from §5/§6 slotted in as priority
-// 0 (per the doc's own note that it "could sit above Layers 1-3" — it's
-// evidence of what an attribute is actually FOR in shipped content, the
-// strongest signal available). Rule 9 ("Uncategorized / Needs Review") is
-// intentionally OMITTED per project decision — unmatched attributes simply
-// end up with area: null, and the front end's own final fallback (see
-// AttributeSections.js) owns them from there.
-//
-// Every attribute gets:
-//   - area        — the single primary bucket: the first rule (in order)
-//                    that matched, or null if nothing did.
-//   - areaBadges  — every OTHER rule that also matched but didn't win
-//                    primary (dual-role attributes, e.g. "turn": Movement
-//                    primary, Weapons badge).
-//
-// This is a coarse ~10-bucket taxonomy for front ends that want "which
-// broad category" without re-deriving it from the flag soup themselves.
-// It does NOT replace the finer-grained classification AttributeSections.js
-// already does from the same underlying flags — see that file's own notes
-// on how the two are combined.
-// ---------------------------------------------------------------------------
+// ── frontend area (rough grouping) ──
 
 const AREA = {
   STATUS:         'Status Effects',
@@ -1994,12 +1620,10 @@ const AREA = {
   CUSTOM:         'Custom / Modder-Defined',
 };
 
-// §3 rule 6's "shield/hull/energy/fuel/heat generation-consumption
-// pattern" — a substring test against the key itself, same style as every
-// other name-pattern check in this codebase (e.g. AttributeSections.js's
-// DOMAIN_WORDS).
+// generation/consumption pattern
 const POWER_LIFE_SUPPORT_PATTERN = /shield|hull|energy|fuel|heat/i;
 
+// rough area
 function deriveFrontendArea(attrs, categoryAreaHints) {
   categoryAreaHints = categoryAreaHints || {};
   const areaCounts = {};
@@ -2025,10 +1649,7 @@ function deriveFrontendArea(attrs, categoryAreaHints) {
     if (!area && isStatusish) area = AREA.STATUS;
     else if (isStatusish) badges.add(AREA.STATUS);
 
-    // 2. Weapons — wins primary only when NOT also movement-relevant
-    // (a pure weapon-data key like "shield damage" has no movement role
-    // and takes this directly; "turn" is both, and Movement — rule 3 —
-    // takes primary instead, with Weapons demoted to a badge).
+    // weapons, unless also movement
     const isWeaponish = !!(a.isWeaponDataKey || a.isWeaponStat);
     if (!area && isWeaponish && !a.isMovementRelevant) area = AREA.WEAPONS;
     else if (isWeaponish) badges.add(AREA.WEAPONS);
@@ -2069,10 +1690,7 @@ function deriveFrontendArea(attrs, categoryAreaHints) {
       else if (a.shownInShipPanel)  area = AREA.GENERAL_SHIP;
     }
 
-    // Custom / Modder-Defined (§5.3) — real data/ usage, zero source-code
-    // signal of any kind. `dataOnly` already means exactly that: it's only
-    // ever set at creation time, when a key from the data/ scan didn't
-    // already have a dictionary entry from any prior (source-derived) pass.
+    // custom attributes (only seen in data)
     if (!area && a.dataOnly) area = AREA.CUSTOM;
 
     if (!area) uncategorizedCount++;
@@ -2086,7 +1704,7 @@ function deriveFrontendArea(attrs, categoryAreaHints) {
   return { areaCounts, uncategorizedCount };
 }
 
-// ---------------------------------------------------------------------------
+// the whole run. Called by: parser.js
 
 async function parseAttributes(outputDir, cliOpts = {}) {
   const outDir  = outputDir || path.join(process.cwd(), 'data');
@@ -2195,10 +1813,7 @@ async function parseAttributes(outputDir, cliOpts = {}) {
     statusEffectDecay, damageTypeDetails
   );
 
-  // Pull the stashed movement-system summary out of the attrs object (it
-  // was stored there temporarily so buildAttributeDictionary could tag
-  // attributes without needing an extra return value threaded through
-  // buildAttributeDictionary_withDmgTypes too).
+  // movement summary, stored on the attrs object
   const movementSystem = attributes.__movementSystem;
   delete attributes.__movementSystem;
   console.log(`  Movement system    ${movementSystem.functions.length} ship functions, ` +
@@ -2210,7 +1825,7 @@ async function parseAttributes(outputDir, cliOpts = {}) {
   console.log(`  Tooltips merged    ${tipsMatched} / ${Object.keys(attributes).length} attributes matched`);
   console.log(`\n  Unified dictionary (seed files only): ${Object.keys(attributes).length} unique attribute keys`);
 
-  // ── NEW: discovery phase — scan the ENTIRE source/ tree ──────────────────
+  // discovery: scan the whole source tree
   console.log('\n  Discovering attribute usage across the full codebase...');
   const discovery = await discoverRelevantSourceFiles(discoveryCacheFile, {
     forceRescan: !!cliOpts.rescan,
@@ -2257,7 +1872,7 @@ async function parseAttributes(outputDir, cliOpts = {}) {
 
   console.log(`\n  Unified dictionary (seed + discovered): ${Object.keys(attributes).length} unique attribute keys`);
 
-  // ── NEW: data/ usage scan — evidence from shipped CONTENT, not source ────
+  // data/ usage: evidence from the game's content
   console.log('\n  Scanning data/ for actual attribute usage in outfit/ship blocks...');
   const dataUsageCacheFile = path.join(outDir, 'dataFolderUsage.json');
   const dataScan = await scanDataFolderUsage(dataUsageCacheFile, { forceRescan: !!cliOpts.rescan });
@@ -2271,13 +1886,13 @@ async function parseAttributes(outputDir, cliOpts = {}) {
     console.log('     ' + dataOnlyKeys.slice(0, 20).join(', ') + (dataOnlyKeys.length > 20 ? ', …' : ''));
   }
 
-  // ── NEW: non-attribute game rules the front end needs ───────────────────
+  // game rules
   const gameRules = deriveGameRules(sources);
   console.log(`\n  Game rules         ${gameRules.derivedConditions.named.length + gameRules.derivedConditions.prefixed.length} derived conditions, ` +
     `${(gameRules.universeChanges.systemOverwriteKeys || []).length}/${(gameRules.universeChanges.planetOverwriteKeys || []).length} overwrite keys, ` +
     `trade model ${gameRules.trade.priceScale !== undefined ? 'found' : 'NOT found'}`);
 
-  // ── NEW: which attributes must be present on a ship ──────────────────────
+  // required attributes
   const shipRequirements = deriveShipRequirements(attributes, sources.shipCpp, dataScan.shipCoverage);
   console.log(`\n  Ship requirements  required: ${shipRequirements.required.join(', ') || '(none)'}`);
   console.log(`                     recommended: ${shipRequirements.recommended.join(', ') || '(none)'}`);
@@ -2445,9 +2060,7 @@ async function parseAttributes(outputDir, cliOpts = {}) {
     navigation: jumpNavFns,
   };
 
-  // No JSON file by default — parser.js takes the returned object and
-  // syncs it straight into Supabase (attributeSync.js). Pass
-  // { writeFile: true } (CLI: --write) to dump a local copy for debugging.
+  // no JSON file by default — parser.js syncs it to Supabase
   if (cliOpts.writeFile) {
     await fs.writeFile(outFile, JSON.stringify(result, null, 2), 'utf8');
     console.log(`\n✓  Written → ${outFile}`);

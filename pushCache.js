@@ -1,28 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  pushCache.js — remembers what the last successful parse pushed, so the
-//  next run only sends what changed.
-//
-//  A content hash of every row (and of every parent's junction rows) is
-//  kept in .parse-cache/pushed.json, which the workflow saves and restores
-//  with actions/cache. On the next run:
-//    • rows whose hash is unchanged aren't upserted again,
-//    • junction rows (ship_outfits, planet_shipyards, system_links, …) are
-//      only rebuilt for parents whose junction content changed,
-//    • the attribute parser is skipped when the game's commit and the
-//      parser code are both unchanged.
-//
-//  Safety:
-//    • The cache is tied to a hash of the parser's own code — change any
-//      parser file and the next run is a full push.
-//    • PARSE_FULL=1 (the workflow's "full refresh" option) ignores it.
-//    • Before trusting a table's cache, the table's row count in Supabase is
-//      compared with what the cache says was pushed; if rows have gone
-//      missing (a restore, manual deletes, a new database), that table is
-//      pushed in full.
-//    • The cache is only written after every write succeeded.
-// ═══════════════════════════════════════════════════════════════════════════
+// Remembers what each parser run sent to Supabase, so the next run only sends what changed (stored in the Actions cache).
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -31,13 +9,14 @@ const path = require('path');
 const CACHE_VERSION = 1;
 const hash = v => crypto.createHash('sha1').update(typeof v === 'string' ? v : JSON.stringify(v)).digest('base64').slice(0, 22);
 
-// Stable stringify: same content → same text regardless of key order.
+// same content → same text, whatever the key order
 function stable(v) {
   if (Array.isArray(v)) return '[' + v.map(stable).join(',') + ']';
   if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}';
   return JSON.stringify(v === undefined ? null : v);
 }
 
+// hash of the parser code
 function codeHash(files) {
   const h = crypto.createHash('sha1');
   for (const f of files) { try { h.update(f + '\0' + fs.readFileSync(f)); } catch (_) { h.update(f + '\0missing'); } }
@@ -65,7 +44,7 @@ class PushCache {
 
   get usable() { return this.reason === null; }
 
-  /** Trust a table's cache only if Supabase still has at least as many rows as were pushed. */
+  // trust a table's cache only if Supabase still has the rows
   async verify(supabase, tables) {
     if (!this.usable) return;
     await Promise.all(tables.map(async t => {
@@ -79,10 +58,7 @@ class PushCache {
     }));
   }
 
-  /**
-   * Split rows into the ones that need pushing and the count that don't.
-   * Records the new hashes (committed only at the end).
-   */
+  // rows that need sending, and how many don't
   diff(table, rows, keyOf) {
     const prev = this.trusted.has(table) ? (this.state.tables[table] || {}) : {};
     const next = this.candidate[table] = {};
@@ -96,8 +72,7 @@ class PushCache {
     return { changed, skipped: rows.length - changed.length };
   }
 
-  /** For junction tables: which parents' child rows changed. `childrenOf(parentKey)` → plain data. */
-  /** Forget what was pushed for this junction cache, so every parent is rebuilt. */
+  // for junction tables: whose child rows changed
   distrust(table) { (this.distrusted = this.distrusted || new Set()).add(table); }
 
   changedParents(table, parentTable, parentKeys, childrenOf) {
@@ -114,7 +89,7 @@ class PushCache {
     return out;
   }
 
-  /** Call once a table's writes have succeeded; only then is its new state remembered. */
+  // remember the new state once writes succeed
   accept(...tables) { for (const t of tables) if (this.candidate[t]) { this.pending[t] = this.candidate[t]; delete this.candidate[t]; } }
 
   meta(key) { return this.usable ? this.state.meta[key] : undefined; }

@@ -1,69 +1,12 @@
 'use strict';
 
-// ---------------------------------------------------------------------------
-// LocationResolver
-//
-// Collects raw game-data references during parsing and resolves them into a
-// per-entity "Locations" block grouped by plugin and then by category
-// (Planets / Systems).
-//
-// Output shape attached to each ship / variant / outfit:
-//
-//   locations: {
-//     "Endless Sky": {
-//       Planets: ["Earth", "Poisonwood"],
-//       Systems: ["Sol", "Betelgeuse"],
-//       EventFleetChanges: ["..."],        ← NEW, see below
-//       TriggeredByMissionEvents: ["..."], ← NEW, see below
-//       Persons: ["Cap'n Pester"]          ← NEW, see below
-//     },
-//     "my-plugin": {
-//       Planets: ["New Hope"],
-//       Systems: ["Alpha Centauri"]
-//     }
-//   }
-//
-// If a ship/outfit is referenced nowhere:
-//   locations: {
-//     "my-plugin": { "_deprecated/unused": true }
-//   }
-//
-// ── CHANGELOG (mission/event parsing pass) ──────────────────────────────────
-//   - Added: collectMissionEventTrigger — records "mission X can trigger
-//     event Y" (from an `event "Y"` action line inside a mission).
-//   - Added: collectEventSystemFleetChange — records "event X adds/removes
-//     fleet Y in system Z" (from a `system "Z"` > `add/remove fleet "Y"`
-//     sub-block inside an event).
-//   - Added: collectEventPlanetOutfitterChange — the outfitter counterpart
-//     to the existing (now generalized) shipyard-add tracking; previously
-//     there was no tracking at all for `add outfitter`/`remove outfitter`.
-//   - Added: collectEventPlanetShipyardChange — a traceable, event-name +
-//     action-tagged sibling to the existing collectEventPlanetShipyardAdd.
-//     collectEventPlanetShipyardAdd is KEPT EXACTLY AS BEFORE (still
-//     unconditionally merges into the base "this planet sells here" data,
-//     since that's how it already behaved) — the new method is purely
-//     additive, for a new "EventFleetChanges"-style traceability category,
-//     and does not change any existing resolution behavior.
-//   - Added: two new output categories on ship/outfit location results —
-//     "EventFleetChanges" (which events add/remove this ship's fleet from
-//     which systems) and "TriggeredByMissionEvents" (which of the missions
-//     already listed under "Missions" are known to trigger an event, and
-//     which event).
-//   - NEW (person-block pass): collectPerson / collectPersonSystem — the
-//     location-side counterpart to SpeciesResolver.collectPerson. Records
-//     which `person "X"` blocks a ship belongs to, and which system(s) (if
-//     any — persons.txt entries often use a `system "X"` line to restrict
-//     where a unique ship spawns) that person is tied to. Surfaced as a
-//     new "Persons" category on the ship's location output, and any known
-//     system is merged into the existing "Systems" set the same way a
-//     fleet's spawn systems already are.
-// ─────────────────────────────────────────────────────────────────────────
+// Works out where every ship and outfit can be found (shipyards, outfitters, fleets, missions, events) per plugin. Used by parser.js.
 
 class LocationResolver {
   constructor() { this.reset(); }
 
   reset() {
-    // ── Raw data stores ──────────────────────────────────────────────────────
+    // ── what the parser collects ──
 
     // Named fleets: { name, shipNames[], pluginId }
     this.fleets = [];
@@ -95,71 +38,32 @@ class LocationResolver {
     // Mission "give ship" refs: { missionName, shipName, pluginId }
     this.missionGiveShips = [];
 
-    // Mission planet-add shipyard refs: { planetName, yardName, pluginId }
-    // (events / missions can modify planets to add shipyards)
-    // KEPT AS-IS — still unconditional, still what _buildYardToPlanets
-    // merges into the base "this planet sells here" data. See
-    // collectEventPlanetShipyardChange below for the new, traceable,
-    // NON-merged sibling of this.
+    // planets given shipyards by missions
     this.eventPlanetShipyardAdds = [];
 
-    // NEW — { planetName, yardName, action: 'add'|'remove', eventName, pluginId }
-    // Traceable version: every shipyard change an event causes, tagged
-    // with WHICH event caused it and whether it's an add or a remove.
-    // Deliberately NOT merged into planetShipyards/yardToPlanets — unlike
-    // eventPlanetShipyardAdds above, these are surfaced as their own
-    // "EventFleetChanges"-style category rather than folded into the
-    // base "always true" location data, since a remove can't be
-    // expressed as a subtraction from a Set built elsewhere without
-    // assuming an application order this resolver has no way to know.
+    // shipyards added/removed on planets by events
     this.eventPlanetShipyardChanges = [];
 
-    // NEW — { planetName, outfitterName, action: 'add'|'remove', eventName, pluginId }
-    // Outfitter counterpart to eventPlanetShipyardChanges. 'add' actions
-    // ALSO feed into _buildOutfitterToPlanets (see below) the same way
-    // eventPlanetShipyardAdds feeds _buildYardToPlanets — there was
-    // previously no equivalent tracking for outfitters at all.
+    // outfitters added/removed on planets by events
     this.eventPlanetOutfitterChanges = [];
 
-    // NEW — { eventName, systemName, fleetName, action: 'add'|'remove', rate, pluginId }
-    // "Event X adds/removes fleet Y in system Z" — the raw half of the
-    // event → fleet → government join (the other half, fleet → government,
-    // lives in SpeciesResolver.fleets; EndlessSkyParser.
-    // resolveEventGovernmentImpact() does the actual join).
+    // fleets added/removed in systems by events
     this.eventSystemFleetChanges = [];
 
-    // NEW — { missionName, eventName, pluginId }
-    // "Mission X can trigger event Y" (from an `event "Y"` action line
-    // inside the mission's on offer/on accept/on complete/etc body).
+    // mission X can trigger event Y
     this.missionEventTriggers = [];
 
-    // NEW — { personName, shipName, pluginId }
-    // "person X" block includes ship Y". The location-side counterpart of
-    // SpeciesResolver.persons.
+    // person X flies ship Y
     this.personShips = [];
 
-    // NEW — { personName, systemName, pluginId }
-    // "person X" is restricted to spawning in system Y (from a `system
-    // "Y"` line inside the person block). A person may have zero, one, or
-    // (rarely) more than one system line; all are recorded.
+    // person X only appears in system Z
     this.personSystems = [];
 
-    // Ships and their outfit lists: { shipName, outfitName, pluginId, shipPluginId }
-    // NOTE: `pluginId` here is the plugin that OWNS the outfit being carried
-    // (resolved via _resolveOutfitPluginId at collection time / backfilled by
-    // resolveAllOutfitPluginIds afterwards) — NOT the plugin the ship itself
-    // belongs to. This distinction is what lets outfit-location resolution
-    // correctly scope "which ships carry MY outfit" vs. "which ships carry
-    // a same-named outfit from some other plugin".
-    //
-    // `shipPluginId` is the plugin that OWNS the ship/variant itself. This is
-    // what must be used when filing a carrying-ship under a plugin key in the
-    // output — using `pluginId` (the outfit's plugin) there would mislabel
-    // ships that live in a different plugin than the outfit they carry.
+    // ships and the outfits they carry
     this.shipOutfitRefs = [];
   }
 
-  // ── Collectors (called from parser) ─────────────────────────────────────────
+  // ── collectors (called by parser.js) ──
 
   collectFleet(fleetName, shipNames, pluginId) {
     if (!fleetName) return;
@@ -212,7 +116,7 @@ class LocationResolver {
     this.eventPlanetShipyardAdds.push({ planetName, yardName, pluginId: pluginId ?? null });
   }
 
-  // NEW
+  // event changes a planet's shipyard
   collectEventPlanetShipyardChange(planetName, yardName, action, eventName, pluginId) {
     if (!planetName || !yardName || !action) return;
     this.eventPlanetShipyardChanges.push({
@@ -220,7 +124,7 @@ class LocationResolver {
     });
   }
 
-  // NEW
+  // event changes a planet's outfitter
   collectEventPlanetOutfitterChange(planetName, outfitterName, action, eventName, pluginId) {
     if (!planetName || !outfitterName || !action) return;
     this.eventPlanetOutfitterChanges.push({
@@ -228,7 +132,7 @@ class LocationResolver {
     });
   }
 
-  // NEW
+  // event changes a system's fleets
   collectEventSystemFleetChange(eventName, systemName, fleetName, action, rate, pluginId) {
     if (!eventName || !systemName || !fleetName || !action) return;
     this.eventSystemFleetChanges.push({
@@ -236,35 +140,25 @@ class LocationResolver {
     });
   }
 
-  // NEW
+  // mission triggers event
   collectMissionEventTrigger(missionName, eventName, pluginId) {
     if (!missionName || !eventName) return;
     this.missionEventTriggers.push({ missionName, eventName, pluginId: pluginId ?? null });
   }
 
-  /**
-   * NEW. Records that a `person "X"` block includes ship `shipName`.
-   * Called once per ship in the person block (see parser.js
-   * parsePersonBlock), mirroring collectMissionNpcShip's shape/behavior.
-   */
+  // person flies a ship
   collectPerson(personName, shipName, pluginId) {
     if (!personName || !shipName) return;
     this.personShips.push({ personName, shipName, pluginId: pluginId ?? null });
   }
 
-  /**
-   * NEW. Records that person `personName` is tied to `systemName` (from a
-   * `system "X"` line inside the person block). Not every person has one —
-   * plenty roam freely with no system restriction — so this simply isn't
-   * called for those.
-   */
+  // person tied to a system
   collectPersonSystem(personName, systemName, pluginId) {
     if (!personName || !systemName) return;
     this.personSystems.push({ personName, systemName, pluginId: pluginId ?? null });
   }
 
-  // `pluginId` = the plugin that owns the OUTFIT being carried.
-  // `shipPluginId` = the plugin that owns the SHIP/variant carrying it.
+  // ship carries an outfit (plugin = the outfit's)
   collectShipOutfit(shipName, outfitName, pluginId, shipPluginId) {
     if (!shipName || !outfitName) return;
     this.shipOutfitRefs.push({
@@ -275,7 +169,7 @@ class LocationResolver {
     });
   }
 
-  // ── Internal helpers ─────────────────────────────────────────────────────────
+  // ── helpers ──
 
   _buildPlanetToSystems() {
     const map = new Map();
@@ -336,9 +230,7 @@ class LocationResolver {
     for (const { planetName, outfitterNames, pluginId } of this.planetOutfitters)
       for (const o of outfitterNames) add(o, planetName, pluginId);
 
-    // NEW — 'add' actions from events feed in the same way
-    // eventPlanetShipyardAdds feeds _buildYardToPlanets. There was
-    // previously no equivalent for outfitters at all.
+    // event 'add' actions count like other shipyards
     for (const { planetName, outfitterName, action, pluginId } of this.eventPlanetOutfitterChanges)
       if (action === 'add') add(outfitterName, planetName, pluginId);
 
@@ -354,21 +246,7 @@ class LocationResolver {
     }
   }
 
-  /**
-   * Merge only the slice of a `name → Map<pluginId, Set<value>>` lookup
-   * that belongs to one specific plugin, instead of every plugin that
-   * happens to share that name.
-   *
-   * Fleet/shipyard/outfitter names are a single global namespace here
-   * (`this.fleets`, `this.shipyards`, `this.outfitters` are all keyed by
-   * name only), so two unrelated plugins that both declare, say, a
-   * `fleet "Merchant Fleet"` or `shipyard "Independent Shipyard"` end up
-   * sharing one bucket in the by-name maps built above. Iterating every
-   * plugin in that bucket (as the code used to) meant Plugin B's spawn
-   * systems / sale planets would silently attach to Plugin A's fleet/yard
-   * match, and vice versa. Restricting to `pluginId` keeps each plugin's
-   * same-named declaration isolated from every other plugin's.
-   */
+  // merge only this plugin's slice
   _mergeOwnPluginOnly(result, byPluginMap, category, pluginId) {
     if (!byPluginMap) return;
     const key = pluginId ?? '__unknown__';
@@ -379,12 +257,7 @@ class LocationResolver {
     for (const v of values) result[key][category].add(v);
   }
 
-  /**
-   * NEW helper. Formats event-driven fleet changes for a given fleet name
-   * into human-readable strings, and merges them under `category` for the
-   * fleet's own plugin — matching the string-Set output convention every
-   * other category in this file already uses (Planets/Systems/Missions/...).
-   */
+  // event fleet changes, formatted
   _mergeEventFleetChanges(result, fleetName, fleetPluginId, category) {
     const matches = this.eventSystemFleetChanges.filter(c => c.fleetName === fleetName);
     if (!matches.length) return;
@@ -399,13 +272,7 @@ class LocationResolver {
     }
   }
 
-  /**
-   * NEW helper. For every mission name already recorded under a "Missions"
-   * category, checks whether that mission is known to trigger an event
-   * (missionEventTriggers) and, if so, records it under a separate
-   * "TriggeredByMissionEvents" category — additive, doesn't change the
-   * existing "Missions" Set's shape.
-   */
+  // events a mission can trigger
   _mergeMissionEventTriggers(result, missionNamesByPlugin, category) {
     for (const [pluginId, missionNames] of missionNamesByPlugin) {
       for (const missionName of missionNames) {
@@ -423,13 +290,7 @@ class LocationResolver {
     }
   }
 
-  /**
-   * NEW helper. For every `person "X"` block that includes `shipName`
-   * (scoped to `ownerPluginId`, same rule as every other exact-name match
-   * in this file), records the person's name under a "Persons" category
-   * and merges any system(s) that person is restricted to into "Systems"
-   * — the same way a fleet's own spawn systems already get merged in.
-   */
+  // persons flying this ship
   _mergePersons(result, shipName, ownerPluginId) {
     for (const ref of this.personShips) {
       if (ref.shipName !== shipName) continue;
@@ -449,18 +310,7 @@ class LocationResolver {
     }
   }
 
-  // ── Cross-plugin references ─────────────────────────────────────────────────
-  //
-  // A shipyard, fleet, person or mission in plugin B can name a ship that
-  // plugin A defines (B doesn't redefine it). In the game that reference
-  // IS plugin A's ship, so it belongs in A's ship's locations. Before this,
-  // every reference was matched only within its own plugin, so e.g. a
-  // mission in plugin B that gives you plugin A's ship never appeared on it.
-  //
-  // `ownerOf(kind, name, fromPluginId)` (set by the parser) answers "which
-  // plugin's definition does a reference from `fromPluginId` use?" — its own
-  // if it defines one, otherwise the highest-priority plugin's. A reference
-  // belongs to an item when that answer is the item's own plugin.
+  // ── references between plugins ──
   setOwnerResolver(fn) { this._ownerOf = typeof fn === 'function' ? fn : null; }
 
   _refersTo(kind, name, refPluginId, ownerPluginId) {
@@ -469,12 +319,9 @@ class LocationResolver {
     return this._ownerOf(kind, name, refPluginId) === ownerPluginId;
   }
 
-  // ── Ship / variant location resolution ──────────────────────────────────────
+  // ── ships ──
 
-  /**
-   * Resolve all location data for a ship or variant.
-   * Matches only on the exact shipName — no base-name fallback whatsoever.
-   */
+  // everything about where a ship can be found
 _resolveShipLocations(shipName, ownerPluginId) {
     const result = {};
     const fleetToSystems  = this._buildFleetToSystems();
@@ -484,6 +331,7 @@ _resolveShipLocations(shipName, ownerPluginId) {
     // Track mission names found for this ship, per plugin, so
     // _mergeMissionEventTriggers can cross-reference them afterwards.
     const missionNamesByPlugin = new Map();
+    // note a mission
     const trackMission = (pluginId, missionName) => {
       const key = pluginId ?? '__unknown__';
       if (!missionNamesByPlugin.has(key)) missionNamesByPlugin.set(key, new Set());
@@ -514,11 +362,7 @@ _resolveShipLocations(shipName, ownerPluginId) {
       if (!result[key]['Planets']) result[key]['Planets'] = new Set();
       for (const planet of planets) {
         result[key]['Planets'].add(planet);
-        // Which system a planet sits in is a physical fact that may
-        // legitimately be declared by a different plugin than the one
-        // selling this ship (e.g. a mod adds a planet/shipyard to the
-        // vanilla system "Sol") — so this lookup is intentionally left
-        // unscoped, unlike the name-keyed fleet/yard/outfitter lookups.
+        // which system a planet is in can come from another plugin
         const sysMap = planetToSystems.get(planet);
         if (sysMap) this._mergeInto(result, sysMap, 'Systems', key);
       }
@@ -555,19 +399,9 @@ _resolveShipLocations(shipName, ownerPluginId) {
     return result;
 }
 
-  // ── Outfit location resolution ───────────────────────────────────────────────
+  // ── outfits ──
 
-  /**
-   * Resolve all location data for an outfit.
-   *
-   * `ownerPluginId` is the plugin that OWNS this specific outfit (i.e. the
-   * outfit object's own `_pluginId`). It is used to scope every ship-carrying
-   * match to refs whose resolved outfit-pluginId matches this outfit — not
-   * just any ref with a matching outfit NAME. Without this scoping, two
-   * different plugins defining a same-named outfit (e.g. both have a
-   * "Blaster") would leak each other's ships into the wrong outfit's
-   * location data.
-   */
+  // everything about where an outfit can be found
   _resolveOutfitLocations(outfitName, ownerPluginId) {
     const result = {};
     const outfitterToPlanets = this._buildOutfitterToPlanets();
@@ -576,23 +410,14 @@ _resolveShipLocations(shipName, ownerPluginId) {
     const fleetToSystems     = this._buildFleetToSystems();
 
     const missionNamesByPlugin = new Map();
+    // note a mission
     const trackMission = (pluginId, missionName) => {
       const key = pluginId ?? '__unknown__';
       if (!missionNamesByPlugin.has(key)) missionNamesByPlugin.set(key, new Set());
       missionNamesByPlugin.get(key).add(missionName);
     };
 
-    // ── 1. Outfitter listings → planets ─────────────────────────────────────
-    // NOTE: intentionally NOT scoped to ownerPluginId — an outfitter block in
-    // one plugin can legitimately sell an outfit defined in another plugin
-    // (cross-plugin references by name are a normal pattern here). Scoping
-    // this to ownerPluginId would hide legitimate cross-plugin listings.
-    //
-    // It IS however scoped to `entry.pluginId` (the specific outfitter block
-    // that lists this outfit) rather than every plugin sharing that
-    // outfitter's name — outfitter names ("Free Market", "General Store")
-    // collide across plugins constantly, and two unrelated outfitters with
-    // the same name are not the same shop.
+    // 1. outfitters → planets
     for (const entry of this.outfitterEntries) {
       if (!entry.outfitNames.includes(outfitName)) continue;
 
@@ -628,9 +453,7 @@ _resolveShipLocations(shipName, ownerPluginId) {
       }
     }
 
-    // ── 2. Ships that carry THIS outfit → shipyards → planets → systems ─────
-    // Scoped to ownerPluginId so a same-named outfit from a different plugin
-    // never contributes ships here.
+    // 2. ships carrying it → shipyards → planets → systems
     const shipsWithOutfit = new Set(
       this.shipOutfitRefs
         .filter(r => r.outfitName === outfitName && this._refersTo('outfit', outfitName, r.pluginId, ownerPluginId))
@@ -638,12 +461,7 @@ _resolveShipLocations(shipName, ownerPluginId) {
     );
 
     for (const shipName of shipsWithOutfit) {
-      // Record the ships themselves — re-filtered by ownerPluginId as well,
-      // so a ship carrying two same-named-but-different-plugin outfits only
-      // gets recorded under the outfit that actually matches. Filed under
-      // the SHIP's own plugin (shipPluginId), not the outfit's plugin —
-      // otherwise a ship from a different plugin than the outfit it
-      // carries would get mislabeled under the outfit's plugin.
+      // the ships themselves (same plugin)
       for (const ref of this.shipOutfitRefs) {
         if (ref.outfitName !== outfitName) continue;
         if (ref.shipName !== shipName) continue;
@@ -654,9 +472,7 @@ _resolveShipLocations(shipName, ownerPluginId) {
         result[key]['Ships'].add(shipName);
       }
 
-      // Shipyard path for that ship → planets. Scoped to each shipyard
-      // entry's own plugin — see the note on section 1 above; shipyard
-      // names collide across plugins just as readily as outfitter names.
+      // their shipyards → planets
       for (const yard of this.shipyardEntries) {
         if (!yard.shipNames.includes(shipName)) continue;
         const planetsByPlugin = yardToPlanets.get(yard.yardName);
@@ -679,7 +495,7 @@ _resolveShipLocations(shipName, ownerPluginId) {
       }
     }
 
-    // ── 3. Mission "give outfit" references — scoped to ownerPluginId ───────
+    // 3. missions that give it
     for (const ref of this.missionGiveOutfits) {
       if (ref.outfitName !== outfitName) continue;
       if (!this._refersTo('outfit', outfitName, ref.pluginId, ownerPluginId)) continue;
@@ -697,7 +513,7 @@ _resolveShipLocations(shipName, ownerPluginId) {
     return result;
   }
 
-  // ── Serialisation helper ─────────────────────────────────────────────────────
+  // ── output ──
 
   _finalise(result, pluginName) {
     if (Object.keys(result).length === 0) {
@@ -722,7 +538,7 @@ _resolveShipLocations(shipName, ownerPluginId) {
     return out;
   }
 
-  // ── Public API ───────────────────────────────────────────────────────────────
+  // add locations to every ship and outfit. Called by: parser.js
 
 attachLocations(ships, variants, outfits, pluginName) {
     for (const ship of ships) {

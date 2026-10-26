@@ -1,54 +1,16 @@
-// missionParser.js - Endless Sky mission/job-board DEFINITION parser
-// (plugin-source side only)
-//
-// REWRITE: previously this file used one hand-written regex per field it
-// cared about (cargo, payment, deadline, source/destination, give ship/
-// outfit...) and silently walked past every line that didn't match one of
-// those regexes. That meant conversation text, `choice`/`branch`/`label`/
-// `goto`, `action` blocks, `karma`, `log`, `clearance`, `blocked`, and any
-// future/unknown keyword were parsed into nothing - present in the source
-// file, absent from the output.
-//
-// This version instead walks the mission body generically by INDENTATION
-// ALONE, with no hardcoded list of "known" keywords: every line becomes
-//   { key, values, children }
-// where `key` is the line's first token, `values` is every remaining token
-// on that line (numbers coerced, quoted phrases kept whole - so a line with
-// several values like `event "X" 60 420` keeps ALL of them, not just the
-// first), and `children` is the same shape recursively for whatever is
-// indented one level deeper (or null if nothing is). A bare quoted/backtick
-// dialogue line with no separate keyword (e.g. a conversation text line)
-// becomes its own entry with that text AS the key and empty values - there
-// is no separate "line" or "text" field name used elsewhere, so every
-// single line in the file is captured the exact same shape, however deeply
-// nested, however many values it carries.
-//
-// `mission.raw` holds this complete, nothing-left-out tree. On top of that,
-// this module still derives the same typed/convenient fields as before
-// (cargo, passengers, payment, rewards, source/destination, npc detection,
-// event triggers...) by WALKING `raw` rather than re-scanning text, so nothing
-// needs to be parsed twice and the derived fields can never disagree with
-// what's actually in `raw`.
+// Parses mission definitions (offers, conditions, triggers, rewards) per plugin. Used by parser.js.
 
 'use strict';
 
 const crypto = require('crypto');
 
-// ---------------------------------------------------------------------------
-// Indentation + tokenizing helpers
-// ---------------------------------------------------------------------------
+// indent depth
 
 function indentOf(line) {
   return line.length - line.replace(/^\t+/, '').length;
 }
 
-/**
- * Tokenize one already-trimmed line the way Endless Sky's own data-file
- * reader does: a "..." or `...` or '...' run is ONE token (spaces inside
- * don't split it), everything else splits on whitespace. This is the only
- * place that needs to understand ES syntax - everything above this just
- * consumes whatever tokens come out.
- */
+// split a line like the game does
 function tokenizeESLine(line) {
   const tokens = [];
   let i = 0;
@@ -73,17 +35,13 @@ function tokenizeESLine(line) {
   return tokens;
 }
 
+// token → number
 function coerceToken(tok) {
   if (tok !== '' && /^-?\d+(\.\d+)?$/.test(tok)) return parseFloat(tok);
   return tok;
 }
 
-/**
- * Build the generic { key, values, children } tree for every line at
- * exactly `baseIndent` starting at `startIdx`, recursing into deeper
- * indentation as children. Comment lines (`#...`) and blank lines are
- * skipped entirely (never produce an entry). Returns [entries, nextIndex].
- */
+// { key, values, children } tree
 function parseIndentTree(lines, startIdx, baseIndent) {
   const entries = [];
   let i = startIdx;
@@ -100,9 +58,7 @@ function parseIndentTree(lines, startIdx, baseIndent) {
     const values = tokens.slice(1).map(coerceToken);
     i++;
 
-    // Peek past blank lines to see whether a deeper-indented child block
-    // follows this line (blank lines between a header and its first child,
-    // e.g. before a `label`, are common and must not break the nesting).
+    // is there a deeper block next?
     let k = i;
     while (k < lines.length && !lines[k].trim()) k++;
     let children = null;
@@ -116,10 +72,7 @@ function parseIndentTree(lines, startIdx, baseIndent) {
   return [entries, i];
 }
 
-/** Recursively visit every entry in a tree (entry itself, then its
- *  children, depth-first) - used to find things like `event "X"` or
- *  `payment ...` no matter how deep inside conversation/action/branch
- *  nesting they are. */
+// visit every entry
 function walkAll(entries, visit) {
   if (!entries) return;
   for (const entry of entries) {
@@ -128,14 +81,12 @@ function walkAll(entries, visit) {
   }
 }
 
+// hash of a tree (detects changes)
 function hashTree(entries) {
   return crypto.createHash('sha1').update(JSON.stringify(entries)).digest('hex').slice(0, 12);
 }
 
-/** Named nested-reference shape - { name, count, pluginId, internalId }.
- *  pluginId/internalId start null for anything that may be owned by
- *  ANOTHER plugin (outfits, ships, planets) - filled in later by this
- *  module's resolve*() passes against other parsers' registries. */
+// { name, count, pluginId, internalId } reference
 function namedRef(name, extra = {}) {
   return { name, count: 1, pluginId: null, internalId: null, ...extra };
 }
@@ -145,9 +96,7 @@ const LOCATION_TAGS = new Set([
   'outfitter', 'job board', 'entering', 'transition',
 ]);
 
-// Keys handled explicitly by the typed-field derivation below - everything
-// else at the top level of a mission body falls through into the generic
-// `flags` bag instead of being silently dropped.
+// keys turned into typed fields (the rest stay raw)
 const TOP_LEVEL_HANDLED_KEYS = new Set([
   'name', 'description', 'cargo', 'passengers', 'source', 'destination',
   'stopover', 'waypoint', 'npc', 'on', 'to', 'repeat', 'illegal', 'deadline',
@@ -192,10 +141,7 @@ class EndlessSkyMissionParser {
     return mission;
   }
 
-  // =========================================================================
-  // 1/2/3-number range resolver for `cargo`/`passengers`
-  // (fixed / uniform / negative-binomial).
-  // =========================================================================
+  // "3-5" style ranges
   _resolveRangeSpec(commodity, nums) {
     const clean = nums.filter(n => typeof n === 'number' && !Number.isNaN(n));
     const base = commodity !== null ? { commodity } : {};
@@ -209,10 +155,7 @@ class EndlessSkyMissionParser {
     return { ...base, min: n1, max: null, expected: Math.round(mean), softMax, mode: 'negative-binomial', nbParams: { r, p } };
   }
 
-  // =========================================================================
-  // mission "<name>" ... - parse the header, build the full generic tree
-  // for everything under it, then derive typed fields from that tree.
-  // =========================================================================
+  // one mission block
   parseMissionBlock(lines, i, pluginId) {
     const headerLine = lines[i].trim();
     const nameMatch = headerLine.match(/^mission\s+"([^"]+)"/) || headerLine.match(/^mission\s+`([^`]+)`/);
@@ -326,9 +269,7 @@ class EndlessSkyMissionParser {
       }
 
       if (key === 'to') {
-        // `to offer` / `to complete` / `to fail` / `to accept` / `to display` -
-        // condition sets. Kept as the raw sub-tree, since these are boolean
-        // trees (has/not/or/and/random</>=) that vary arbitrarily in shape.
+        // to offer / complete / fail … conditions
         const condName = values[0] ?? 'unknown';
         mission.conditions[condName] = children || [];
         continue;
@@ -341,11 +282,7 @@ class EndlessSkyMissionParser {
         continue;
       }
 
-      // Anything not explicitly modeled above still isn't dropped - it goes
-      // into the generic flags bag under its own literal key, so `autosave`,
-      // `clearance`, `blocked "..."`, `mark "X"` (repeatable, becomes an
-      // array), `karma ++`, `log "..."`, etc. are all still present in the
-      // output even though this module has no bespoke field for them.
+      // anything else is kept raw, not dropped
       if (!TOP_LEVEL_HANDLED_KEYS.has(key)) {
         const value = children ? children : (values.length === 0 ? true : (values.length === 1 ? values[0] : values));
         if (key in mission.flags) {
@@ -365,12 +302,7 @@ class EndlessSkyMissionParser {
     return { type: 'filter', value: [] };
   }
 
-  /** Walk one `on <trigger>` entry's ENTIRE subtree (conversation, choice,
-   *  branch, label, action - however deep) collecting payment lines, event
-   *  triggers, and give/outfit/ship reward grants that belong to it. Since
-   *  `npc` blocks are always siblings of `on` triggers (never nested inside
-   *  one), this walk naturally never wanders into fleet/ship DEFINITIONS and
-   *  mistakes them for reward grants. */
+  // one `on <trigger>` block → actions, rewards, events
   _deriveTrigger(mission, triggerKey, onEntry) {
     mission.payment.triggers[triggerKey] = mission.payment.triggers[triggerKey] || [];
 
@@ -426,9 +358,7 @@ class EndlessSkyMissionParser {
     });
   }
 
-  // =========================================================================
-  // Registration + collision detection
-  // =========================================================================
+  // same mission name in several plugins
 
   resolveCollisions() {
     this.collisions = [];
@@ -478,11 +408,7 @@ class EndlessSkyMissionParser {
     return pluginId ? pluginId.split('/')[0] : null;
   }
 
-  // =========================================================================
-  // Cross-reference passes - run AFTER every plugin has parsed both missions
-  // AND the entities they reference (ships/outfits via parser.js, planets
-  // via mapParser.js).
-  // =========================================================================
+  // rewards → which plugin's outfit/ship
 
   resolveRewardPluginIds(shipParser) {
     let resolved = 0, missing = 0;
@@ -510,6 +436,7 @@ class EndlessSkyMissionParser {
 
   resolvePlanetRefs(mapParser) {
     let resolved = 0, missing = 0;
+    // one reference
     const resolveOne = (ref) => {
       const planet = mapParser.planets.get(ref.name);
       if (planet) { ref.pluginId = planet._pluginId; ref.internalId = planet._internalId; resolved++; }
@@ -530,9 +457,7 @@ class EndlessSkyMissionParser {
     return { resolved, missing };
   }
 
-  // =========================================================================
-  // Output
-  // =========================================================================
+  // output
 
   toJSON() {
     return this.missions;

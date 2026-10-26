@@ -1,21 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════════════
-//  build/makeBundles.mjs — ready-made data files for faster first visits
-//
-//  Run by Cloudflare as the BUILD COMMAND, just before it deploys the site:
-//      node build/makeBundles.mjs
-//
-//  For every plugin it asks Supabase (with the site's public key — the same
-//  one every visitor's browser uses) for:
-//      catalog   ships, variants, outfits, effects  (get_plugin_catalog)
-//      map       systems, planets, jump links …       (get_plugin_map)
-//      missions  every mission row
-//  and writes them to Display/bundles/, with a manifest.json listing them and
-//  the data version they belong to. The files only exist in the deployment —
-//  they are never committed to the repo.
-//
-//  Never fails the deploy: anything that goes wrong is logged and skipped,
-//  and the site simply loads that data from Supabase as before.
-// ═══════════════════════════════════════════════════════════════════════════
+// Cloudflare build step: makes the ready-made data files (catalog, map, missions per plugin) in Display/bundles. Never fails the deploy.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,9 +16,11 @@ const URL_ = process.env.SUPABASE_URL || (cfg.match(/SUPABASE_URL\s*=\s*'([^']+)
 const KEY = process.env.SUPABASE_ANON_KEY || (cfg.match(/SUPABASE_ANON_KEY\s*=\s*'([^']+)'/) || [])[1];
 const HEADERS = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json', Accept: 'application/json' };
 
+// log line
 const log = (...a) => console.log('[bundles]', ...a);
 const mb = n => (n / 1048576).toFixed(1) + ' MB';
 
+// one Supabase REST request (retries when busy)
 async function request(pathAndQuery, body, tries = 4) {
   for (let attempt = 1; ; attempt++) {
     try {
@@ -53,6 +38,7 @@ async function request(pathAndQuery, body, tries = 4) {
   }
 }
 
+// every row (pages of 1000)
 async function allRows(table, query) {
   const rows = [];
   for (let offset = 0; ; offset += 1000) {
@@ -62,12 +48,9 @@ async function allRows(table, query) {
   }
 }
 
-// ── Table-by-table fallback ──────────────────────────────────────────────
-// Visitors' requests are limited to a few seconds by Supabase. Big plugins
-// can need longer than that to package in one go (error 57014, "canceling
-// statement due to statement timeout"), so if the one-request function
-// fails, build exactly the same answer from ordinary page-by-page requests.
+// ── fallback when the one-request functions time out: same answer, table by table ──
 const eqPlugin = id => `plugin_id=eq.${encodeURIComponent(id)}`;
+// rows for a list of ids (100 at a time)
 async function byIds(table, column, ids, select = '*') {
   const out = [];
   for (let i = 0; i < ids.length; i += 100) {
@@ -76,6 +59,7 @@ async function byIds(table, column, ids, select = '*') {
   }
   return out;
 }
+// a plugin's catalog, table by table
 async function catalogFromTables(pluginId) {
   const [ships, variants, outfits, effects] = await Promise.all(
     ['ships', 'variants', 'outfits', 'effects'].map(t => allRows(t, `select=*&${eqPlugin(pluginId)}&order=id`)));
@@ -89,6 +73,7 @@ async function catalogFromTables(pluginId) {
   return { ships, variants, outfits, effects, ship_outfits, variant_outfits, extra_outfits };
 }
 const MAP_MISSION_COLUMNS = 'id,name,display_name,source_plugin,source,destination,stopovers,waypoints,cargo,passengers,payment,rewards,deadline,illegal,repeatable,repeat_limit,npc_count,has_npc_objective,flags,event_triggers,locations,plugin_id,internal_id';
+// a plugin's map, table by table
 async function mapFromTables(pluginId) {
   const [systems, galaxies, wormholes, planets, stars, governments, missions] = await Promise.all([
     ...['systems', 'galaxies', 'wormholes', 'planets', 'stars', 'governments'].map(t => allRows(t, `select=*&${eqPlugin(pluginId)}&order=id`)),
@@ -105,6 +90,7 @@ async function mapFromTables(pluginId) {
   return out;
 }
 let rpcMissing = false;   // functions not installed: don't keep asking for every plugin
+// the one-request function, else table by table
 async function viaRpcOrTables(fn, args, fallback) {
   if (!rpcMissing) {
     try { return await request(`rpc/${fn}`, args, 1); }
@@ -116,8 +102,7 @@ async function viaRpcOrTables(fn, args, fallback) {
   return fallback();
 }
 
-// Write one file, or several parts if it would be too big for Cloudflare.
-// Every part has the same keys; the site joins the arrays back together.
+// one file, or parts if over Cloudflare's size limit
 function writeBundle(name, data) {
   const json = JSON.stringify(data);
   if (Buffer.byteLength(json) <= MAX_FILE) {
@@ -139,6 +124,7 @@ function writeBundle(name, data) {
   return { files, bytes };
 }
 
+// the whole build. Called by: Cloudflare's build command
 async function main() {
   if (!URL_ || !KEY) { log('No Supabase URL/key found — skipping (the site will load from Supabase).'); return; }
   fs.rmSync(OUT, { recursive: true, force: true });
@@ -155,7 +141,7 @@ async function main() {
   const fingerprints = fpRow?.[0]?.value || {};
   log(`${plugins.length} plugins, data version ${version}${live ? `, live site has files from ${live.version}` : ', no files on the live site yet'}`);
 
-  // Copy a plugin's files from the live site when nothing in it has changed
+  // copy a plugin's files from the live site if nothing in it changed
   async function reuse(p, entry, safe) {
     const old = live && live.plugins && live.plugins[p.output_name];
     const fp = fingerprints[p.plugin_id];

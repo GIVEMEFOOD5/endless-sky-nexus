@@ -1,31 +1,6 @@
 'use strict';
 
-/**
- * attributeSync.js — writes attributeDefinitions.json into the relational
- * attribute tables (see supabase/attribute_tables.sql).
- *
- *   attribute_definitions   one row per attribute key. Common fields get
- *                           their own columns; everything else the parser
- *                           produces (formulas, clampRange, protection info,
- *                           data-usage stats, …) goes in `extra` jsonb so the
- *                           front end can rebuild window.attrDefs losslessly.
- *   attribute_flags         one row per boolean flag that is TRUE
- *                           (isWeaponStat, shownInShipPanel, …).
- *   attribute_area_badges   areaBadges[]
- *   attribute_nav_functions usedInNavFunctions[]
- *   attribute_tooltips      tooltips map (keys are lower-cased, and not every
- *                           tooltip is an attribute — hence no foreign key).
- *   attribute_calculations  every other top-level section of the JSON
- *                           (shipFunctions, weapon, movementSystem, …).
- *
- * The sync is a full mirror: rows that are no longer produced by the parser
- * are deleted, so renamed/removed attributes don't linger. Parent rows are
- * written before child rows (foreign keys), and stale parents are deleted
- * last (the cascade clears their children).
- *
- * Browser-side inverse: rebuildAttrDefsFromTables() in Display/JavaScript/dataLoader.js.
- * If you add a column here, add it there too.
- */
+// Writes the attribute definitions into the attribute_* tables in Supabase. Used by parser.js.
 
 // Attribute fields that live in dedicated columns / child tables.
 // Anything NOT listed here is preserved in `extra`.
@@ -42,16 +17,12 @@ const NON_CALC_SECTIONS = new Set(['attributes', 'tooltips']);
 const LEVEL_TO_DB = { required: 'required', recommended: 'recommended', engineDerived: 'engine_derived' };
 
 const CHUNK = 500;
+// split into chunks
 const chunk = (arr, n = CHUNK) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
 const round2 = v => (v === null || v === undefined || !isFinite(v)) ? null : Math.round(v * 100) / 100;
 const orNull = v => (v === undefined ? null : v);
 
-// ---------------------------------------------------------------------------
-// presence_pct_all — % of ALL parsed base ships (official + every plugin)
-// that set each attribute. Informational only: requiredness is decided from
-// official ships in attributeParser.js so one unusual plugin can't unlock
-// mass/hull for everyone.
-// ---------------------------------------------------------------------------
+// which keys each table should hold
 function computePresenceAll(shipRows) {
   const counts = {};
   let total = 0;
@@ -69,9 +40,7 @@ function computePresenceAll(shipRows) {
   return { total, pct };
 }
 
-// ---------------------------------------------------------------------------
-// Pure: attributeDefinitions.json → table rows
-// ---------------------------------------------------------------------------
+// definitions → table rows
 function attrDefsToRows(attrDefs, { shipRows } = {}) {
   const attributes = attrDefs.attributes || {};
   const presenceAll = computePresenceAll(shipRows);
@@ -126,9 +95,7 @@ function attrDefsToRows(attrDefs, { shipRows } = {}) {
   return { definitions, flags, badges, navFns, tooltips, calculations, presenceAllShipCount: presenceAll.total };
 }
 
-// ---------------------------------------------------------------------------
-// Supabase helpers
-// ---------------------------------------------------------------------------
+// every row of a table
 async function fetchAll(supabase, table, select) {
   let from = 0, rows = [];
   for (;;) {
@@ -141,6 +108,7 @@ async function fetchAll(supabase, table, select) {
   return rows;
 }
 
+// upsert
 async function upsertAll(supabase, table, rows, onConflict, opts = {}) {
   for (const part of chunk(rows)) {
     const { error } = await supabase.from(table).upsert(part, { onConflict, ...opts });
@@ -148,6 +116,7 @@ async function upsertAll(supabase, table, rows, onConflict, opts = {}) {
   }
 }
 
+// delete
 async function deleteIn(supabase, table, column, values) {
   for (const part of chunk(values, 200)) {
     const { error } = await supabase.from(table).delete().in(column, part);
@@ -155,7 +124,7 @@ async function deleteIn(supabase, table, column, values) {
   }
 }
 
-// Child tables: insert new (key, name) pairs, delete pairs that disappeared.
+// child tables: add new pairs, remove old ones
 async function mirrorChild(supabase, table, nameCol, rows) {
   const existing = await fetchAll(supabase, table, `id, attribute_key, ${nameCol}`);
   const want = new Set(rows.map(r => `${r.attribute_key}\u0000${r[nameCol]}`));
@@ -167,6 +136,7 @@ async function mirrorChild(supabase, table, nameCol, rows) {
   return { added: fresh.length, removed: stale.length };
 }
 
+// keyed tables
 async function mirrorKeyed(supabase, table, keyCol, rows) {
   if (rows.length) await upsertAll(supabase, table, rows, keyCol);
   const existing = await fetchAll(supabase, table, keyCol);
@@ -176,9 +146,7 @@ async function mirrorKeyed(supabase, table, keyCol, rows) {
   return { written: rows.length, removed: stale.length };
 }
 
-// ---------------------------------------------------------------------------
-// Public: full sync
-// ---------------------------------------------------------------------------
+// sync every table. Called by: parser.js
 async function syncAttributeTables(supabase, attrDefs, { shipRows } = {}) {
   const rows = attrDefsToRows(attrDefs, { shipRows });
   if (!rows.definitions.length) throw new Error('attributeDefinitions has no attributes — refusing to wipe the tables');

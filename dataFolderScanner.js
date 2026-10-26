@@ -1,59 +1,6 @@
 'use strict';
 
-/**
- * dataFolderScanner.js — Endless Sky data/*.txt attribute-usage scanner
- *
- * Companion to attributeParser.js's source/-tree discovery phase, covering
- * the gap documented in attribute-area-classification.md §5/§6: everything
- * in attributeParser.js is derived from C++ *source* — this file derives
- * evidence from the game's actual shipped *content* (data/**\/*.txt).
- *
- * WHY THIS IS A SEPARATE FILE (not more regexes bolted onto the existing
- * brace-counting extractors): data/*.txt is NOT C++. Per §5.1, the engine's
- * own reader (DataFile.cpp) builds a tree purely from TAB-INDENTATION DEPTH
- * — no { } to balance. Reusing extractFunctionBodies' brace-counter on this
- * format would silently produce garbage. This file implements the small,
- * different thing that format actually needs: an indentation-stack tree
- * builder, tokenizing each line with awareness of "quoted" and `backtick`
- * spans (§5.2) exactly like DataFile.cpp does.
- *
- * WHAT THIS FEEDS BACK INTO THE DICTIONARY (all additive, same philosophy
- * as every other pass in attributeParser.js):
- *   - usedInDataCategories, dataUsageCount, dataValueRange, dataSampleValues
- *     — on every attribute key actually observed inside a real `outfit`/
- *     `ship` block, whether or not it was already known from source.
- *   - dataOnly: true — for keys that ONLY show up here, never in any
- *     source-code layer. Per §5.3, custom attribute keys are an explicitly
- *     supported, open modding feature (e.g. "spinal mount"), not a parser
- *     bug — these are real, first-class attributes with zero corresponding
- *     C++ logic anywhere.
- *   - Category co-occurrence, via deriveCategoryAreaHints() — the strongest
- *     signal available for area classification (§3's own note: "could sit
- *     above Layers 1-3"), because it's evidence of what the attribute is
- *     actually FOR in the shipped game, not an inference about which
- *     engine code path happens to touch it.
- *
- * SCOPE NOTE: only `outfit` and `ship` root blocks are walked (that's what
- * feeds attribute-area classification for ship/outfit stats). §5.5's
- * broader point — that custom attributes can also appear on `mission` and
- * `planet` blocks — is real but out of scope here; the tree-walking
- * primitives below (tokenizeLine/buildTree) are format-agnostic and could
- * be pointed at those block types later without any changes to them.
- *
- * KNOWN SIMPLIFICATIONS (best-effort, like every other regex-based pass in
- * this parser — see attributeParser.js's own Section 4 "Caveats"):
- *   - The excluded-structural-key list below is curated, not exhaustive.
- *     A modder-invented top-level key that happens to share a name with a
- *     real structural field would be silently skipped.
- *   - data/categories.txt (§5.4) is NOT fetched — category strings are
- *     used exactly as observed, whatever they are, tolerating unknown/
- *     custom category names by design rather than validating against a
- *     fixed list.
- *   - `ship` blocks are only recognised when they have a distinct nested
- *     `attributes` child (the standard format); a `category` line is
- *     looked for both inside that `attributes` block and at the ship's
- *     own top level, since both forms have been seen in the wild.
- */
+// Scans the game's data/*.txt files to see which attributes ships and outfits actually use. Used by attributeParser.
 
 const fs   = require('fs').promises;
 const path = require('path');
@@ -61,15 +8,9 @@ const path = require('path');
 const ES_REPO_RAW = 'https://raw.githubusercontent.com/endless-sky/endless-sky/master';
 const ES_API_TREE  = 'https://api.github.com/repos/endless-sky/endless-sky/git/trees/master?recursive=1';
 
-// ---------------------------------------------------------------------------
-// Tokenizer / tree builder — the DataNode-equivalent this format needs.
-// ---------------------------------------------------------------------------
+// ── reading data files ──
 
-// Tokenizes one line per DataFile.cpp's rules (§5.2): a token starting with
-// " or ` runs until its matching close mark (letting values contain spaces);
-// anything else is whitespace-delimited. Depth = count of leading tabs
-// (§5.1 — tabs only, not spaces). Returns null for blank/whitespace-only
-// lines so callers can skip them without special-casing.
+// split a line the way DataFile.cpp does
 function tokenizeLine(rawLine) {
     if (!rawLine) return null;
     let i = 0;
@@ -99,9 +40,7 @@ function tokenizeLine(rawLine) {
     return tokens.length ? { depth, tokens } : null;
 }
 
-// Builds a forest of { tokens, children } nodes from raw file text, using
-// an indentation stack — exactly the "child is one tab deeper than parent"
-// rule §5.1 describes, no braces anywhere.
+// text → { tokens, children } tree
 function buildTree(src) {
     const roots = [];
     const stack = []; // [{ depth, node }], innermost last
@@ -118,15 +57,9 @@ function buildTree(src) {
     return roots;
 }
 
-// ---------------------------------------------------------------------------
-// Attribute-pair extraction from outfit/ship blocks
-// ---------------------------------------------------------------------------
+// ── attribute usage ──
 
-// Root-level directives (§5.6) and structural/identity/rendering fields
-// that are NOT gameplay attribute keys, even though they appear as direct
-// children of an outfit/ship/attributes block just like real attributes do.
-// "weapon" and "attributes" are handled specially (descended into, not
-// skipped) rather than excluded outright.
+// keys that aren't attributes (directives, names, sprites …)
 const NON_ATTRIBUTE_KEYS = new Set([
     'overwrite', 'add', 'remove', 'clear',
     'sprite', 'thumbnail', 'description', 'plural', 'noun', 'swizzle',
@@ -136,13 +69,7 @@ const NON_ATTRIBUTE_KEYS = new Set([
     'leak', 'explode', 'final explode', 'effect', 'sound',
 ]);
 
-// Walks the direct children of a block (an outfit itself, or a ship's
-// nested `attributes` block), recording every "key value" / bare "key"
-// pair that isn't a known structural field. Descends into a nested
-// `weapon` child (same category context — a gun's weapon-block fields like
-// "reload"/damage types are just as relevant to its Weapons classification
-// as its top-level fields) but does not otherwise recurse, since anything
-// else nested (e.g. a ship's `outfits` loadout list) isn't an attribute.
+// attributes in one block
 function scanAttributeBlock(node, category, onType, perKey) {
     for (const child of node.children) {
         const key = child.tokens[0];
@@ -173,12 +100,12 @@ function scanAttributeBlock(node, category, onType, perKey) {
     }
 }
 
+// first child with this key
 function findChild(node, key) {
     return node.children.find(c => c.tokens[0] === key) || null;
 }
 
-// Aggregates attribute usage across every parsed file's forest of root
-// nodes. Only `outfit` and `ship` roots are considered (see file header).
+// usage across every file
 function aggregateDataUsage(fileEntries) {
     const perKey = {};
     for (const { content } of fileEntries) {
@@ -194,10 +121,7 @@ function aggregateDataUsage(fileEntries) {
                 const category = catNode ? catNode.tokens[1] : null;
                 scanAttributeBlock(root, category, 'outfit', perKey);
             } else {
-                // Standard ship format nests real gameplay attributes one
-                // level deeper, under a distinct `attributes` child — a
-                // ship block's OWN direct children (engine/gun/outfits/...)
-                // are positional hardpoint/loadout data, not attributes.
+                // ship attributes sit one level deeper, under `attributes`
                 const attrNode = findChild(root, 'attributes');
                 if (!attrNode) continue;
                 const catNode = findChild(attrNode, 'category') || findChild(root, 'category');
@@ -209,23 +133,7 @@ function aggregateDataUsage(fileEntries) {
     return perKey;
 }
 
-// ---------------------------------------------------------------------------
-// NEW: ship attribute COVERAGE — "how many base ships define this key?"
-//
-// perKey (above) counts every occurrence across outfits AND ships, which
-// can't answer "is this attribute present on essentially every ship?".
-// This pass counts, per key, the number of distinct BASE ship definitions
-// whose `attributes` block contains it. That fraction is the data-side
-// evidence used by attributeParser.js deriveShipRequirements().
-//
-//   - Only base ships count: `ship "Name"` (2 tokens). Variants
-//     (`ship "Base" "Variant"`) inherit their base's attributes, so
-//     counting them would double-weight popular hulls.
-//   - Unlike perKey this DOES record `category` (it's excluded from
-//     NON_ATTRIBUTE_KEYS for area hints, but it matters for requiredness).
-//   - Nested blocks (e.g. `weapon`, `licenses`) are skipped — they are
-//     sub-structures, not scalar ship attributes.
-// ---------------------------------------------------------------------------
+// how many ships have each attribute
 
 function aggregateShipCoverage(fileEntries) {
     const perKey = {};
@@ -250,15 +158,9 @@ function aggregateShipCoverage(fileEntries) {
     return { baseShipCount, perKey };
 }
 
-// ---------------------------------------------------------------------------
-// Category → area hints — the strongest area-classification signal, but
-// only trusted when unambiguous (see module doc above).
-// ---------------------------------------------------------------------------
+// ── category hints ──
 
-// Standard base-game outfit categories only. A category not in this map
-// produces no hint at all — it is NOT forced into a bucket, per §5.3/§5.4:
-// categories are an open, data-driven set (data/categories.txt), and a
-// modder-invented category should never masquerade as evidence.
+// base-game outfit categories only; anything else gives no hint
 const CATEGORY_AREA_MAP = {
     'guns':               'Weapons',
     'turrets':             'Weapons',
@@ -274,10 +176,7 @@ const CATEGORY_AREA_MAP = {
     'hand to hand':         'Special / Flags',
 };
 
-// Only assigns a hint when every category the key was ever observed under
-// maps to the SAME area — a key seen under both a mapped and an unmapped
-// (custom) category, or under two categories implying different areas,
-// gets no hint rather than a guess.
+// a hint only if every category agrees
 function deriveCategoryAreaHints(perKey) {
     const hints = {};
     for (const [key, rec] of Object.entries(perKey)) {
@@ -293,14 +192,11 @@ function deriveCategoryAreaHints(perKey) {
     return hints;
 }
 
-// ---------------------------------------------------------------------------
-// Top-level scan — mirrors discoverRelevantSourceFiles' shape/caching
-// (same 7-day staleness policy, same --rescan override, same disk cache
-// pattern) so the two discovery phases behave identically to operators.
-// ---------------------------------------------------------------------------
+// a scanner sharing attributeParser's fetch budget
 
 function createDataFolderScanner({ fetchText, withPool }) {
 
+    // scan the data folder
     async function scanDataFolderUsage(cacheFile, opts = {}) {
         const maxAgeMs    = opts.maxAgeMs ?? 7 * 24 * 60 * 60 * 1000;
         const forceRescan = !!opts.forceRescan;

@@ -1,57 +1,16 @@
-// mapParser.js - Endless Sky map data parser (galaxy / system / planet / wormhole)
-//
-// Sibling module to parser.js, following the same conventions:
-//   - tab-indent block walking (line.length - line.replace(/^\t+/, '').length)
-//   - bare-or-quoted-or-backtick name matching everywhere a name token can appear
-//   - every top-level entity gets a stable `_pluginId` (the plugin that FIRST
-//     defined it) + `_internalId` (`${_pluginId}::${name}`), mirroring
-//     EndlessSkyParser._registerShip / _registerOutfit in parser.js.
-//   - every NESTED named reference (a link, a shipyard entry, a planet listed
-//     inside a system, a wormhole link pair, a landscape sprite...) is written
-//     as { name, count, pluginId, internalId } instead of a bare string, so
-//     the origin of every individual piece of data is always traceable, not
-//     just the top-level node it lives on.
-//
-// Unlike ships/outfits, systems and planets are routinely EXTENDED by more
-// than one plugin (a plugin adding a `fleet` line or a `trade` price to the
-// vanilla "Sol" system, without redeclaring the whole thing). This module
-// therefore uses an ADDITIVE MERGE model instead of ships/outfits' "pick a
-// winner by source priority" model:
-//   - list-like fields (link, asteroids, minables, trade, fleet, raid,
-//     hazard, object, shipyard, outfitter, belt) -> APPEND, de-duplicated
-//     where duplication is meaningless (e.g. the same system linked twice).
-//   - scalar fields (pos, government, habitable, music, flags...) -> LAST
-//     WRITE WINS. Because parser.js's main() processes `plugins.json`
-//     sources strictly in array order (a plain sequential for-loop, not
-//     concurrent), "last write" during parsing already equals "last in
-//     priority order" - no extra sorting is needed inside the merge itself.
-//   - every merge call still records provenance: `_definedBy` (every plugin
-//     that has ever touched this node) and `_lastModifiedBy` (whichever
-//     plugin most recently changed a scalar field), in addition to the
-//     stable, origin-anchored `_pluginId`/`_internalId` pair.
-//
-// NOT implemented (flagged, not silently skipped - see build-order §8 in
-// mapParser-design.md): a full condition-set evaluator for `to know`/
-// `to land`/`to access`/`to bribe`/`to recharge`/`to service`/`to spawn`.
-// Those bodies are captured verbatim as raw line arrays (`toXxx: [...]`)
-// rather than parsed into a condition tree - this module's job is capturing
-// data, not simulating the game's condition engine.
+// Parses the game's map data (galaxies, systems, planets, wormholes, stars, governments) and merges every plugin's changes. Used by parser.js.
 
 'use strict';
 
 const crypto = require('crypto');
 
-// ---------------------------------------------------------------------------
-// Small local helpers (deliberately duplicated from parser.js rather than
-// required from it, to avoid a circular require - parser.js is the one that
-// requires THIS file, not the other way around).
-// ---------------------------------------------------------------------------
+// indent depth of a line
 
 function indentOf(line) {
   return line.length - line.replace(/^\t+/, '').length;
 }
 
-/** Match `<keyword> <bare-or-"quoted"-or-`backtick`-name>` and return the name, or null. */
+// `keyword "Name"` → Name
 function matchNamedLine(stripped, keyword) {
   const re = new RegExp(`^${keyword}\\s+(?:"([^"]+)"|\`([^\`]+)\`|(\\S+))\\s*$`);
   const m = stripped.match(re);
@@ -59,7 +18,7 @@ function matchNamedLine(stripped, keyword) {
   return m[1] ?? m[2] ?? m[3] ?? null;
 }
 
-/** Same as matchNamedLine but allows trailing tokens (numbers etc) after the name. */
+// same, allowing more tokens after the name
 function matchNamedLinePrefix(stripped, keyword) {
   const re = new RegExp(`^${keyword}\\s+(?:"([^"]+)"|\`([^\`]+)\`|(\\S+))(?:\\s+(.*))?$`);
   const m = stripped.match(re);
@@ -67,6 +26,7 @@ function matchNamedLinePrefix(stripped, keyword) {
   return { name: m[1] ?? m[2] ?? m[3] ?? null, rest: (m[4] || '').trim() };
 }
 
+// skip an indented block
 function skipIndentedBlock(lines, i, baseIndent) {
   i++;
   while (i < lines.length) {
@@ -78,13 +38,7 @@ function skipIndentedBlock(lines, i, baseIndent) {
   return i;
 }
 
-/**
- * Parse a single attribute line into [key, values[]], keeping every numeric
- * token found (handles `arc -90 50`-shaped lines, `belt 4000 3`, etc.) -
- * same technique parser.js's EndlessSkyParser.parseNumericAwareLine uses for
- * weapon blocks; map data has the exact same "N numbers on one line, N
- * varies" shape for belt/visibility/ramscoop children.
- */
+// one attribute line → [key, values]
 function parseNumericAwareLine(stripped) {
   let key, rest;
   const qk = stripped.match(/^"([^"]+)"\s*(.*)$/) ||
@@ -108,10 +62,7 @@ function parseNumericAwareLine(stripped) {
   return [key, [rest]];
 }
 
-/** Generic nested key/value block reader - simplified sibling of parser.js's
- *  parseBlock, used here for `port`, `tribute`, `ramscoop`, `star`,
- *  condition-set bodies, and anything else that's just "an indented bag of
- *  key/value pairs and maybe deeper nesting" without hardpoint/weapon logic. */
+// a nested key/value block
 function parseGenericBlock(lines, startIdx, baseIndent) {
   const data = {};
   let i = startIdx;
@@ -144,10 +95,7 @@ function parseGenericBlock(lines, startIdx, baseIndent) {
   return [data, i];
 }
 
-/** Multi-line, backtick/quote-terminated text block - same shape as ship
- *  `description`, generalised for planet `description`/`spaceport`. Captures
- *  an optional nested `to display` condition-set as raw lines rather than
- *  dropping it. */
+// a multi-line text block (descriptions)
 function parseTextBlock(lines, i, baseIndent, keyword) {
   const stripped = lines[i].trim();
   const single = stripped.match(new RegExp(`^${keyword}\\s+"([^"]*)"$`)) ||
@@ -189,6 +137,7 @@ function parseTextBlock(lines, i, baseIndent, keyword) {
   return [{ text: textLines.join(' '), toDisplay: null }, i];
 }
 
+// attach a description
 function maybeAttachToDisplay(lines, i, baseIndent, text) {
   if (i < lines.length && lines[i].trim() === 'to display' && indentOf(lines[i]) === baseIndent + 1) {
     const toDisplayIndent = indentOf(lines[i]);
@@ -206,16 +155,7 @@ function maybeAttachToDisplay(lines, i, baseIndent, text) {
   return [{ text, toDisplay: null }, i];
 }
 
-// ---------------------------------------------------------------------------
-// Generic indentation tree - a nothing-left-out fallback capture alongside
-// the targeted field parsing above. Every line under `system`/`planet`
-// becomes { key, values, children } (same shape ships/outfits/planets
-// already use for repeated-value lines), so anything not covered by a
-// dedicated regex above (port sub-details, tribute hail text, condition
-// bodies, any keyword this module hasn't been taught yet) still ends up in
-// the node's `raw` field instead of silently vanishing. See missionParser.js
-// for the fuller write-up of why this shape was chosen.
-// ---------------------------------------------------------------------------
+// split a line like the game does (quotes, backticks)
 
 function tokenizeESLine(line) {
   const tokens = [];
@@ -241,11 +181,13 @@ function tokenizeESLine(line) {
   return tokens;
 }
 
+// token → number
 function coerceToken(tok) {
   if (tok !== '' && /^-?\d+(\.\d+)?$/.test(tok)) return parseFloat(tok);
   return tok;
 }
 
+// indentation tree
 function parseIndentTree(lines, startIdx, baseIndent) {
   const entries = [];
   let i = startIdx;
@@ -275,12 +217,7 @@ function parseIndentTree(lines, startIdx, baseIndent) {
   return [entries, i];
 }
 
-/** Build a { name, count, pluginId, internalId } reference entry - the
- *  shape used for every nested named item throughout this module, mirroring
- *  outfitMapToOutputFormat()'s { count, pluginId, internalId } shape in
- *  parser.js. `kind` namespaces the synthetic internalId (e.g. "shipyard",
- *  "outfitter", "link", "wormholeLink") since these nested references are
- *  not necessarily top-level entities with their own registry. */
+// { name, count, pluginId, internalId } reference
 function namedRef(name, pluginId, kind, extra = {}) {
   return {
     name,
@@ -291,8 +228,7 @@ function namedRef(name, pluginId, kind, extra = {}) {
   };
 }
 
-/** Merge a list of namedRef-shaped entries, summing `count` for exact
- *  (name + kind-implicit) duplicates instead of pushing a second entry. */
+// merge reference lists (counts add up)
 function mergeNamedRefList(existing, incoming) {
   for (const ref of incoming) {
     const dupe = existing.find(e => e.name === ref.name);
@@ -322,9 +258,7 @@ class EndlessSkyMapParser {
     sources.forEach((source, index) => this._sourcePriority.set(source.name, index));
   }
 
-  // -------------------------------------------------------------------------
-  // Provenance bookkeeping shared by every _mergeX() method.
-  // -------------------------------------------------------------------------
+  // new entity, stamped with its first plugin
   _stampNew(node, name, pluginId) {
     node.name        = name;
     node._pluginId   = pluginId;
@@ -340,11 +274,7 @@ class EndlessSkyMapParser {
     return node;
   }
 
-  // =========================================================================
-  // galaxy <name>
-  //   pos <x> <y>
-  //   sprite <sprite>
-  // =========================================================================
+  // galaxy block
   parseGalaxyBlock(lines, i, pluginId) {
     const name = matchNamedLine(lines[i].trim(), 'galaxy');
     const baseIndent = indentOf(lines[i]);
@@ -384,9 +314,7 @@ class EndlessSkyMapParser {
     return node;
   }
 
-  // =========================================================================
-  // system <name> ... (see mapParser-design.md §2 for full grammar)
-  // =========================================================================
+  // system block
   parseSystemBlock(lines, i, pluginId) {
     const name = matchNamedLine(lines[i].trim(), 'system');
     const baseIndent = indentOf(lines[i]);
@@ -417,10 +345,7 @@ class EndlessSkyMapParser {
       hazards: [],
       starfieldDensity: null,
       objectTree: [],
-      // How the game treats lists when a system is defined again (System::Load):
-      //   "add <key> …"     adds to the list
-      //   "remove <key> …"  removes that entry
-      //   plain "<key> …"   REPLACES the list (first plain line clears it)
+      // redefined systems: add adds, remove removes, a plain line replaces the list
       plainKeys: new Set(),
       removals: [],
     };
@@ -606,9 +531,7 @@ class EndlessSkyMapParser {
     return [result, i];
   }
 
-  /** Capture an indented block of raw trimmed lines verbatim - used for
-   *  condition-sets (`to spawn`, `to know`, `to land`, ...) which this
-   *  module intentionally does not evaluate, only records. */
+  // keep an indented block as raw lines
   _captureRawBlock(lines, i, baseIndent) {
     const out = [];
     while (i < lines.length) {
@@ -621,10 +544,7 @@ class EndlessSkyMapParser {
     return [out, i];
   }
 
-  // =========================================================================
-  // object [<name>] - recursive tree, nested inside `system` (and inside
-  // itself for moons). Returns [node, nextIndex].
-  // =========================================================================
+  // a system's object tree (planets, moons, stations)
   parseObjectTree(lines, i, baseIndent, pluginId) {
     const headerStripped = lines[i].trim();
     const nameM = headerStripped.match(/^object\s+"([^"]+)"/) ||
@@ -755,9 +675,7 @@ class EndlessSkyMapParser {
     node.raids.push(...partial.raids);
     node.hazards.push(...partial.hazards);
 
-    // Object tree: merge top-level objects by name (moons append as new
-    // children of the same named parent), rather than re-appending a whole
-    // duplicate branch when a plugin reopens a system just to add an object.
+    // merge objects by name (moons as children)
     node.objectTree = this._mergeObjectList(node.objectTree, partial.objectTree);
 
     // Derived flat "which planets does this system contain" list -
@@ -795,9 +713,7 @@ class EndlessSkyMapParser {
     return existing;
   }
 
-  // =========================================================================
-  // planet <name> ... (see mapParser-design.md §2 for full grammar)
-  // =========================================================================
+  // planet block
   parsePlanetBlock(lines, i, pluginId) {
     const headerStripped = lines[i].trim();
     const name =
@@ -992,13 +908,7 @@ class EndlessSkyMapParser {
     return node;
   }
 
-  // =========================================================================
-  // wormhole <name>
-  //   "display name" <name>
-  //   mappable
-  //   link <from> <to>
-  //   color (<r> <g> <b> | <name>)
-  // =========================================================================
+  // wormhole block
   parseWormholeBlock(lines, i, pluginId) {
     const name = matchNamedLine(lines[i].trim(), 'wormhole');
     const baseIndent = indentOf(lines[i]);
@@ -1050,10 +960,7 @@ class EndlessSkyMapParser {
     return node;
   }
 
-  // =========================================================================
-  // star <sprite> ... / "landing message" <text> ... - standalone, low
-  // priority, not attached to any specific system/planet.
-  // =========================================================================
+  // star block
   parseStarBlock(lines, i, pluginId) {
     const sprite = matchNamedLine(lines[i].trim(), 'star');
     const baseIndent = indentOf(lines[i]);
@@ -1062,29 +969,7 @@ class EndlessSkyMapParser {
     return ni;
   }
 
-  // =========================================================================
-  // government <name> ... — standalone, defines the color the real game
-  // itself uses to shade that government's systems on its own galaxy map
-  // (per the project's own CreatingGovernments wiki page), plus swizzle
-  // and diplomacy data this file doesn't need. Previously not parsed at
-  // all: only *references* to a government by name (inside system/planet
-  // blocks) were being read, never the block that defines what that name
-  // actually looks like.
-  //
-  // IMPORTANT: `color` on a government can be either literal RGB
-  // (`color 1 .6 .7`) OR a reference to a NAMED color defined elsewhere
-  // as its own standalone top-level statement (`color "governments: Hai"`,
-  // referencing a `color "governments: Hai" .86 .48 .79` line — often in
-  // the same file, sometimes not). This is actually the MORE common form
-  // in the real, current governments.txt — most factions (Hai, Free
-  // Worlds, every Gegno/Avgi variant, ...) use it. A first pass at this
-  // fix treated any non-numeric `color` value as "no color", which
-  // would have silently dropped the real, intended color for most of
-  // the governments that have one. Resolved properly in
-  // resolveGovernmentColors(), run after all plugins are parsed (a
-  // referenced name isn't guaranteed to already be known yet at parse
-  // time, especially across files within a plugin).
-  // =========================================================================
+  // government block
   parseGovernmentBlock(lines, i, pluginId) {
     const name = matchNamedLine(lines[i].trim(), 'government');
     const baseIndent = indentOf(lines[i]);
@@ -1104,12 +989,7 @@ class EndlessSkyMapParser {
     return ni;
   }
 
-  /**
-   * Standalone `color "Name" <r> <g> <b>` — a top-level statement (NOT
-   * nested inside a government block) that defines a reusable named
-   * color. Government blocks elsewhere then reference it by name
-   * instead of repeating the literal RGB. One line, no children.
-   */
+  // top-level `color "Name" r g b`
   parseNamedColorLine(lines, i, pluginId) {
     const stripped = lines[i].trim();
     const parsed = matchNamedLinePrefix(stripped, 'color');
@@ -1138,14 +1018,9 @@ class EndlessSkyMapParser {
     return j;
   }
 
-  // =========================================================================
-  // Final passes - call once after every plugin's data has been parsed
-  // (same ordering requirement as parser.js's resolveAllOutfitPluginIds()).
-  // =========================================================================
+  // ── after every plugin: tie things together ──
 
-  /** Symmetrize `link` - if A links to B but B doesn't list A, expose both
-   *  directions in the output graph, flagging which direction was explicit
-   *  vs inferred. */
+  // links both ways
   resolveLinks() {
     let inferred = 0;
     for (const [name, sys] of this.systems) {
@@ -1162,8 +1037,7 @@ class EndlessSkyMapParser {
     return inferred;
   }
 
-  /** Attach full planet data onto every landable object leaf, and set
-   *  planet.systemName back-reference. */
+  // put planet data on every landable object
   resolveObjectPlanets() {
     let attached = 0, missing = 0;
     for (const [sysName, sys] of this.systems) {
@@ -1187,7 +1061,7 @@ class EndlessSkyMapParser {
     return { attached, missing };
   }
 
-  /** A planet with no explicit government inherits its system's. */
+  // planets inherit their system's government
   resolveGovernmentInheritance() {
     let inherited = 0;
     for (const planet of this.planets.values()) {
@@ -1203,8 +1077,7 @@ class EndlessSkyMapParser {
     return inherited;
   }
 
-  /** Expand wormhole `link <from> <to>` into a system-to-system graph,
-   *  distinct from the hyperlane `link` graph (planet-travel, not jump). */
+  // wormhole links → system-to-system links
   resolveWormholes() {
     const graph = []; // [{ wormhole, fromSystem, toSystem, fromPlanet, toPlanet, pluginId, internalId }]
     for (const wh of this.wormholes.values()) {
@@ -1224,12 +1097,7 @@ class EndlessSkyMapParser {
     return graph;
   }
 
-  /** Resolves each government's `colorRef` (a name like "governments: Hai")
-   *  against namedColors, filling in the real RGB. Run after all plugins
-   *  are parsed rather than inline during parsing, since the named color
-   *  a government references isn't guaranteed to already be known yet —
-   *  vanilla usually defines it just before, but that's not guaranteed
-   *  for every plugin/file ordering. */
+  // government colour names → colours
   resolveGovernmentColors() {
     let resolved = 0, unresolved = 0;
     for (const gov of this.governments) {
@@ -1254,11 +1122,9 @@ class EndlessSkyMapParser {
     };
   }
 
-  // =========================================================================
-  // Output
-  // =========================================================================
+  // ── output ──
 
-  /** Full merged view across every plugin that has been parsed so far. */
+  // everything merged
   toJSON() {
     return {
       galaxies:  [...this.galaxies.values()],
@@ -1272,13 +1138,11 @@ class EndlessSkyMapParser {
     };
   }
 
-  /** Per-plugin slice: only the entities THAT PLUGIN's own data files
-   *  declared or touched (node._definedBy includes pluginId), same
-   *  per-plugin-diffing convention as ships.json/outfits.json. Nested
-   *  reference lists (links/shipyards/etc.) are similarly filtered down to
-   *  entries that plugin itself contributed. */
+  // only what one plugin's own files define
   toPluginSlice(pluginId) {
+    // this plugin's references
     const filterRefs = (refs) => refs.filter(r => r.pluginId === pluginId);
+    // one system's slice
     const sliceSystem = (sys) => ({
       ...sys,
       links: filterRefs(sys.links),
@@ -1290,6 +1154,7 @@ class EndlessSkyMapParser {
       hazards: sys.hazards.filter(f => f.pluginId === pluginId),
       planets: filterRefs(sys.planets),
     });
+    // one planet's slice
     const slicePlanet = (p) => ({
       ...p,
       shipyards: filterRefs(p.shipyards),
