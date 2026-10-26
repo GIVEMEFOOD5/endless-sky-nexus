@@ -1,49 +1,11 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  shipBuilderOutfitExpander.js  —  Expandable Outfit Detail Panels
-//
-//  INTEGRATION
-//  ─────────────────────────────────────────────────────────────────────────────
-//  Load AFTER all other builder scripts:
-//
-//      <script src="../JavaScript/shipBuilder.js"></script>
-//      <script src="../JavaScript/shipBuilderRequiredAttrs.js"></script>
-//      <script src="../JavaScript/shipBuilderAttrValidation.js"></script>
-//      <script src="../JavaScript/shipBuilderCapacityGuard.js"></script>
-//      <script src="../JavaScript/computedStats.js"></script>
-//      <script src="../JavaScript/AttributeDisplay.js"></script>
-//      <script src="../JavaScript/shipBuilderStats.js"></script>
-//      <script src="../JavaScript/shipBuilderOutfitExpander.js"></script>
-//
-//  WHAT THIS DOES
-//  ─────────────────────────────────────────────────────────────────────────────
-//  Adds a ▶ expand toggle to:
-//
-//    1. Every installed-outfit row in the ship builder outfit list
-//       (#outfits-list .outfit-item)
-//
-//    2. Every outfit row in the outfit picker modal
-//       (#sb-outfit-picker-list .sb-picker-row)
-//
-//  Multiple panels can be open simultaneously — each wrapper is self-contained.
-//
-//  DESIGN
-//  ─────────────────────────────────────────────────────────────────────────────
-//  • CSS tokens are all var(--c-*) / var(--r-*) from main.css — nothing hardcoded
-//  • Each wrapper independently tracks open/closed via aria-expanded on its toggle
-//  • Panel is injected as a child of the wrapper div
-//  • Re-hooks automatically whenever sbRenderOutfitsList or sbOpenOutfitPicker
-//    re-renders their lists (both are patched below)
-//  • MutationObserver is NOT used (it interfered with the picker search filter)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ▶ buttons on outfit rows in the builder (fitted list and picker) that open the outfit's picture and stats.
 
 const OutfitExpander = (() => {
     'use strict';
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  CONSTANTS
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── constants ──
 
     const CLS = {
         toggle:        'oe-toggle',
@@ -56,9 +18,7 @@ const OutfitExpander = (() => {
         pickerWrapper: 'oe-picker-wrapper',
     };
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  OUTFIT LOOKUP
-    // ─────────────────────────────────────────────────────────────────────────
+    // find an outfit by name (the builder's lookup first)
 
     function _findOutfit(name) {
         const clean = name.replace(/^"([^"]*)"$/, '$1').trim();
@@ -89,9 +49,7 @@ const OutfitExpander = (() => {
             .replace(/>/g, '&gt;');
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PANEL HTML SCAFFOLD
-    // ─────────────────────────────────────────────────────────────────────────
+    // empty panel (image + stats). Called by: _openPanel
 
     function _buildStatPanel(outfit) {
         if (!outfit) {
@@ -112,14 +70,12 @@ const OutfitExpander = (() => {
         </div>`;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  POPULATE PANEL  — image + stats via AttributeDisplay / ComputedStats
-    // ─────────────────────────────────────────────────────────────────────────
+    // fill the panel: sprite and AttributeDisplay stats. Called by: _openPanel
 
     function _populatePanel(panel, outfit) {
         const pluginId = outfit._pluginId || outfit._pn || null;
 
-        // ── Image ──────────────────────────────────────────────────────────
+        // image
         const imgWrap    = panel.querySelector('.' + CLS.imgWrap);
         const spritePath = outfit.thumbnail || outfit.sprite || null;
 
@@ -140,7 +96,7 @@ const OutfitExpander = (() => {
                 .catch(() => {});
         }
 
-        // ── Stats ──────────────────────────────────────────────────────────
+        // stats
         const statsBody = panel.querySelector('.oe-stats-body');
         if (!statsBody) return;
 
@@ -149,9 +105,7 @@ const OutfitExpander = (() => {
             return;
         }
 
-        // Normalise: merge attributes sub-object to top level so both
-        // AttributeDisplay and ComputedStats can find all keys regardless
-        // of whether data came from a remote plugin or local build.
+        // lift nested attributes to the top so every helper finds them
         const subAttrs   = outfit.attributes || {};
         const normalised = { ...outfit };
 
@@ -177,9 +131,7 @@ const OutfitExpander = (() => {
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  TOGGLE LOGIC  — each wrapper is fully self-contained, no shared state
-    // ─────────────────────────────────────────────────────────────────────────
+    // close an open panel. Called by: _handleToggle
 
     function _closePanel(wrapper, toggle) {
         const panel = wrapper.querySelector('.' + CLS.panel);
@@ -192,6 +144,7 @@ const OutfitExpander = (() => {
         toggle.setAttribute('aria-expanded', 'false');
     }
 
+    // open a panel under a row. Called by: _handleToggle
     function _openPanel(wrapper, toggle, outfitName) {
         const outfit = _findOutfit(outfitName);
         if (!outfit && !outfitName) return;
@@ -211,6 +164,7 @@ const OutfitExpander = (() => {
         toggle.setAttribute('aria-expanded', 'true');
     }
 
+    // ▶ / ▼ clicked
     function _handleToggle(wrapper, toggle, outfitName) {
         if (toggle.getAttribute('aria-expanded') === 'true') {
             _closePanel(wrapper, toggle);
@@ -219,9 +173,7 @@ const OutfitExpander = (() => {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  HOOK: installed outfit list  (#outfits-list)
-    // ─────────────────────────────────────────────────────────────────────────
+    // add ▶ buttons to fitted outfit rows. Called by: _patchBuilderFunctions
 
     function _hookInstalledList() {
         const listEl = document.getElementById('outfits-list');
@@ -254,9 +206,7 @@ const OutfitExpander = (() => {
         });
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  HOOK: outfit picker rows  (#sb-outfit-picker-list)
-    // ─────────────────────────────────────────────────────────────────────────
+    // add ▶ buttons to picker rows. Called by: _patchBuilderFunctions
 
     function _hookPickerList() {
         const listEl = document.getElementById('sb-outfit-picker-list');
@@ -290,9 +240,7 @@ const OutfitExpander = (() => {
         });
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PATCH builder functions so hooks re-run after every render
-    // ─────────────────────────────────────────────────────────────────────────
+    // re-add buttons whenever the builder redraws its lists. Called by: install
 
     function _patchBuilderFunctions() {
         if (typeof window.sbRenderOutfitsList === 'function') {
@@ -315,13 +263,7 @@ const OutfitExpander = (() => {
             };
         }
 
-        // sbFilterOutfitPicker only toggles display on existing .sb-picker-row
-        // and .sb-picker-group elements. Our .oe-picker-wrapper sits as the
-        // parent of each row, so it also gets shown/hidden correctly because
-        // sbFilterOutfitPicker targets the inner .sb-picker-row directly via
-        // its own display toggle — the wrapper follows along naturally.
-        // We deliberately do NOT patch sbFilterOutfitPicker to avoid
-        // double-wrapping rows or interfering with the search behaviour.
+        // keep our panels hidden/shown along with the rows the picker filters
         if (typeof window.sbFilterOutfitPicker === 'function') {
             const orig = window.sbFilterOutfitPicker;
             window.sbFilterOutfitPicker = function (...args) {
@@ -336,15 +278,11 @@ const OutfitExpander = (() => {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  STYLES — all in main.css
-    // ─────────────────────────────────────────────────────────────────────────
+    // styles live in main.css
 
     function _injectStyles() { return; }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  INSTALL
-    // ─────────────────────────────────────────────────────────────────────────
+    // set everything up. Called on page load
 
     function install() {
         _injectStyles();

@@ -1,23 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  autoFitting/afStats.js — what a fit actually does
-//
-//  Adds a hull's attributes and every installed outfit together, then works
-//  out the numbers a pilot cares about, using the game's own formulas
-//  (Ship.cpp, 60 frames per second):
-//    max speed     = 60 · thrust / drag                (px/s)
-//    acceleration  = 3600 · thrust / mass              (px/s²)
-//    turn rate     = 60 · turn / mass                  (°/s)
-//    DPS (weapon)  = damage · 60 / reload  (× burst count / burst cycle)
-//    max heat      = 100 · (mass + heat capacity); each frame the ship
-//                    loses (0.001 · heat dissipation) of its current heat
-//  plus energy, heat and fuel budgets in three situations — idle, flying
-//  (thrust + turn) and fighting (flying + every weapon firing + shields
-//  regenerating) — and how long the ship lasts when a budget is negative.
-//
-//  window.AfStats (browser) / module.exports (Node)
-// ═══════════════════════════════════════════════════════════════════════════
+// Auto-fit: what a fit does — totals, derived stats, warnings and the checks every result goes through.
 
 (function (root, factory) {
   const api = factory();
@@ -31,17 +14,20 @@
   const DAMAGE_KEYS = ['shield damage', 'hull damage', 'heat damage', 'ion damage', 'scrambling damage',
     'disruption damage', 'slowing damage', 'corrosion damage', 'discharge damage', 'burn damage', 'leak damage'];
 
+  // missile / launcher?
   function isSecondary(o) {
     const w = o && o.attributes && o.attributes.weapon || o && o.weapon;
     return (o && (o.category === 'Secondary Weapons' || o.attributes?.category === 'Secondary Weapons')) || !!(w && w.ammunition);
   }
+  // the weapon part of an outfit
   function weaponOf(o) {
     const w = (o && o.attributes && o.attributes.weapon) || (o && o.weapon);
     return w && typeof w === 'object' ? w : null;
   }
+  // outfit attributes, nested or flat
   function attrsOf(o) { return (o && o.attributes) || o || {}; }
 
-  /** Per-weapon numbers (one copy). */
+  // numbers for one weapon. Called by: totals, afOptimizer.prepare
   function weaponStats(o) {
     const w = weaponOf(o);
     if (!w) return null;
@@ -82,12 +68,7 @@
     };
   }
 
-  /**
-   * Sum a hull and its outfits.
-   * @param {object} base   the hull's attributes (flat numbers)
-   * @param {Array<[name,count]>} outfits
-   * @param {Map<string, object>} index  outfit name → outfit (attributes flat or under .attributes)
-   */
+  // add a hull and its outfits together. Called by: derive
   function totals(base, outfits, index) {
     const t = {};
     for (const [k, v] of Object.entries(base || {})) if (typeof v === 'number' || (typeof v === 'string' && v !== '' && isFinite(v))) t[k] = num(v);
@@ -104,12 +85,7 @@
     return { t, weapons, unknown };
   }
 
-  /**
-   * A hull's attributes with the mount counts the game derives from its
-   * hardpoints (gun ports / turret mounts aren't attributes of the hull).
-   * Accepts a parsed game ship ({ attributes, hardpoints:{guns,turrets} })
-   * or a ship-builder design ({ attributes, guns, turrets, mass, drag }).
-   */
+  // hull attributes, with gun ports / turret mounts counted from hardpoints. Called by: afUI, afPeers, afThreat
   function hullAttrs(ship) {
     const a = { ...(ship && ship.attributes || {}) };
     for (const k of ['mass', 'drag']) if (ship && ship[k] !== undefined && ship[k] !== '' && a[k] === undefined) a[k] = num(ship[k]);
@@ -121,13 +97,13 @@
     return a;
   }
 
-  /** Everything derived, for one fit. */
+  // everything about one fit. Called by: afUI, afPeers, afThreat, afWorker
   function derive(base, outfits, index) {
     const { t, weapons, unknown } = totals(base, outfits, index);
     return fromTotals(base, t, weapons, outfits, unknown);
   }
 
-  /** The same, from already-summed totals (the optimiser adds outfits incrementally). */
+  // same, from running totals (the optimiser adds outfits one at a time). Called by: derive, afOptimizer
   function fromTotals(base, t, weapons, outfits, unknown = []) {
     const g = k => t[k] || 0;
     const mass = Math.max(1, g('mass'));
@@ -137,6 +113,7 @@
     const thrust = g('thrust'), turn = g('turn'), ab = g('afterburner thrust');
 
     const primary = weapons.filter(w => !w.secondary), secondary = weapons.filter(w => w.secondary);
+    // weighted sum
     const sumW = (list, f) => list.reduce((s, w) => s + f(w) * w.count, 0);
     const dps = {
       primary: sumW(primary, w => w.dps), secondary: sumW(secondary, w => w.dps),
@@ -218,7 +195,7 @@
 
   const fmtTime = s => s == null ? 'indefinitely' : s >= 3600 ? '1h+' : s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${Math.max(0, s).toFixed(1)}s`;
 
-  /** Plain-English warnings about the fit. */
+  // plain-English warnings. Called by: afUI.resultHtml, afWorker.suggestions
   function warnings(d) {
     const out = [];
     const sp = d.space;
@@ -247,10 +224,7 @@
     return out;
   }
 
-  /**
-   * The plugin data the auto-fitter may use: only the plugins switched on in
-   * the plugin picker (DataLoader's active list), not everything loaded.
-   */
+  // only the plugins switched on (DataLoader). Called by: the auto-fit files
   function activeData() {
     const all = (typeof window !== 'undefined' && window.allData) || (typeof globalThis !== 'undefined' && globalThis.allData) || {};
     const DL = typeof window !== 'undefined' && window.DataLoader;
@@ -260,27 +234,26 @@
     return Object.fromEntries(Object.entries(all).filter(([k]) => on.has(k)));
   }
 
-  /** The selected plugins' game data only — without "Local Builds" (your own designs). */
+  // selected plugins without Local Builds. Called by: afPeers, afThreat, afUI
   function gameData() {
     const out = {};
     for (const [k, v] of Object.entries(activeData())) if (k !== '__local_builds__' && !(v && v._isLocal)) out[k] = v;
     return out;
   }
 
-  /** Ids the selected plugins go by (output names and "Source/folder" plugin ids). null = no filter. */
+  // ids the selected plugins go by (null = no filter). Called by: afPool
   function activePluginIds() {
     const DL = typeof window !== 'undefined' && window.DataLoader;
     if (DL && typeof DL.getActivePluginIds === 'function') return DL.getActivePluginIds();
     return null;
   }
-  /** A location map ({ pluginId: {...} }) cut down to the selected plugins. */
+  // location map cut to the selected plugins. Called by: afPool
   function activeLocations(locations) {
     const ids = activePluginIds();
     return Object.entries(locations || {}).filter(([k, v]) => v && typeof v === 'object' && (!ids || ids.has(k))).map(([, v]) => v);
   }
 
-  // ── Stats a user can set targets on (auto-fit "Targets") ────────────────
-  // id → [label, unit, getter]. Any raw attribute can be targeted too, as "attr:<name>".
+  // ── stats you can set targets on (id → label, unit, getter; any raw attribute works too) ──
   const STATS = [
     ['dps', 'Damage / s (all weapons)', '/s', d => d.dps.total],
     ['dps.primary', 'Damage / s — primary weapons', '/s', d => d.dps.primary],
@@ -317,10 +290,7 @@
     ['free.engine', 'Free engine capacity', '', d => d.space.engine.free],
   ].map(([id, label, unit, get]) => ({ id, label, unit, get }));
   const STAT_BY_ID = new Map(STATS.map(x => [x.id, x]));
-  /**
-   * The checks every auto-fit result is put through before it's shown.
-   * → [{ ok, label, detail, fix? }] — `fix` is a target that would repair it.
-   */
+  // checks every result goes through (fits, moves, powered, cool, crew, fuel, ammo). Called by: afWorker, afUI
   function verify(d) {
     const sp = d.space, out = [];
     const add = (ok, label, detail, fix) => out.push({ ok: !!ok, label, detail, fix });
@@ -340,11 +310,13 @@
     return out;
   }
 
+  // value of a target stat for a fit. Called by: afOptimizer, afUI, afWorker
   function statValue(d, id) {
     if (id.startsWith('attr:')) return d.raw[id.slice(5)] || 0;
     const st = STAT_BY_ID.get(id);
     return st ? Number(st.get(d)) || 0 : 0;
   }
+  // label for a target stat
   function statLabel(id) { return id.startsWith('attr:') ? `${id.slice(5)} (attribute)` : (STAT_BY_ID.get(id) || { label: id }).label; }
 
   return { derive, fromTotals, totals, weaponStats, warnings, isSecondary, hullAttrs, fmtTime, activeData, activePluginIds, activeLocations,

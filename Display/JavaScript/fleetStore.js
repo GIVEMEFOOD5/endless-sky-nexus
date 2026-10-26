@@ -1,35 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  fleetStore.js — multiple named fleets of ship builds
-//
-//  No DOM code here, so any page can use it (the ship builder UI lives in
-//  shipBuilderFleets.js; saveManager.js uses it to import a save as a fleet).
-//
-//  STORAGE
-//    localStorage  es_ship_builder_fleets_v1
-//      { version, activeId, fleets: [Fleet], pendingDeletes: [id] }
-//      Fleet = { id (uuid), name, ships: [ship in builder storage format],
-//                createdAt, updatedAt, syncedAt|null, ownerId|null, dirty }
-//    localStorage  es_ship_builder_v4   ← kept as a MIRROR: every ship from
-//      every fleet, flattened. dataLoader.js reads it for the "Local Builds"
-//      plugin, so those keep appearing in pickers/DataViewer unchanged.
-//
-//  CLOUD (Supabase `fleets` table, see supabase/fleets.sql)
-//    While a user is logged in, every change is pushed (debounced) and the
-//    account's fleets are pulled on login. One row per fleet; the ships are
-//    a jsonb document, same shape as saved_ships.build_data.
-//    Conflicts: newest updatedAt wins. A fleet deleted on another device is
-//    removed here unless it was edited here since the last sync.
-//
-//  Public API — window.FleetStore:
-//    list()  get(id)  active()  activeId  setActive(id)
-//    create(name, ships?)  rename(id, name)  duplicate(id)  remove(id)
-//    setShips(id, ships)  addShips(id, ships)
-//    moveShip(fromId, index, toId, { copy })
-//    onChange(fn)          fn({ reason, fleetId })
-//    syncNow()             status → 'local' | 'syncing' | 'synced' | 'error' | 'unavailable'
-// ═══════════════════════════════════════════════════════════════════════════
+// Your named fleets (kept in this browser, synced to your account when logged in). Used by the builder and other pages.
 
 (function () {
   const KEY        = 'es_ship_builder_fleets_v1';
@@ -45,9 +16,10 @@
   let syncing = false;
   let cloudUnavailable = false;
 
-  // ── helpers ──────────────────────────────────────────────────────────────
+  // ── helpers ──
   const now = () => Date.now();
   const clone = v => JSON.parse(JSON.stringify(v));
+  // random id
   function uuid() {
     if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -55,22 +27,29 @@
       return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
     });
   }
+  // id for a ship
   const newShipId = () => Date.now() + Math.random();
+  // read JSON from this browser (null if missing)
   function readJSON(k) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : null; } catch (_) { return null; } }
+  // logged-in user (or null)
   function currentUser() { return (window.EsAuth && window.EsAuth.getCurrentUser && window.EsAuth.getCurrentUser()) || null; }
+  // Supabase client (or null)
   const cloud = () => window.supabaseClient || null;
 
+  // tell listeners something changed
   function emit(reason, fleetId) {
     for (const fn of listeners) { try { fn({ reason, fleetId, status }); } catch (e) { console.warn('[FleetStore] listener failed', e); } }
   }
+  // sync status message
   function setStatus(s, detail = '') { status = s; statusDetail = detail; emit('status'); }
 
+  // a new fleet object
   function makeFleet(name, ships) {
     const t = now();
     return { id: uuid(), name: name || 'New fleet', ships: ships || [], createdAt: t, updatedAt: t, syncedAt: null, ownerId: null, dirty: true };
   }
 
-  // ── load / persist ───────────────────────────────────────────────────────
+  // ── load / save ──
   function load() {
     state = readJSON(KEY);
     const legacy = readJSON(LEGACY_KEY);
@@ -103,6 +82,7 @@
     if (!state.fleets.some(f => f.id === state.activeId)) state.activeId = state.fleets[0].id;
   }
 
+  // save to this browser and queue a sync. Called by: every change
   function persist(reason, { fleetId, skipSync } = {}) {
     try {
       localStorage.setItem(KEY, JSON.stringify(state));
@@ -115,23 +95,28 @@
     if (!skipSync) scheduleSync();
   }
 
+  // mark a fleet as updated
   function touch(fleet) { delete fleet.placeholder; fleet.updatedAt = Math.max(now(), (fleet.updatedAt || 0) + 1); fleet.dirty = true; }
+  // fleet by id (throws if missing)
   function need(id) { const f = state.fleets.find(x => x.id === id); if (!f) throw new Error(`Fleet not found: ${id}`); return f; }
 
-  // ── public: reads ────────────────────────────────────────────────────────
+  // ── reading ──
   const list   = () => state.fleets.map(f => ({ id: f.id, name: f.name, shipCount: f.ships.length, updatedAt: f.updatedAt, synced: !f.dirty && !!f.syncedAt }));
   const get    = id => state.fleets.find(f => f.id === id) || null;
+  // the fleet in use. Called by: the builder, accountCenter, nameSearch
   const active = () => get(state.activeId);
 
-  // ── public: writes ───────────────────────────────────────────────────────
+  // ── changing ──
   function setActive(id) { need(id); state.activeId = id; persist('active', { fleetId: id, skipSync: true }); }
 
+  // new fleet. Called by: shipBuilderFleets, saveManager
   function create(name, ships) {
     const f = makeFleet(uniqueName(name || 'New fleet'), (ships || []).map(s => ({ ...clone(s), id: newShipId() })));
     state.fleets.push(f);
     persist('created', { fleetId: f.id });
     return f;
   }
+  // rename a fleet
   function rename(id, name) {
     const f = need(id);
     const clean = String(name || '').trim();
@@ -139,10 +124,12 @@
     f.name = clean; touch(f);
     persist('renamed', { fleetId: id });
   }
+  // copy a fleet
   function duplicate(id) {
     const src = need(id);
     return create(`${src.name} (copy)`, src.ships);
   }
+  // delete a fleet
   function remove(id) {
     const f = need(id);
     state.fleets = state.fleets.filter(x => x !== f);
@@ -151,18 +138,21 @@
     if (state.activeId === id) state.activeId = state.fleets[0].id;
     persist('removed', { fleetId: id });
   }
+  // replace a fleet's ships. Called by: shipBuilderFleets.sbSave, saveManager
   function setShips(id, ships) {
     const f = need(id);
     f.ships = clone(ships || []);
     touch(f);
     persist('ships', { fleetId: id });
   }
+  // add ships to a fleet. Called by: saveManager, accountCenter, shipBuilderShared
   function addShips(id, ships) {
     const f = need(id);
     f.ships.push(...(ships || []).map(s => ({ ...clone(s), id: newShipId() })));
     touch(f);
     persist('ships', { fleetId: id });
   }
+  // move or copy a ship to another fleet
   function moveShip(fromId, index, toId, { copy = false } = {}) {
     const from = need(fromId), to = need(toId);
     const ship = from.ships[index];
@@ -172,6 +162,7 @@
     if (!copy) { from.ships.splice(index, 1); touch(from); }
     persist(copy ? 'copied' : 'moved', { fleetId: toId });
   }
+  // "Fleet 2", "Fleet 3" …
   function uniqueName(base) {
     const names = new Set(state.fleets.map(f => f.name));
     if (!names.has(base)) return base;
@@ -179,19 +170,22 @@
     while (names.has(`${base} ${n}`)) n++;
     return `${base} ${n}`;
   }
+  // listen for changes. Called by: shipBuilderFleets
   function onChange(fn) { listeners.push(fn); }
 
-  // ── cloud sync ───────────────────────────────────────────────────────────
+  // ── account sync ──
   function scheduleSync() {
     if (!currentUser() || cloudUnavailable) return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(syncNow, SYNC_DELAY);
   }
 
+  // is the cloud table missing?
   function isMissingTable(err) {
     return err && (err.code === '42P01' || err.code === 'PGRST205' || /relation .* does not exist|could not find the table/i.test(err.message || ''));
   }
 
+  // sync with your account now
   async function syncNow() {
     const user = currentUser();
     const sb = cloud();
@@ -275,7 +269,7 @@
     }
   }
 
-  // ── boot ─────────────────────────────────────────────────────────────────
+  // ── start ──
   load();
   if (window.EsAuth && window.EsAuth.onAuthChange) {
     window.EsAuth.onAuthChange(user => { if (user) syncNow(); else setStatus('local'); });

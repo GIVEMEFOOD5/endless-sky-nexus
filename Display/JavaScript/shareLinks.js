@@ -1,17 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  shareLinks.js — "look at this build" links, no account needed
-//
-//  The thing being shared (a ship design, a battle set-up …) is packed into
-//  the link itself: JSON → deflate → base64url, after a `#`. Nothing is
-//  stored anywhere, and the part after `#` never even reaches the server.
-//
-//    ShareLinks.make(page, key, data)  → Promise<url>     e.g. make('shipBuilder.html', 'ship', design)
-//    ShareLinks.read(key)              → Promise<data|null>  (from this page's address)
-//    ShareLinks.clear()                — remove the #… from the address bar (no reload)
-//    ShareLinks.show(url, what)        — copy it, and show it in a small window
-// ═══════════════════════════════════════════════════════════════════════════
+// "Look at this build" links: the ship or battle is packed into the link itself (nothing saved online).
 
 (function () {
   const DISCORD_LIMIT = 2000;   // characters in a normal Discord message
@@ -28,12 +17,13 @@
     return out;
   };
   const canCompress = typeof CompressionStream === 'function' && typeof DecompressionStream === 'function';
+  // run bytes through a (de)compression stream
   async function pipe(bytes, stream) {
     const res = new Response(new Blob([bytes]).stream().pipeThrough(stream));
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  // "z" = deflate-compressed JSON, "j" = plain JSON (older browsers)
+  // data → "z…" (compressed) or "j…" (plain, old browsers). Called by: make
   async function pack(data) {
     const json = new TextEncoder().encode(JSON.stringify(data));
     if (canCompress) {
@@ -41,21 +31,25 @@
     }
     return 'j' + toB64u(json);
   }
+  // link text → data. Called by: read
   async function unpack(str) {
     const kind = str[0], body = fromB64u(str.slice(1));
     const bytes = kind === 'z' ? await pipe(body, new DecompressionStream('deflate-raw')) : body;
     return JSON.parse(new TextDecoder().decode(bytes));
   }
 
+  // absolute URL for a page
   function pageUrl(page) {
     const here = new URL(window.location.href);
     return new URL(page, here).href.split('#')[0];
   }
 
+  // full share link. Called by: shipBuilder.sbShareShip, battleSim.shareBattle
   async function make(page, key, data) {
     return `${pageUrl(page)}#${key}=${await pack({ v: 1, ...data })}`;
   }
 
+  // data from this page's link (null if none). Called by: shipBuilder, battleSim on load
   async function read(key) {
     const m = window.location.hash.match(new RegExp(`[#&]${key}=([^&]+)`));
     if (!m) return null;
@@ -63,12 +57,14 @@
     catch (err) { console.warn('[ShareLinks] Could not read the shared link:', err); return { _broken: true }; }
   }
 
+  // remove the #… from the address bar
   function clear() {
     try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (_) {}
   }
 
   const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+  // copy the link and show it in a window. Called by: the 🔗 share buttons
   async function show(url, what) {
     let copied = false;
     try { await navigator.clipboard.writeText(url); copied = true; } catch (_) { /* show it to copy by hand */ }

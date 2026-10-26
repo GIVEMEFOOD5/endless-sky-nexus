@@ -1,18 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  shipBuilderFleets.js — multiple fleets in the ship builder
-//
-//  Load AFTER shipBuilder.js (and fleetStore.js before it). It swaps the
-//  builder's single-fleet persistence for FleetStore:
-//    sbLoad()  → sbFleet = the ACTIVE fleet's ships
-//    sbSave()  → writes sbFleet back into the active fleet
-//  Everything else in shipBuilder.js keeps using sbFleet unchanged, so
-//  new/edit/duplicate/import/export all act on whichever fleet is selected.
-//
-//  Adds: a fleet bar above the ship grid (switch, new, rename, duplicate,
-//  delete, sync status) and a "Move" button on each built ship card.
-// ═══════════════════════════════════════════════════════════════════════════
+// Several fleets in the builder (new, rename, duplicate, delete, move ships between them).
 
 (function () {
   if (!window.FleetStore) { console.warn('[Fleets] fleetStore.js not loaded — multiple fleets disabled.'); return; }
@@ -21,7 +9,7 @@
   const escHtml = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const toast = (m, t) => (typeof sbToast === 'function' ? sbToast(m, t) : console.log(m));
 
-  // Same storage shape the original sbSave() wrote (outfits as a name → entry map).
+  // fleet → what's stored (outfits as a name map, like before). Called by: sbSave
   function serialise(ships) {
     return ships.map(ship => ({
       ...ship,
@@ -31,6 +19,7 @@
       ])),
     }));
   }
+  // stored fleet → ships. Called by: sbLoad
   function deserialise(ships) {
     return (ships || []).map(ship => ({
       ...ship,
@@ -39,7 +28,7 @@
     }));
   }
 
-  // ── persistence overrides ────────────────────────────────────────────────
+  // ── saving and loading go through FleetStore ──
   let writing = false;
   window.sbLoad = function () {
     try { sbFleet = deserialise(FS.active().ships); } catch (e) { console.warn('[Fleets] load failed', e); sbFleet = []; }
@@ -49,14 +38,14 @@
     try { FS.setShips(FS.activeId, serialise(sbFleet)); } finally { writing = false; }
   };
 
+  // tell other pages Local Builds changed
   function refreshLocalBuilds() {
     if (window.DataLoader && window.DataLoader.refreshLocalBuilds) window.DataLoader.refreshLocalBuilds();
   }
+  // is a ship open in the builder?
   const inBuilder = () => { const v = document.getElementById('builder-view'); return v && !v.classList.contains('hidden'); };
 
-  // Reload the grid when the active fleet changes underneath us (sync pull,
-  // another tab, fleet switch) — but never while a ship is open for editing,
-  // since sbEditIdx points into the current sbFleet.
+  // redraw when the fleet changes elsewhere (not while a ship is open)
   let pendingReload = false;
   FS.onChange(({ reason }) => {
     renderBar();
@@ -67,6 +56,7 @@
       reloadGrid();
     }
   });
+  // reload the fleet cards
   function reloadGrid() {
     pendingReload = false;
     sbLoad();
@@ -83,7 +73,7 @@
     };
   }
 
-  // ── fleet bar ────────────────────────────────────────────────────────────
+  // ── the fleet bar ──
   const STATUS_TEXT = {
     local:       'Saved in this browser — log in to keep fleets in your account',
     syncing:     'Saving to your account…',
@@ -92,6 +82,7 @@
     unavailable: 'Saved in this browser (account sync not set up yet)',
   };
 
+  // add the fleet bar once. Called by: renderBar
   function ensureBar() {
     let bar = document.getElementById('sbf-bar');
     if (bar) return bar;
@@ -105,6 +96,7 @@
     return bar;
   }
 
+  // draw the fleet bar. Called by: renderFleet
   function renderBar() {
     const bar = ensureBar();
     if (!bar) return;
@@ -127,7 +119,7 @@
         title="${escHtml(FS.statusDetail)}">${escHtml(STATUS_TEXT[FS.status] || '')}</span>`;
   }
 
-  // ── name modal (reused for new + rename) ─────────────────────────────────
+  // the name window (new / rename). Called by: askName
   function ensureNameModal() {
     if (document.getElementById('modal-sbf-name')) return;
     const m = document.createElement('div');
@@ -154,6 +146,7 @@
       if (e.key === 'Enter') document.getElementById('sbf-name-ok').click();
     });
   }
+  // ask for a name. Called by: promptNew, promptRename, openMove
   function askName({ title, button, value }, done) {
     ensureNameModal();
     document.getElementById('sbf-name-title').textContent = title;
@@ -171,7 +164,7 @@
     setTimeout(() => { input.focus(); input.select(); }, 30);
   }
 
-  // ── move/copy modal ──────────────────────────────────────────────────────
+  // the move/copy window. Called by: openMove
   function ensureMoveModal() {
     if (document.getElementById('modal-sbf-move')) return;
     const m = document.createElement('div');
@@ -197,7 +190,7 @@
     document.body.appendChild(m);
   }
 
-  // ── actions ──────────────────────────────────────────────────────────────
+  // ── actions ──
   const SBFleets = {
     switchTo(id) {
       if (id === FS.activeId) return;
@@ -299,7 +292,7 @@
     };
   }
 
-  // ── Export All → this fleet (+ save ships), named after the fleet ────────
+  // ── Export All: this fleet's ships, named after the fleet ──
   if (typeof window.exportAll === 'function') {
     window.exportAll = function () {
       const ships = [...sbSaveFleet, ...sbFleet];

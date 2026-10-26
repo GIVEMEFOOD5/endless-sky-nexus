@@ -1,80 +1,11 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  shipBuilderRequiredAttrs.js  —  Required / Protected Attribute Enforcement
-//                                  + Outfit-Mode Full-Width Layout
-//
-//  INTEGRATION
-//  ─────────────────────────────────────────────────────────────────────────────
-//  Load AFTER shipBuilder.js but BEFORE shipBuilderAttrValidation.js:
-//
-//      <script src="../JavaScript/shipBuilder.js"></script>
-//      <script src="../JavaScript/shipBuilderRequiredAttrs.js"></script>
-//      <script src="../JavaScript/shipBuilderAttrValidation.js"></script>
-//      <script src="../JavaScript/shipBuilderCapacityGuard.js"></script>
-//      <script src="../JavaScript/shipBuilderStats.js"></script>
-//
-//  HOW REQUIRED ATTRIBUTES ARE DETERMINED  (zero hardcoded key names)
-//  ─────────────────────────────────────────────────────────────────────────────
-//  attributeParser.js deriveShipRequirements() tags every attribute in
-//  window.attrDefs with `shipRequirement.level`:
-//
-//    'required'      → locked: can't be removed, can't be blank, backfilled
-//                      on every ship. Evidence: Ship::FinishLoading enforces
-//                      it (e.g. drag) and/or ≥98% of base-game ships set it.
-//    'recommended'   → pre-filled on NEW blank ships, but removable. Real
-//                      ships legitimately omit these (sail ships have no
-//                      engine capacity, drones have no bunks, …).
-//    'engineDerived' → computed by the game (gun ports / turret mounts come
-//                      from hardpoints). Never required from the user.
-//
-//  shipRequirement.min / minExclusive are enforced on edit (drag must be
-//  > 0; capacities must be ≥ 0).
-//
-//  If attrDefs predates the parser change (no shipRequirement anywhere), no
-//  attributes are locked and a console warning asks for a re-parse — the old
-//  flag heuristic locked ~50 keys (thrust, afterburner heat, …) while missing
-//  mass/hull/cost/category, so it is intentionally not used as a fallback.
-//
-//  HARDCODED VALUES (design decisions, not derivable from data)
-//  ─────────────────────────────────────────────────────────────────────────────
-//  Only the default values are hardcoded, keyed by the attribute name so
-//  they are easy to find and change.  Every other key name comes from the data.
-//
-//  OUTFIT MODE LAYOUT
-//  ─────────────────────────────────────────────────────────────────────────────
-//  When sbMode === 'outfit', the identity and description sidebar panels are
-//  already hidden by shipBuilder.js.  However, the .builder-layout grid still
-//  reserves the 320px sidebar column, leaving a blank gap.
-//
-//  This module adds/removes a CSS class  .builder-layout--outfit-mode  on the
-//  .builder-layout element whenever the mode changes.  That class collapses the
-//  sidebar column to zero so the main content panel spans the full width,
-//  matching the space that the identity fields normally occupy.
-//
-//  The class is toggled by patching sbPopulateBuilder(), which is the single
-//  function that runs every time the builder view opens or switches mode.
-// ═══════════════════════════════════════════════════════════════════════════════
+// Attributes every ship must have (from the game's own checks), locked in the builder and filled in with defaults.
 
 const RequiredAttrs = (() => {
     'use strict';
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  DEFAULT VALUES  ← only hardcoded values in this file
-    //
-    //  Used for both 'required' and 'recommended' keys.
-    //  Keys here that don't end up in either set are silently ignored,
-    //  so this map can be broader than the derived set without causing errors.
-    //
-    //  Rules (per user spec):
-    //    - mass, hull, cost, and all capacity/space keys → '1'
-    //    - heat dissipation                              → '0.5'
-    //    - drag, shields, category                       → '0' / ''
-    //      (a default that breaks the attribute's own min rule is replaced
-    //       by the engine's default — so drag '0' becomes '100', matching
-    //       what Ship::FinishLoading would do anyway)
-    //    - everything else required but not listed here  → '0'
-    // ─────────────────────────────────────────────────────────────────────────
+    // default values — the only fixed numbers here
 
     const DEFAULTS_BY_KEY = {
         'mass':             '1',
@@ -94,15 +25,11 @@ const RequiredAttrs = (() => {
 
     const DEFAULT_FALLBACK = '0'; // for any required key not listed above
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  CSS class toggled on .builder-layout in outfit mode
-    // ─────────────────────────────────────────────────────────────────────────
+    // layout class for outfit-only mode
 
     const OUTFIT_MODE_CLASS = 'builder-layout--outfit-mode';
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  STATE  — populated at install time once attrDefs is available
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── state (filled on install) ──
 
     let _requiredKeys     = new Set();   // level === 'required'
     let _requiredList     = [];          // [ { key, req, special, defaultValue }, … ]
@@ -110,9 +37,7 @@ const RequiredAttrs = (() => {
     let _recommendedList  = [];
     let _reqMeta          = new Map();   // key → shipRequirement (both levels)
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  DERIVE REQUIRED KEYS from window.attrDefs
-    // ─────────────────────────────────────────────────────────────────────────
+    // required attributes from the definitions. Called by: _init
 
     function _deriveRequirements() {
         const out = { required: new Map(), recommended: new Map(), available: false };
@@ -135,8 +60,7 @@ const RequiredAttrs = (() => {
         return out;
     }
 
-    // A default must satisfy the attribute's own min constraint; otherwise
-    // fall back to the engine's own default, then to '1'.
+    // default that meets the attribute's own minimum
     function _defaultFor(key, req) {
         let v = DEFAULTS_BY_KEY.hasOwnProperty(key) ? DEFAULTS_BY_KEY[key] : DEFAULT_FALLBACK;
         const n = parseFloat(v);
@@ -147,13 +71,7 @@ const RequiredAttrs = (() => {
         return v;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  BUILD _requiredList from the derived key set
-    //
-    //  'special' controls where the value lives on the ship object:
-    //    'mass' / 'drag' → ship.mass / ship.drag  (top-level fields)
-    //    'attr'          → ship.attributes[key]
-    // ─────────────────────────────────────────────────────────────────────────
+    // build the required list
 
     function _buildList(reqMap) {
         return [...reqMap.entries()].map(([key, req]) => ({
@@ -163,20 +81,20 @@ const RequiredAttrs = (() => {
         }));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PUBLIC: isRequired(key)
-    // ─────────────────────────────────────────────────────────────────────────
+    // is this attribute required? Called by: the builder
 
     function isRequired(key)    { return _requiredKeys.has(key); }
+    // recommended but not required
     function isRecommended(key) { return _recommendedKeys.has(key); }
 
+    // current value of an attribute
     function _getVal(ship, key) {
         if (key === 'mass') return ship.mass;
         if (key === 'drag') return ship.drag;
         return (ship.attributes || {})[key];
     }
 
-    // Returns an error string, or null if the value is acceptable.
+    // error text, or null if fine
     function _checkValue(key, raw) {
         const req = _reqMeta.get(key);
         if (!req) return null;
@@ -190,7 +108,7 @@ const RequiredAttrs = (() => {
         return null;
     }
 
-    // PUBLIC: list every required-attribute problem on a ship (for export checks).
+    // every required-attribute problem on a ship. Called by: export checks, builderToSave
     function validate(ship) {
         const problems = [];
         if (!ship) return problems;
@@ -207,10 +125,7 @@ const RequiredAttrs = (() => {
         return problems;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  BACKFILL  — adds missing required attrs to a ship object in-place.
-    //  Never overwrites an existing non-empty value.
-    // ─────────────────────────────────────────────────────────────────────────
+    // add missing required attributes with defaults
 
     function _backfill(ship, list = _requiredList) {
         if (!ship) return;
@@ -230,9 +145,7 @@ const RequiredAttrs = (() => {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  OUTFIT-MODE LAYOUT  — collapse / restore sidebar column
-    // ─────────────────────────────────────────────────────────────────────────
+    // outfit-only mode: hide the attribute sidebar
 
     function _applyLayoutMode(mode) {
         const layout = document.querySelector('.builder-layout');
@@ -244,9 +157,7 @@ const RequiredAttrs = (() => {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PATCH: sbBlank()
-    // ─────────────────────────────────────────────────────────────────────────
+    // new ships start with the required attributes
 
     function _patchBlank() {
         if (typeof window.sbBlank !== 'function') {
@@ -262,9 +173,7 @@ const RequiredAttrs = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PATCH: sbShipFromParsed(src)
-    // ─────────────────────────────────────────────────────────────────────────
+    // opened game ships get them too
 
     function _patchShipFromParsed() {
         if (typeof window.sbShipFromParsed !== 'function') {
@@ -279,9 +188,7 @@ const RequiredAttrs = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PATCH: sbRemoveAttr(key)
-    // ─────────────────────────────────────────────────────────────────────────
+    // required attributes can't be removed
 
     function _patchRemoveAttr() {
         if (typeof window.sbRemoveAttr !== 'function') {
@@ -299,12 +206,7 @@ const RequiredAttrs = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PATCH: sbUpdateAttrVal(input)  and  confirmAddAttr()
-    //  Reject blank required values and values below shipRequirement.min.
-    //  (Wrapped here rather than sbValidateAttrValue, which
-    //  shipBuilderAttrValidation.js replaces outright.)
-    // ─────────────────────────────────────────────────────────────────────────
+    // required attributes can't be emptied
 
     function _patchUpdateAttrVal() {
         if (typeof window.sbUpdateAttrVal !== 'function') {
@@ -327,6 +229,7 @@ const RequiredAttrs = (() => {
         };
     }
 
+    // required attributes can't be added twice
     function _patchConfirmAddAttr() {
         if (typeof window.confirmAddAttr !== 'function') return;
         const orig = window.confirmAddAttr;
@@ -339,10 +242,7 @@ const RequiredAttrs = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PATCH: sbRenderAttrList()
-    //  After the list renders, swap ✕ buttons for 🔒 icons on required rows.
-    // ─────────────────────────────────────────────────────────────────────────
+    // lock icons on required rows
 
     function _patchRenderAttrList() {
         if (typeof window.sbRenderAttrList !== 'function') {
@@ -356,6 +256,7 @@ const RequiredAttrs = (() => {
         };
     }
 
+    // lock required rows
     function _lockRequiredRows() {
         const el = document.getElementById('attr-list');
         if (!el) return;
@@ -381,10 +282,7 @@ const RequiredAttrs = (() => {
         });
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PATCH: sbPopulateBuilder()
-    //  After populating, apply the correct layout class for the current mode.
-    // ─────────────────────────────────────────────────────────────────────────
+    // apply the layout when a ship opens
 
     function _patchPopulateBuilder() {
         if (typeof window.sbPopulateBuilder !== 'function') {
@@ -400,9 +298,7 @@ const RequiredAttrs = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  STYLES
-    // ─────────────────────────────────────────────────────────────────────────
+    // add the CSS once
 
     function _injectStyles() {
         if (document.getElementById('required-attrs-styles')) return;
@@ -479,16 +375,12 @@ const RequiredAttrs = (() => {
         document.head.appendChild(style);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  INSTALL
-    // ─────────────────────────────────────────────────────────────────────────
+    // set it up. Called on page load
 
     function install() {
         _injectStyles();
 
-        // Derive required keys — attrDefs may or may not be ready yet.
-        // If it isn't, we try again on DOMContentLoaded and once more on the
-        // dataLoaded event that DataLoader fires when plugins finish loading.
+        // needs the definitions — waits for them if not loaded yet
         function _init() {
             const d = _deriveRequirements();
             _requiredKeys    = new Set(d.required.keys());
@@ -520,9 +412,7 @@ const RequiredAttrs = (() => {
         _patchPopulateBuilder();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PUBLIC API
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── window.ShipBuilderRequiredAttrs ──
 
     return { install, isRequired, isRecommended, validate, backfill: _backfill };
 

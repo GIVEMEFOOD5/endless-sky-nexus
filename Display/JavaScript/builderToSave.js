@@ -1,21 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  builderToSave.js — "➜ Put in save" for the ship builder
-//
-//  Writes the design you're building straight into one of the saves kept in
-//  this browser (Saves & Account page), either as a new ship or as a refit
-//  of a ship already in it. Ships that came from a save ("💾 Save" fleet)
-//  default to refitting the ship they came from. The save is changed exactly
-//  like the save editor's "Add a ship" / "Refit" (shipDefinition.js +
-//  esSaveFile.js): repaired, refuelled and crewed, history kept.
-//
-//  The edited save is stored as the save's edited copy (and synced to the
-//  account if logged in) — open it on Saves & Account to download it, or
-//  use "Save into game file" there.
-//
-//  Needs: esSaveFile.js, saveVault.js, shipDefinition.js, shipBuilder.js
-// ═══════════════════════════════════════════════════════════════════════════
+// "➜ Put in a save" in the builder: add the ship to a save, or refit a ship in it, with a before/after view.
 
 (function () {
   const E = window.EsSaveFile, V = window.SaveVault, D = window.ShipDefinition;
@@ -26,6 +11,7 @@
 
   let state = null;   // { design, saves, saveId, doc, mode, targetUuid, name }
 
+  // name → game ship / outfit. Called by: the stats helpers
   function gameIndex() {
     const ships = new Map(), outfits = new Map();
     for (const p of Object.values((window.DataLoader && typeof window.DataLoader.getActiveData === 'function' ? window.DataLoader.getActiveData() : (window.allData || {})))) {
@@ -35,12 +21,13 @@
     return { ships, outfits };
   }
 
-  // ── before/after numbers and cost (needs autoFitting/afStats.js) ─────────
+  // ── before/after numbers and cost ──
   function statsOfDesign(design) {
     const A = window.AfStats; if (!A) return null;
     const { outfits } = gameIndex();
     return A.derive(A.hullAttrs(design), D.outfitList(design.outfits), outfits);
   }
+  // numbers for a ship in the save
   function statsOfSaveShip(sh) {
     const A = window.AfStats; if (!A || !sh) return null;
     const { ships, outfits } = gameIndex();
@@ -49,6 +36,7 @@
     if (!hull) return null;
     return A.derive(A.hullAttrs(hull), Object.entries(sh.outfits || {}).map(([n, c]) => [n, Number(c) || 0]), outfits);
   }
+  // before/after table
   function compareHtml(a, b) {
     const fmt = n => (Number.isFinite(n) ? n : 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
     const rows = [['Shields', x => x.shields], ['Hull', x => x.hull], ['Top speed', x => x.maxSpeed], ['Acceleration', x => x.acceleration],
@@ -59,8 +47,10 @@
         return `<tr><td>${l}</td><td style="text-align:right;">${fmt(x)}</td><td style="text-align:right;font-weight:600;color:${up ? 'var(--c-success-text,#4ade80)' : down ? 'var(--c-danger-text,#f87171)' : 'inherit'};">${fmt(y)}</td></tr>`; }).join('')}
     </table></div>`;
   }
+  // what the change costs
   function priceOf(stats) { return stats ? Math.max(0, Math.round(stats.cost)) : null; }
 
+  // the window
   function modal() {
     let m = document.getElementById('b2s-modal');
     if (m) return m;
@@ -89,6 +79,7 @@
   }
   function close() { document.getElementById('b2s-modal')?.classList.remove('active'); state = null; }
 
+  // load the chosen save
   async function loadSave(id) {
     state.saveId = id;
     state.doc = null;
@@ -102,6 +93,7 @@
     state.targetUuid = fromHere ? fromHere.uuid : (state.doc.flagship?.uuid || state.doc.ships[0]?.uuid || null);
   }
 
+  // draw the window
   function render() {
     const body = document.getElementById('b2s-body');
     if (!state || !body) return;
@@ -149,6 +141,7 @@
           <button class="btn btn-secondary" data-b2s="close">Cancel</button></div>`}`;
   }
 
+  // write the ship into the save
   async function apply() {
     const s = state;
     if (!s || !s.doc) return;
@@ -182,7 +175,7 @@
     }
   }
 
-  /** Open for a fleet ship (index) or, with no index, the ship being edited. */
+  // open for a fleet ship (index) or the ship being edited. Called by: the builder buttons
   async function open(fleetIndex, which = 'built') {
     let design;
     if (typeof fleetIndex === 'number') {

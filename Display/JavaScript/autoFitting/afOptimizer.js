@@ -1,35 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  autoFitting/afOptimizer.js — find a strong fit for a goal
-//
-//  Starting from the bare hull (plus anything you ask it to keep, e.g. a
-//  hyperdrive), it repeatedly adds the outfit that improves the goal's score
-//  the most per ton of outfit space, until nothing helps; then it tries
-//  taking each outfit out again and swapping in better ones, a few rounds.
-//  Space, weapon/engine capacity and gun/turret mounts are hard limits.
-//
-//  Scores are "effective" — a weapon only counts as much as the ship can
-//  power and cool it, so the optimiser adds generators, batteries and
-//  coolers by itself:
-//    energy factor  = share of the energy bill the ship can pay, or how long
-//                     the batteries hold out (vs. a target fight length)
-//    heat factor    = 100% / where the heat settles, once that's over 100%
-//    mobility       = penalty below the minimum turn rate / speed you set
-//
-//  Goals:
-//    dps      — weapon damage (primary, secondary or both)
-//    accel    — acceleration, keeping a usable turn rate
-//    speed    — top speed, keeping a usable turn rate
-//    bunks    — bunks (crew/passengers)
-//    cargo    — cargo space
-//    tank     — time to be destroyed by an enemy damage mix (shield vs
-//               hull damage share, from chosen enemies or an average)
-//    general  — a balance of damage, speed, turning, toughness and cargo,
-//               measured against the hull's stock loadout
-//
-//  window.AfOptimizer / module.exports. Needs AfStats.
-// ═══════════════════════════════════════════════════════════════════════════
+// Auto-fit: finds a good fit for a goal by adding outfits step by step (runs in afWorker).
 
 (function (root, factory) {
   const api = factory(typeof module !== 'undefined' && module.exports ? require('./afStats.js') : root.AfStats);
@@ -39,7 +10,7 @@
   const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
   const clamp01 = x => Math.max(0, Math.min(1, x));
 
-  // ── candidate preparation ────────────────────────────────────────────────
+  // ── candidate outfits ──
   function prepare(c) {
     const a = c.outfit.attributes || c.outfit;
     const vec = {};
@@ -54,12 +25,13 @@
     return { ...c, vec, weapon, space, maxCount: Math.min(limit, usesSlot ? Infinity : 1) };
   }
 
-  // ── a fit being built: totals kept incrementally ─────────────────────────
+  // ── a fit being built (totals kept as we go) ──
   function emptyFit(base) {
     const t = {};
     for (const [k, v] of Object.entries(base)) if (typeof v === 'number') t[k] = v;
     return { t, counts: new Map(), weapons: new Map() };
   }
+  // add outfits to a fit
   function addTo(fit, c, n = 1) {
     for (const [k, v] of Object.entries(c.vec)) fit.t[k] = (fit.t[k] || 0) + v * n;
     fit.counts.set(c.name, (fit.counts.get(c.name) || 0) + n);
@@ -70,25 +42,24 @@
       if (count > 0) fit.weapons.set(c.name, { ...c.weapon, count }); else fit.weapons.delete(c.name);
     }
   }
+  // copy a fit
   function cloneFit(f) { return { t: { ...f.t }, counts: new Map(f.counts), weapons: new Map(f.weapons) }; }
+  // [[name, count]]
   function outfitsOf(f) { return [...f.counts.entries()]; }
-  // Totals that may legitimately go below zero (an outfit can cool or
-  // generate instead of using). Anything else below zero means a limit was
-  // broken: outfit space, weapon/engine capacity, mounts, and the special
-  // slots some outfits need ("anchor point", "multimodal armor", ammo
-  // capacity …), which work the same way.
+  // totals that are allowed to go below zero (cooling, generation …)
   const MAY_BE_NEGATIVE = new Set(['heat generation', 'energy consumption', 'solar heat', 'thrusting heat',
     'turning heat', 'reverse thrusting heat', 'cooling energy', 'shield heat', 'hull heat', 'afterburner heat']);
+  // is it within every capacity?
   function fits(t) {
     for (const [k, v] of Object.entries(t)) if (v < -1e-9 && !MAY_BE_NEGATIVE.has(k)) return false;
     return true;
   }
+  // derived stats for a fit
   function derived(base, f) { return S.fromTotals(base, f.t, [...f.weapons.values()], outfitsOf(f)); }
 
-  // ── shared factors ───────────────────────────────────────────────────────
+  // ── shared scoring factors ──
   const FLOOR = 0.02;   // factors never hit zero, so the first engine/weapon still shows a gain
-  // Fights are short, so batteries may cover a shortfall for `target`
-  // seconds; flying around has to be sustainable (generators, not batteries).
+  // fights are short (batteries can cover a gap), flying has to be sustainable
   function energyFactor(d, situation, target) {
     const per = d.energy.perSec[situation];
     if (per >= 0) return 1;
@@ -100,10 +71,12 @@
     const hold = d.energy.capacity / -per;               // seconds the batteries cover the gap
     return Math.max(FLOOR, clamp01(Math.max(ratio, Math.min(1, hold / target))));
   }
+  // heat score
   function heatFactor(d, situation) {
     const p = d.heat.equilibriumPct[situation];
     return p <= 100 ? 1 : 100 / p;
   }
+  // movement score
   function mobility(d, o) {
     let m = 1;
     if (o.minTurn && d.turnRate < o.minTurn) m *= Math.pow(Math.max(FLOOR, d.turnRate / o.minTurn), 2);
@@ -112,6 +85,7 @@
     if (o.minCargo && d.cargo < o.minCargo) m *= Math.pow(Math.max(FLOOR, Math.max(0, d.cargo) / o.minCargo), 2);
     return m;
   }
+  // basic flyability score
   function basics(d) {
     let m = 1;
 
@@ -120,9 +94,7 @@
     if (d.energy.perSec.idle < 0) m *= 0.5;
     return m;
   }
-  // A fit must be flyable whatever the goal: it has to move, steer, and not
-  // overheat just sitting there or cruising. These aren't limits you set —
-  // a ship that fails them isn't a ship. Applied to every goal's score.
+  // every goal needs a flyable ship: moves, steers, doesn't overheat idle
   function viability(d) {
     let m = 1;
     if (!(d.maxSpeed > 0)) m *= 0.001;
@@ -132,13 +104,14 @@
     return m;
   }
 
+  // effective hit points
   function ehp(d, profile, regenSeconds = 30) {
     const sh = d.shields + d.shieldRegen * regenSeconds, hu = d.hull + d.hullRegen * regenSeconds;
     const ps = Math.max(0.05, profile.shield), ph = Math.max(0.05, profile.hull);
     return sh / ps + hu / ph;     // seconds under 1 dps of that mix
   }
 
-  // ── goal scores ──────────────────────────────────────────────────────────
+  // ── goal scores ──
   function scorer(goal, o, ref) {
     const fight = o.fightSeconds || 60;
     switch (goal) {
@@ -166,15 +139,7 @@
     }
   }
 
-  /**
-   * @param {object} p
-   *   base        hull attributes (AfStats.hullAttrs)
-   *   candidates  [{ name, outfit, unique, how, note, steal }]
-   *   goal        'dps'|'accel'|'speed'|'bunks'|'cargo'|'tank'|'general'
-   *   options     { weapons, minTurn, minSpeed, fightSeconds, profile, maxSteps }
-   *   keep        [[name, count]] always installed (e.g. the hyperdrive)
-   *   reference   stock fit [[name, count]] — the "general" goal's yardstick
-   */
+  // the search: grow, try expanders, clean up. Called by: afWorker, afUI (fallback)
   function optimize(p) {
     const o = p.options || {};
     const base = p.base;
@@ -235,7 +200,7 @@
     let fit = emptyFit(base);
     for (const [n, k] of p.keep || []) { const c = byName.get(n); if (c) addTo(fit, c, k); }
 
-    // a launcher is only worth its ammo: add launcher + a full load together
+    // a launcher only counts with ammo — add both together
     const ammoFor = c => {
       if (!c.weapon || !c.weapon.ammo) return null;
       const ammo = byName.get(c.weapon.ammo);
@@ -244,6 +209,7 @@
       const per = capKey ? Math.floor((c.vec[capKey] || 0) / -ammo.vec[capKey]) : 0;
       return per > 0 ? { ammo, per } : null;
     };
+    // try adding one outfit (or launcher + ammo)
     const tryAdd = (f, c) => {
       const g = cloneFit(f);
       addTo(g, c, 1);
@@ -256,10 +222,7 @@
       return fits(g.t) ? g : null;
     };
 
-    // "Support" outfits: the best steering, engine, generator, battery and
-    // cooler per ton. Adding one useful outfit often costs turning, energy
-    // or heat, so each candidate is also tried together with one support
-    // outfit — otherwise the build stalls just above a minimum turn rate.
+    // best support outfit per ton (steering, engine, generator, battery, cooler)
     const perTon = (c, k) => (c.vec[k] || 0) / c.space;
     const top = (k, n = 2) => usable.filter(c => (c.vec[k] || 0) > 0 && !c.weapon && !c.isAmmo)
       .sort((a, b) => perTon(b, k) - perTon(a, k)).slice(0, n);
@@ -272,6 +235,7 @@
     // Progress for the loading bar: how many outfits added so far and which
     // stage it's at (p.onProgress, called at most ~10 times a second).
     let steps = 0, lastReport = 0;
+    // report progress (≤ 10 times/s)
     const progress = (phase, force) => {
       if (typeof p.onProgress !== 'function') return;
       const now = Date.now();
@@ -281,6 +245,7 @@
     };
     const can = c => (fit.counts.get(c.name) || 0) < (c.unique ? 1 : c.maxCount);
     const PAIR_POOL = 100;
+    // add the single best outfit
     const growStep = (pool = usable, pairs = true) => {
       let best = null, bestGain = 0;
       const stuck = [];   // candidates that don't help alone — the most promising get a support outfit
@@ -312,18 +277,12 @@
     };
     let quiet = false;
 
-    // ── Capacity expanders ────────────────────────────────────────────────
-    // Outfits like "Outfits Expansion" (+15 outfit space, −20 cargo, a little
-    // less heat dissipation) or a plugin's extra weapon capacity / mounts do
-    // nothing on their own — their value is what the freed room lets you fit,
-    // minus their own costs. So when the build stalls, each expander is tried
-    // with a look-ahead: add it, fill the new room as usual, and keep it only
-    // if the finished result scores better than without it.
+    // ── capacity expanders: try them, fill the new room, keep if better ──
     const consumed = new Set();
     for (const c of usable) for (const [k, v] of Object.entries(c.vec)) if (v < 0 && !MAY_BE_NEGATIVE.has(k)) consumed.add(k);
     const expanders = usable.filter(c => !c.isAmmo && !c.weapon && Object.entries(c.vec).some(([k, v]) => v > 0 && consumed.has(k)));
     const LOOKAHEAD = 20, POOL = 60;
-    // What would be worth adding if there were room? (score with space limits lifted)
+    // what would be worth adding with no space limits. Called by: expandStep
     const roomyPool = () => {
       const roomy = cloneFit(fit);
       for (const k of consumed) roomy.t[k] = (roomy.t[k] || 0) + 1e6;
@@ -337,6 +296,7 @@
       }
       return ranked.sort((a, b) => b[0] - a[0]).slice(0, POOL).map(x => x[1]);
     };
+    // try one capacity expander
     const expandStep = () => {
       if (!expanders.length) return false;
       const startFit = fit, startCur = cur;
@@ -359,6 +319,7 @@
       log.push(`+ ${best.e.name} (for the room it frees) and what fills it`);
       return true;
     };
+    // grow until nothing helps
     const growAll = () => {
       let any = false;
       for (let round = 0; round < 50; round++) {
@@ -394,7 +355,7 @@
     return { outfits, derived: d, score: cur, log, sources: outfits.map(([n]) => byName.get(n)).filter(Boolean) };
   }
 
-  /** Average damage mix (shield vs hull share) of a set of armed fits. */
+  // average shield/hull damage mix of some armed fits. Called by: afUI.enemyProfile
   function damageProfile(fitsDerived) {
     let sh = 0, hu = 0;
     for (const d of fitsDerived) { sh += d.dps.shield; hu += d.dps.hull; }

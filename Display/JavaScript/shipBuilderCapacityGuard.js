@@ -1,82 +1,24 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  shipBuilderCapacityGuard.js  —  Capacity Violation Prevention
-//
-//  INTEGRATION
-//  ─────────────────────────────────────────────────────────────────────────────
-//  Load AFTER shipBuilder.js in shipBuilder.html (already the case):
-//
-//      <script src="../JavaScript/shipBuilder.js"></script>
-//      <script src="../JavaScript/shipBuilderAttrValidation.js"></script>
-//      <script src="../JavaScript/shipBuilderCapacityGuard.js"></script>
-//
-//  DESIGN
-//  ─────────────────────────────────────────────────────────────────────────────
-//  This guard does NOT maintain its own capacity accounting.
-//  It delegates entirely to shipBuilder.js's own functions:
-//
-//    sbUsedCapacity(key)     — current used amount for a capacity key
-//    sbShipCapacity(key)     — current maximum for a capacity key
-//    sbGetOutfitCapacityEffect(name, key) — per-outfit effect on a key
-//    sbCheckOutfitSpace(name, count)      — full addition check (used for adds)
-//
-//  This guarantees the guard and the displayed capacity bars always agree.
-//
-//  WHAT IS GUARDED
-//  ─────────────────────────────────────────────────────────────────────────────
-//  Removals / reductions (smart bulk removal):
-//    sbRemoveOutfit(i)           Smart bulk: removes as many copies as safely
-//                                possible; shows modal explaining what stayed.
-//    sbUpdateOutfitCount(i, n)   Decrease: same smart bulk logic.
-//                                Increase: delegates to sbCheckOutfitSpace.
-//    sbRemoveAttr(key)           Blocks if removing a capacity attr would
-//                                leave installed outfits over their limit.
-//    sbUpdateAttrVal(inp)        Blocks reductions of capacity attrs that
-//                                would leave outfits over their limit.
-//
-//  Additions:
-//    sbAddOutfitFromPicker()     Two-pass check: sbCheckOutfitSpace handles the
-//    confirmAddOutfit()          four capacity keys; we add a second pass that
-//                                checks every other attribute the outfit affects
-//                                (e.g. heat dissipation) and blocks if any would
-//                                go illegally negative. Sign rules come from
-//                                AttrValidation so nothing is hardcoded.
-//    addGunTurret(type)          Blocks adding gun/turret hardpoints beyond
-//                                the ship's gun ports / turret mounts attr.
-//    confirmAddAttr()            Blocks setting a capacity attr to a value
-//                                lower than what's currently in use.
-//
-//  SMART BULK REMOVAL
-//  ─────────────────────────────────────────────────────────────────────────────
-//  When the user removes an outfit that provides capacity to others, instead
-//  of a hard block the guard finds the minimum copies needed to keep all other
-//  outfits legal, removes the surplus, then shows a modal explaining the result.
-//
-// ═══════════════════════════════════════════════════════════════════════════════
+// Stops builder edits that would put the ship over a capacity, and offers to remove outfits to fit.
 
 const CapacityGuard = (() => {
     'use strict';
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  CAPACITY KEY LIST
-    //
-    //  Mirrors SB_CAPACITY_ATTRS in shipBuilder.js exactly so accounting is
-    //  always identical to what the capacity bars display.
-    // ─────────────────────────────────────────────────────────────────────────
+    // capacity attributes (same list the builder uses)
 
     // From the parser (gameKeys.js): attributes Ship::FinishLoading won't
     // allow below zero. The list is only the fallback before attrDefs loads.
     const _CAPACITY_FALLBACK = ['outfit space', 'engine capacity', 'weapon capacity', 'cargo space'];
+    // capacity keys. Called by: the builder, ItemStats, sorters
     const capacityKeys = () => (window.GameKeys ? window.GameKeys.capacityKeys(_CAPACITY_FALLBACK) : _CAPACITY_FALLBACK);
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  HIGHLIGHT CONTROL
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── highlighting rows that are over ──
 
     const HIGHLIGHT_MS = 3500;
     let _highlightTimer = null;
 
+    // mark rows that are over
     function _highlightViolations(violatedKeys) {
         _clearHighlights();
         if (!violatedKeys || !violatedKeys.length) return;
@@ -93,29 +35,20 @@ const CapacityGuard = (() => {
         _highlightTimer = setTimeout(_clearHighlights, HIGHLIGHT_MS);
     }
 
+    // clear the marks
     function _clearHighlights() {
         document.querySelectorAll('.sbs-card--violation')
             .forEach(el => el.classList.remove('sbs-card--violation'));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  SBS REFRESH HELPER
-    // ─────────────────────────────────────────────────────────────────────────
+    // redraw the stats panel
 
     function _sbsRefresh() {
         if (typeof SBS !== 'undefined' && typeof SBS.refresh === 'function')
             SBS.refresh();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  CORE VIOLATION CHECK — hypothetical outfit list
-    //
-    //  Uses sbGetOutfitCapacityEffect (from shipBuilder.js) and sbShipCapacity
-    //  so the numbers are identical to what the capacity bars show.
-    //
-    //  hypotheticalOutfits: array of { name, count } — the post-action state
-    //  Returns: array of { key, used, max, over }
-    // ─────────────────────────────────────────────────────────────────────────
+    // capacities that would go negative. Called by: the guards
 
     function _checkViolations(hypotheticalOutfits) {
         const violations = [];
@@ -142,14 +75,7 @@ const CapacityGuard = (() => {
         return violations;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  VIOLATION CHECK — after an attribute value change
-    //
-    //  Keeps the current outfit list but substitutes a different max for one
-    //  capacity key. Used when testing attr removal or reduction.
-    //
-    //  overrides: { [capacityKey]: newMaxValue }  (use 0 to simulate removal)
-    // ─────────────────────────────────────────────────────────────────────────
+    // same, with some attributes changed first. Called by: attribute guards
 
     function _checkViolationsWithAttrOverrides(overrides) {
         if (!sbCurrentShip) return [];
@@ -169,16 +95,7 @@ const CapacityGuard = (() => {
         return violations;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  SMART BULK REMOVAL
-    //
-    //  Finds the minimum number of copies of outfits[i] needed so all other
-    //  outfits remain within capacity, removes the surplus, shows a modal.
-    //
-    //  outfits:    sbCurrentShip.outfits (live reference)
-    //  i:          index of outfit to reduce
-    //  originalFn: original sbRemoveOutfit (for full removal when minNeeded===0)
-    // ─────────────────────────────────────────────────────────────────────────
+    // remove the fewest outfits to fit again (asks first). Called by: the guards
 
     function _smartBulkRemove(outfits, i, originalFn) {
         const target     = outfits[i];
@@ -232,9 +149,7 @@ const CapacityGuard = (() => {
         _sbsRefresh();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  GUARD: sbRemoveOutfit(i)
-    // ─────────────────────────────────────────────────────────────────────────
+    // guard: removing an outfit
 
     function _guardRemoveOutfit(originalFn) {
         return function(i) {
@@ -272,9 +187,7 @@ const CapacityGuard = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  GUARD: sbUpdateOutfitCount(i, newCount)
-    // ─────────────────────────────────────────────────────────────────────────
+    // guard: changing an outfit count
 
     function _guardUpdateOutfitCount(originalFn) {
         return function(i, newCountRaw) {
@@ -310,9 +223,7 @@ const CapacityGuard = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  GUARD: sbRemoveAttr(key)
-    // ─────────────────────────────────────────────────────────────────────────
+    // guard: removing an attribute
 
     function _guardRemoveAttr(originalFn) {
         return function(key) {
@@ -334,9 +245,7 @@ const CapacityGuard = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  GUARD: sbUpdateAttrVal(inp)
-    // ─────────────────────────────────────────────────────────────────────────
+    // guard: changing an attribute
 
     function _guardUpdateAttrVal(originalFn) {
         return function(inp) {
@@ -364,9 +273,7 @@ const CapacityGuard = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  GUARD: confirmAddAttr
-    // ─────────────────────────────────────────────────────────────────────────
+    // guard: adding an attribute
 
     function _guardConfirmAddAttr(originalFn) {
         return function(...args) {
@@ -398,9 +305,7 @@ const CapacityGuard = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  GUARD: addGunTurret(type)
-    // ─────────────────────────────────────────────────────────────────────────
+    // guard: adding a gun/turret/bay
 
     function _guardAddGunTurret(originalFn) {
         return function(type, ...rest) {
@@ -434,22 +339,7 @@ const CapacityGuard = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  ATTRIBUTE-LEVEL ADDITION CHECK
-    //
-    //  sbCheckOutfitSpace (inside shipBuilder) only checks the four capacity
-    //  keys. It has no knowledge of attributes like heat dissipation that can
-    //  be driven negative by outfit effects (e.g. "Outfitter Expansion").
-    //
-    //  This function computes the net effect on EVERY attribute of adding
-    //  `count` copies of `outfitName` to the current ship, then checks
-    //  whether any attribute that must stay non-negative would go negative.
-    //
-    //  Sign rules come from AttrValidation.getRule (shipBuilderAttrValidation.js)
-    //  so we never hardcode attribute names here.
-    //
-    //  Returns array of { key, currentNet, wouldBe, deficit } for violations.
-    // ─────────────────────────────────────────────────────────────────────────
+    // would adding this outfit break an attribute rule (e.g. a minimum)? Called by: _guardAddOutfit
 
     function _checkAttrViolationsOnAdd(outfitName, count) {
         if (!sbCurrentShip) return [];
@@ -518,22 +408,14 @@ const CapacityGuard = (() => {
         return violations;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  GUARD: sbAddOutfitFromPicker / confirmAddOutfit
-    //
-    //  sbCheckOutfitSpace (called inside the original functions) handles the
-    //  four capacity keys. We add a second pass here that checks every other
-    //  attribute the outfit affects, blocking if any would go illegally negative.
-    // ─────────────────────────────────────────────────────────────────────────
+    // guard: adding an outfit
 
     function _guardAddOutfit(originalFn) {
         return function(...args) {
             const ship = (typeof sbCurrentShip !== 'undefined') ? sbCurrentShip : null;
             if (!ship) return originalFn.apply(this, args);
 
-            // Determine outfit name and count from whichever modal is active.
-            // sbAddOutfitFromPicker encodes payload in args[0] (base64 JSON).
-            // confirmAddOutfit reads directly from DOM inputs.
+            // name and count from whichever add window is open
             let outfitName = null;
             let count      = 1;
 
@@ -581,12 +463,11 @@ const CapacityGuard = (() => {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  STYLES & MODAL
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── styles and the warning window ──
 
     const MODAL_ID = 'modal-cap-guard';
 
+    // add the CSS once
     function _injectStyles() {
         if (!document.getElementById('cap-guard-styles')) {
             const style = document.createElement('style');
@@ -660,10 +541,12 @@ const CapacityGuard = (() => {
         }
     }
 
+    // "outfit space" → "Outfit Space"
     function _capWords(s) {
         return String(s).split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
     }
 
+    // the warning window
     function _showModal(actionDesc, violations, partialInfo) {
         _injectStyles();
 
@@ -715,13 +598,12 @@ const CapacityGuard = (() => {
         document.getElementById(MODAL_ID).classList.add('active');
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  INSTALL
-    // ─────────────────────────────────────────────────────────────────────────
+    // wrap the builder functions with the guards. Called on page load
 
     function install() {
         _injectStyles();
 
+        // wrap one builder function
         const wrap = (name, guardFn) => {
             if (typeof window[name] === 'function') {
                 window[name] = guardFn(window[name]);

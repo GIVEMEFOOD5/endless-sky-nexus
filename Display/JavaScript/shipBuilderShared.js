@@ -1,18 +1,13 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  shipBuilderShared.js — opens a shared ship link:
-//    shipBuilder.html?shared=<saved_ships id>
-//  Shows the ship with its owner and lets the visitor add a copy to one of
-//  their fleets, or report it. Only public (and not hidden) ships load for
-//  other people — the database policy enforces that, not this file.
-// ═══════════════════════════════════════════════════════════════════════════
+// Opens a ship someone shared from their account (from a link) in the builder.
 
 (function () {
   const id = new URLSearchParams(location.search).get('shared');
   if (!id) return;
   const h = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+  // the window
   function modal(html) {
     let m = document.getElementById('modal-sb-shared');
     if (!m) {
@@ -26,6 +21,7 @@
     return m;
   }
 
+  // show a shared ship
   async function show() {
     if (window.EsAuth) await window.EsAuth.ready();
     const { data: ship, error } = await window.supabaseClient.from('saved_ships')

@@ -1,30 +1,22 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  builderExtras.js — undo for the ship builder, and "Edit in builder" from
-//  the save editor
-//
-//  Undo: every click or edit inside the builder that changes the ship is
-//  remembered (up to 40 steps). ↶ Undo in the header or Ctrl+Z (when not
-//  typing in a box) steps back. Switching to another ship starts afresh.
-//
-//  Open from a save: the save editor stores the ship's uuid in
-//  ES_SB_OPEN_SAVE_SHIP and opens this page; once the save's ships are
-//  loaded (ES_SM_ACTIVE_SAVE_SHIPS), that ship opens for editing.
-// ═══════════════════════════════════════════════════════════════════════════
+// Builder extras: undo (↶ / Ctrl+Z), opening a ship from the save editor, outfit type-ahead.
 
 (function () {
   const MAX = 40;
   let stack = [], current = null;
+  // the ship being edited
   const cur = () => (typeof sbCurrentShip !== 'undefined' ? sbCurrentShip : null);
   const btn = () => document.getElementById('sb-undo-btn');
+  // enable/disable the undo button
   const refresh = () => { const b = btn(); if (b) { b.disabled = !stack.length; b.textContent = stack.length ? `↶ Undo (${stack.length})` : '↶ Undo'; } };
+  // add a snapshot to the history
   function track() {
     const s = cur();
     if (s !== current) { current = s; stack = []; refresh(); }
   }
 
-  /** Remember the ship as it is now (call before changing it from code). */
+  // remember the ship before changing it from code. Called by: afUI.apply
   function snapshot() {
     track();
     const s = cur(); if (!s) return;
@@ -33,6 +25,7 @@
     refresh();
   }
 
+  // go back one step. Called by: ↶ and Ctrl+Z
   function undo() {
     track();
     if (!stack.length || typeof sbCurrentShip === 'undefined') return;
@@ -45,7 +38,7 @@
     if (typeof sbToast === 'function') sbToast('Undone.', 'success');
   }
 
-  // Watch changes made by clicks/edits inside the builder.
+  // remember the ship before edits in the builder. Called on page load
   function watch() {
     const view = document.getElementById('builder-view');
     if (!view) return;
@@ -76,11 +69,12 @@
     });
   }
 
-  // Opened from the save editor's "Edit in builder"
+  // open a ship sent from the save editor. Called on page load
   function openFromSave() {
     let uuid = null;
     try { uuid = localStorage.getItem('ES_SB_OPEN_SAVE_SHIP'); } catch (_) {}
     if (!uuid) return;
+    // try again until the builder is ready. Called by: openFromSave
     const tryOpen = () => {
       if (typeof sbSaveFleet === 'undefined' || typeof sbEditSaveShip !== 'function') return false;
       const i = sbSaveFleet.findIndex(s => s._uuid === uuid);
@@ -94,7 +88,7 @@
     if (window.DataLoader) window.DataLoader.onReady(() => setTimeout(tryOpen, 50));
   }
 
-  // Outfit-name boxes get the shared type-ahead (selected plugins, plugin shown)
+  // outfit-name boxes get the shared type-ahead
   function nameBoxes() {
     if (!window.NameSearch) return;
     const el = document.getElementById('new-outfit-name');

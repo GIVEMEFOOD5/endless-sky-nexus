@@ -1,37 +1,23 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  autoFitting/afPeers.js — what "good handling" means for this kind of ship
-//
-//  Instead of a fixed turn limit, the auto-fitter asks: how well do similar
-//  ships turn and move? "Similar" means, in order of preference:
-//    1. same class (category) AND a hull weight within ±35%
-//    2. same class, any weight
-//    3. any class with a hull weight within ±35%
-//  (the first group with at least 5 ships wins). Ships are taken from the
-//  base game, every active plugin (variants included, with their own
-//  loadouts) and the user's own saved designs (all builder fleets).
-//
-//  Each peer is measured with its stock loadout (AfStats); the median turn
-//  rate, top speed and acceleration become the auto-fitter's minimums.
-//
-//  window.AfPeers. Needs AfStats and ShipDefinition (outfit lists).
-// ═══════════════════════════════════════════════════════════════════════════
+// Auto-fit: what "good" looks like for this kind of ship (similar ships from the game and your designs).
 
 (function () {
   const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
   const median = a => { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
   const MASS_BAND = 0.35, MIN_PEERS = 5;
 
+  // is it a base-game ship?
   function isBaseGame(pluginKey) { return /^(official-game|endless-sky)\b/i.test(String(pluginKey || '')); }
 
+  // outfits as [[name, count]]
   function outfitList(outfits) {
     if (window.ShipDefinition) return window.ShipDefinition.outfitList(outfits);
     if (Array.isArray(outfits)) return outfits.map(o => [o.name, Number(o.count) || 1]);
     return Object.entries(outfits || {}).map(([n, v]) => [n, typeof v === 'object' ? Number(v.count) || 1 : Number(v) || 1]);
   }
 
-  /** Every ship we can compare against: { name, source, category, hullMass, base, outs }. */
+  // every ship to compare against. Called by: reference
   function collect(excludeId) {
     const S = window.AfStats;
     const out = [];
@@ -68,16 +54,14 @@
     return out;
   }
 
+  // name → outfit (selected plugins)
   function outfitIndex() {
     const m = new Map();
     for (const p of Object.values(window.AfStats.activeData())) for (const o of p.outfits || []) if (o && o.name && !m.has(o.name)) m.set(o.name, o);
     return m;
   }
 
-  /**
-   * Typical handling for ships like `design`.
-   * → { turn, speed, accel, count, basis, category, mass, bySource, examples }  (null if nothing to compare)
-   */
+  // typical numbers for ships like this one (same class and weight). Called by: afUI
   function reference(design) {
     const S = window.AfStats;
     if (!S) return null;

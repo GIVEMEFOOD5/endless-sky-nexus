@@ -1,46 +1,25 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  shipDefinition.js — turns a ship design into a `ship` block for a save
-//
-//  Two kinds of source:
-//
-//  • Ship builder designs (fleets, shared ships) — written out in full, the
-//    same way the builder's own export (sbGenerateES) does. If the design
-//    started from a game ship (`_sourceShip`), the block is written in
-//    variant form `ship "<that model>" "<design name>"` so the game still
-//    knows the model and fills in anything the design leaves out
-//    (description, thumbnail, …) from it.
-//
-//  • Game ships and variants (window.allData) — written as a variant of the
-//    base model with just its outfit list: `ship "Falcon" "Falcon (Heavy)"`
-//    + `outfits`. This is exactly how the game defines variants itself: on
-//    load it copies attributes, sprite and hardpoints from the base model
-//    and mounts the weapons on free hardpoints (Ship::Load / FinishLoading).
-//
-//  maxLevels() works out full shields / hull / fuel and required crew from
-//  the design's attributes plus its outfits, so a new or refitted ship
-//  starts repaired, refuelled and crewed.
-//
-//  window.ShipDefinition (browser) / module.exports (Node)
-// ═══════════════════════════════════════════════════════════════════════════
+// Turns a builder design or game ship into the game's ship text, for saves and exports.
 
 (function (root, factory) {
   const api = factory();
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ShipDefinition = api;
 })(typeof self !== 'undefined' ? self : this, function () {
+  // one text node
   const node = (tokens, children = []) => ({ tokens: tokens.map(String), children });
   const clean = v => String(v ?? '').replace(/^"([^"]*)"$/, '$1');
   const isNum = v => /^-?[0-9]*\.?[0-9]+(e[-+]?\d+)?$/i.test(String(v).trim());
 
+  // outfits as [[name, count]]. Called by: auto-fit, builderToSave, saveEditor
   function outfitList(outfits) {
     if (!outfits) return [];
     if (Array.isArray(outfits)) return outfits.map(o => [clean(o.name), parseInt(o.count) || 1]).filter(([n]) => n);
     return Object.entries(outfits).map(([n, v]) => [clean(n), typeof v === 'object' && v ? (parseInt(v.count) || 1) : (Number(v) || 1)]).filter(([n]) => n);
   }
 
-  // { key: [true | [values…], …] } → child nodes (builder hardpoint extras)
+  // { key: values } → child lines (hardpoint extras). Called by: fromBuild
   function attrsToNodes(attrs) {
     const out = [];
     for (const [k, occs] of Object.entries(attrs || {})) {
@@ -51,6 +30,7 @@
     }
     return out;
   }
+  // take one key out to write inline
   function takeInline(attrs, key) {
     if (!attrs || !attrs[key] || !attrs[key].length) return { value: null, rest: attrs };
     const [first, ...more] = attrs[key];
@@ -60,11 +40,7 @@
   }
   const coords = c => String(c || '0 0').trim().split(/\s+/).slice(0, 2).concat(['0', '0']).slice(0, 2);
 
-  /**
-   * Builder design → ship node.
-   * @param {object} b      builder ship (map- or array-style outfits)
-   * @param {Set<string>} [knownModels]  game ship names; enables variant form
-   */
+  // builder design → ship node. Called by: builderToSave, saveEditor
   function fromBuild(b, knownModels) {
     const model = b._sourceShip && (!knownModels || knownModels.has(b._sourceShip)) ? b._sourceShip : null;
     const label = b.name || b.variant || 'Custom ship';
@@ -126,7 +102,7 @@
     return node(head, kids);
   }
 
-  /** Game ship (allData ships[] entry) or variant (allData variants[] entry, has .baseShip) → ship node. */
+  // game ship or variant → ship node. Called by: saveEditor
   function fromGameShip(s) {
     const base = s.baseShip || s.name;
     const variantName = s.baseShip ? (s.variant || s.name) : s.name;
@@ -136,13 +112,7 @@
     return node(['ship', base, variantName], kids);
   }
 
-  /**
-   * Full shields, hull, fuel and the crew it needs, from the design's own
-   * attributes (or its base model's) plus every installed outfit.
-   * @param {object} attrs           ship attributes (flat)
-   * @param {Array<[name,count]>} outfits
-   * @param {Map<string, object>} outfitIndex  name → outfit (flat attributes)
-   */
+  // full shields, hull, fuel and crew for the design
   function maxLevels(attrs, outfits, outfitIndex) {
     const sum = key => {
       let v = Number(attrs?.[key]) || 0;

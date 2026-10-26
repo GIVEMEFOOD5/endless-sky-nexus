@@ -1,35 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  autoFitting/afPool.js — which outfits can this pilot actually get?
-//
-//  For every outfit in the active plugins it works out:
-//    • buy      — planets whose outfitter sells it, and those planets'
-//                 governments ("factions": Republic, Hai, Korath …)
-//    • plunder  — ships that carry it, and the governments that fly them;
-//                 boarding/destroying them costs reputation with those
-//                 governments unless they're already hostile to you
-//    • missions — missions that give it
-//    • licences it needs, "unique" (one only), not installable, …
-//
-//  With a save open it also knows where you've been, which licences you
-//  hold, your reputation with each government, and which story missions /
-//  events have happened. That lets it:
-//    • default the faction filter to the factions whose outfitters you've
-//      actually visited ("only a few species unlocked → default to those")
-//    • judge stealing:
-//        hostile    — you're already hostile to every government flying it,
-//                     so stealing costs nothing more → allowed
-//        fixable    — it costs reputation, but a story mission/event you
-//                     haven't done yet raises it again → allowed, with that
-//                     mission suggested
-//        costly     — it costs reputation and nothing you haven't done fixes it
-//        unknown    — no save open, so it can't tell
-//
-//  Data: allData (active plugins), plus Supabase planets (name → government)
-//  and missions' reputation side effects, and events that set reputation.
-//  window.AfPool
-// ═══════════════════════════════════════════════════════════════════════════
+// Auto-fit: which outfits this pilot can actually get (selected plugins, factions, outfitters, licences, owned, stealing).
 
 (function () {
   const EXCLUDED_CATEGORIES = new Set(['Licenses', 'Minerals', 'Hand to Hand', 'Special', 'Unique']);
@@ -38,6 +9,7 @@
 
   let cache = null;   // shared per page: { planets, menders }
 
+  // all rows of a table (fallback)
   async function fetchAll(table, cols, filter) {
     const sb = window.supabaseClient;
     if (!sb) return [];
@@ -53,16 +25,15 @@
     return out;
   }
 
-  /** Planet → government, and every way the story raises a reputation. */
+  // planet → government, and every way the story raises a reputation. Called by: load
   async function worldData() {
     const key = [...(window.AfStats.activePluginIds() || [])].sort().join('|');
     if (cache && cache.key === key) return cache;
-    // Only the selected plugins, filtered by the database (not downloaded and
-    // thrown away here), and only the missions that can matter: ones that
-    // change a reputation or trigger an event. Pages arrive side by side.
+    // selected plugins only, filtered by the database; only missions that matter
     const ids = [...(window.AfStats.activePluginIds() || [])];
     const mine = q => (ids.length ? q.in('plugin_id', ids) : q);
     const H = window.SupabaseHelpers;
+    // rows for the selected plugins
     const rows = (table, select, filter) => (H && H.fetchAllRows)
       ? H.fetchAllRows(table, { select, orderBy: 'id', filters: q => filter(mine(q)) }).catch(() => [])
       : fetchAll(table, select, q => filter(mine(q)));
@@ -76,6 +47,7 @@
     // government → [{ kind, name, label, value, op }]
     const menders = new Map();
     const add = (gov, entry) => { if (!menders.has(gov)) menders.set(gov, []); menders.get(gov).push(entry); };
+    // which reputations a mission/event raises
     const raises = (op, value) => (op === '+=' && num(value) > 0) || ((op === '=' || op === '>?=') && num(value) >= 0);
     const on = window.AfStats.activePluginIds();
     const active = r => !on || !r.plugin_id || on.has(r.plugin_id);
@@ -101,7 +73,7 @@
     return (cache = { key, planetGov, menders, eventMissions });
   }
 
-  /** What we know from the open save (or null). */
+  // what the open save tells us (or null). Called by: load
   async function saveInfo() {
     try {
       const id = JSON.parse(localStorage.getItem('ES_SM_CURRENT') || 'null');
@@ -127,11 +99,10 @@
     } catch (_) { return null; }
   }
 
-  // only what the selected plugins say: a planet, ship or mission from a
-  // plugin that isn't switched on doesn't exist in your game
+  // only what the selected plugins say
   function pluginEntries(locations) { return window.AfStats.activeLocations(locations); }
 
-  /** Build the per-outfit availability table. */
+  // availability for every outfit. Called by: afUI.open
   async function load() {
     const world = await worldData();
     const save = await saveInfo();
@@ -184,10 +155,7 @@
     return { list, factions, save, world };
   }
 
-  /**
-   * Stealing from a government's ships: what it costs.
-   * → { status: 'hostile'|'fixable'|'costly'|'unknown', gov, fix?: [{ label, kind, value }] }
-   */
+  // what stealing from a government costs you (hostile / fixable / costly). Called by: access
   function stealVerdict(ctx, gov) {
     const save = ctx.save;
     const menders = (ctx.world.menders.get(gov) || []);
@@ -205,11 +173,7 @@
   }
   const RANK = { hostile: 0, fixable: 1, unknown: 2, costly: 3 };
 
-  /**
-   * Can this pilot get this outfit, under these filters? → { ok, how, note, steal? }
-   * filters: { factions: Set|null, visitedOnly, allowBuy, allowPlunder, plunderPolicy ('safe'|'fixable'|'any'),
-   *            allowMissions, requireLicences, includeOwned }
-   */
+  // can this pilot get this outfit under these filters? Called by: afUI.candidates
   function access(ctx, e, f) {
     if (e.excluded) return { ok: false };
     const other = otherSources(ctx, e, f);
@@ -220,6 +184,7 @@
     return other;
   }
 
+  // other ways to get it
   function otherSources(ctx, e, f) {
     if (f.requireLicences && ctx.save && e.licences.some(l => !ctx.save.licenses.has(l)))
       return { ok: false, note: `Needs licence: ${e.licences.join(', ')}` };

@@ -1,40 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  shipBuilder.js
-//  Three modes:
-//    'new'    — create a ship from scratch
-//    'edit'   — edit an existing parsed/saved ship
-//    'outfit' — outfit an existing ship (starts on outfits tab)
-//
-//  Fleet storage:
-//    es_ship_builder_v4      →  main built fleet (sbFleet)
-//    ES_SM_ACTIVE_SAVE_SHIPS →  current save's ships (sbSaveFleet)
-//      sbSave() never touches ES_SM_ACTIVE_SAVE_SHIPS.
-//      sbSaveSaveShips() never touches es_ship_builder_v4.
-//      Both are loaded on init and kept in separate arrays.
-//
-//  Save-ship editing:
-//    sbEditMode === 'save' means we are editing from sbSaveFleet.
-//    saveShip() checks sbEditMode and writes to the correct store.
-//    Duplicating a save ship promotes it into sbFleet.
-//
-//  ── CHANGELOG (internal-ID pass) ──────────────────────────────────────────
-//    Outfit lookups throughout this file previously matched by bare NAME
-//    only (sbGetOutfitLookup built a flat `{ name: outfit }` map, silently
-//    overwritten whenever two loaded plugins defined a same-named outfit —
-//    last one processed wins, with no warning). parser.js now stamps every
-//    outfit with a `pluginId::name` internalId (see outfitMapToOutputFormat
-//    / _registerOutfit), and every outfit reference already carried on a
-//    ship (`ship.outfits[name] = { count, pluginId, internalId }`) carries
-//    that same compound key. sbFindOutfit and everything that calls it now
-//    accept an optional `pluginId` and prefer an exact internalId match,
-//    falling back to the old name-only lookup only when no pluginId is
-//    known (e.g. an outfit typed in manually via the free-text "Add
-//    Outfit" dialog, which has no plugin to attach). Every call site that
-//    already has an outfit entry object (which carries `.pluginId`) now
-//    threads it through instead of discarding it.
-// ═══════════════════════════════════════════════════════════
+// The ship builder page: your fleets, the builder (attributes, outfits, hardpoints) and export to the game's format.
 
 const SB_STORAGE_KEY      = 'es_ship_builder_v4';
 const SB_SAVE_SHIPS_KEY   = 'ES_SM_ACTIVE_SAVE_SHIPS';
@@ -57,29 +23,7 @@ let sbAllOutfits = [];
 let sbAllEffects = [];
 let sbAttrKeys   = [];
 
-// ═══════════════════════════════════════════════════════════
-//  DATA BRIDGE
-// ═══════════════════════════════════════════════════════════
-// ─────────────────────────────────────────────────────────
-//  Curated from the parser's attribute dictionary + tooltips.txt.
-//  A handful of real ship attributes never made it into the structured
-//  attribute dictionary (it's built from OutfitInfoDisplay.cpp's scale/
-//  boolean/value-name tables, which don't cover everything) but they do
-//  show up as attributesRead on Ship.cpp functions and/or in tooltips.txt:
-//    - "required crew" / "mandatory crew" / "use crew equivalent as crew"
-//      → read by Ship::RequiredCrew / Ship::FleetCost
-//    - "disabled recovery energy/fuel/heat/ionization/scrambling/
-//      disruption/slowing/discharge/corrosion/leak/burning"
-//      → read by Ship::DoGeneration (only "disabled recovery time" made
-//      it into the dictionary)
-//    - "heat capacity", "absolute threshold", "landing speed",
-//      "cloak hull threshold", "cloak phasing", "self destruct",
-//      "capture attack", "capture defense", "jump base mass", "income",
-//      "illegal", "maintenance costs", "operating costs",
-//      "operating income", and the scan/jamming family
-//      → documented only in data/_ui/tooltips.txt
-//  These are folded in below alongside the dictionary-derived keys.
-// ─────────────────────────────────────────────────────────
+// ── game data for the builder (ships, outfits, attribute definitions) ──
 const _SB_ATTR_FALLBACK = [
   // Identity / basic
   'category','mass','drag','required crew','mandatory crew','bunks','cargo space',
@@ -145,6 +89,7 @@ const _SB_ATTR_FALLBACK = [
   'unplunderable','installable',
 ];
 
+// refresh the game data the builder uses (selected plugins). Called by: every way of opening a ship
 function sbRefreshLiveData() {
   _sbOutfitLookup = null;
   const DL = window.DataLoader;
@@ -162,14 +107,13 @@ function sbRefreshLiveData() {
   }
 }
 
+// tooltip text for an attribute. Called by: sbAttrRow
 function sbAttrHint(key) {
   if (window.DataLoader) return window.DataLoader.getAttrHint(key);
   return '';
 }
 
-// ═══════════════════════════════════════════════════════════
-//  BLANK SHIP
-// ═══════════════════════════════════════════════════════════
+// an empty ship. Called by: newShip, sbExpandDesign, sbParseES
 function sbBlank() {
   return {
     id: Date.now() + Math.random(),
@@ -184,9 +128,7 @@ function sbBlank() {
   };
 }
 
-// ─────────────────────────────────────────────────────────
-//  LEAK NORMALISATION
-// ─────────────────────────────────────────────────────────
+// a leak entry in one consistent shape. Called by: sbShipFromParsed, sbParseES
 function _sbNormaliseLeak(raw) {
   if (!raw) return { name: '', openChance: 0, spreadChance: 0 };
   if (typeof raw === 'object' && raw.effect != null) {
@@ -206,16 +148,7 @@ function _sbNormaliseLeak(raw) {
   return { name: '', openChance: 0, spreadChance: 0 };
 }
 
-// ═══════════════════════════════════════════════════════════
-//  OUTFIT NORMALISATION
-// ═══════════════════════════════════════════════════════════
-//
-// NEW (internal-ID pass): also carries through `internalId` when the
-// source data has it (parser.js now stamps `pluginId::name` on every
-// ship-outfit entry — see outfitMapToOutputFormat). Falls back to
-// deriving it from pluginId+name when the source is older cached data
-// that predates this field, and to null (name-only lookup) when pluginId
-// itself is unknown.
+// outfits as [{ name, count, internalId }] whatever shape they came in. Called by: sbShipFromParsed, sbLoad
 function _sbNormaliseOutfitsToArray(outfits) {
   if (!outfits) return [];
   const withId = (name, pluginId, internalId) =>
@@ -243,9 +176,7 @@ function _sbNormaliseOutfitsToArray(outfits) {
   return [];
 }
 
-// ═══════════════════════════════════════════════════════════
-//  PERSISTENCE — MAIN BUILT FLEET
-// ═══════════════════════════════════════════════════════════
+// save the main fleet in this browser. Called by: saveShip, fleet actions
 
 function sbSave() {
   // Only writes to es_ship_builder_v4 — never touches ES_SM_ACTIVE_SAVE_SHIPS
@@ -261,6 +192,7 @@ function sbSave() {
   try { localStorage.setItem(SB_STORAGE_KEY, JSON.stringify(toStore)); } catch(e) {}
 }
 
+// load your fleet from this browser. Called on page load, shipBuilderFleets, saveManager
 function sbLoad() {
   try {
     const d = localStorage.getItem(SB_STORAGE_KEY);
@@ -275,11 +207,7 @@ function sbLoad() {
   } catch(e) { sbFleet = []; }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  PERSISTENCE — SAVE FLEET
-//  Reads/writes ES_SM_ACTIVE_SAVE_SHIPS only.
-//  Called by saveManager via sbLoadSaveShips() for hot-reload.
-// ═══════════════════════════════════════════════════════════
+// ships from your open save (Current Save Fleet) — read/write in this browser. Called by: sbLoad, renderFleet
 
 function sbLoadSaveShips() {
   try {
@@ -300,6 +228,7 @@ function sbLoadSaveShips() {
   renderExportChecklist();
 }
 
+// save your save fleet. Called by: saveShip
 function sbSaveSaveShips() {
   // Only writes to ES_SM_ACTIVE_SAVE_SHIPS — never touches es_ship_builder_v4
   const toStore = sbSaveFleet.map(ship => ({
@@ -314,23 +243,20 @@ function sbSaveSaveShips() {
   try { localStorage.setItem(SB_SAVE_SHIPS_KEY, JSON.stringify(toStore)); } catch(e) {}
 }
 
-// ═══════════════════════════════════════════════════════════
-//  VIEW SWITCHING
-// ═══════════════════════════════════════════════════════════
+// show the fleet cards. Called by: the ← Back to Fleet button, after saving
 function showFleetView() {
   document.getElementById('fleet-view').classList.remove('hidden');
   document.getElementById('builder-view').classList.add('hidden');
   renderFleet();
   renderExportChecklist();
 }
+// show the builder. Called by: every way of opening a ship
 function showBuilderView() {
   document.getElementById('fleet-view').classList.add('hidden');
   document.getElementById('builder-view').classList.remove('hidden');
 }
 
-// ═══════════════════════════════════════════════════════════
-//  FLEET RENDER — two collapsible sections
-// ═══════════════════════════════════════════════════════════
+// draw both fleet sections (save fleet, built fleet). Called by: after any fleet change
 function renderFleet() {
   const grid = document.getElementById('fleet-grid');
   if (!grid) return;
@@ -344,7 +270,7 @@ function renderFleet() {
     return;
   }
 
-  // ── Save Fleet Section ──────────────────────────────────
+  // your save's ships
   let saveSection = '';
   if (hasSaveShips) {
     const saveCards = sbSaveFleet.map((s, i) => {
@@ -389,7 +315,7 @@ function renderFleet() {
       </div>`;
   }
 
-  // ── Built Fleet Section ─────────────────────────────────
+  // your built ships
   let builtSection = '';
   if (hasBuiltShips) {
     const builtCards = sbFleet.map((s, i) => {
@@ -445,7 +371,7 @@ function renderFleet() {
   grid.innerHTML = saveSection + builtSection;
 }
 
-// ── Collapse toggles ──────────────────────────────────────
+// open/close a fleet section. Called by: the section headers
 function sbToggleSaveFleet() {
   sbSaveFleetCollapsed = !sbSaveFleetCollapsed;
   const cards   = document.getElementById('save-fleet-cards');
@@ -455,6 +381,7 @@ function sbToggleSaveFleet() {
   if (chevron) chevron.textContent   = sbSaveFleetCollapsed ? '▶' : '▼';
   if (header)  header.style.marginBottom = sbSaveFleetCollapsed ? '0' : '12px';
 }
+// open/close the built fleet section
 function sbToggleBuiltFleet() {
   sbBuiltFleetCollapsed = !sbBuiltFleetCollapsed;
   const cards   = document.getElementById('built-fleet-cards');
@@ -465,9 +392,7 @@ function sbToggleBuiltFleet() {
   if (header)  header.style.marginBottom = sbBuiltFleetCollapsed ? '0' : '12px';
 }
 
-// ═══════════════════════════════════════════════════════════
-//  SAVE FLEET ACTIONS
-// ═══════════════════════════════════════════════════════════
+// open a save ship in the builder. Called by: the save fleet cards
 
 function sbEditSaveShip(i) {
   sbRefreshLiveData();
@@ -482,7 +407,7 @@ function sbEditSaveShip(i) {
   showBuilderView();
 }
 
-/** Copy a save ship into the main built fleet (promotes it). */
+// copy a save ship into your main fleet. Called by: the save fleet cards
 function sbPromoteSaveShip(i) {
   const c = JSON.parse(JSON.stringify(sbSaveFleet[i]));
   c.id       = Date.now() + Math.random();
@@ -496,6 +421,7 @@ function sbPromoteSaveShip(i) {
   sbToast(`"${c.customName || c.name || 'Ship'}" promoted to main fleet.`, 'success');
 }
 
+// delete a save ship (asks first)
 function sbConfirmDeleteSaveShip(i) {
   const label = sbSaveFleet[i].customName || sbSaveFleet[i].name || 'Unnamed Ship';
   document.getElementById('confirm-text').textContent =
@@ -510,6 +436,7 @@ function sbConfirmDeleteSaveShip(i) {
   openModal('modal-confirm');
 }
 
+// empty the save fleet
 function sbClearSaveFleet() {
   if (!sbSaveFleet.length) return;
   document.getElementById('confirm-text').textContent =
@@ -524,9 +451,7 @@ function sbClearSaveFleet() {
   openModal('modal-confirm');
 }
 
-// ═══════════════════════════════════════════════════════════
-//  MAIN FLEET ACTIONS
-// ═══════════════════════════════════════════════════════════
+// open a fleet ship in the builder. Called by: the fleet cards
 function sbEditFleetShip(i) {
   sbRefreshLiveData();
   sbMode        = 'edit';
@@ -540,6 +465,7 @@ function sbEditFleetShip(i) {
   showBuilderView();
 }
 
+// copy a fleet ship
 function sbDuplicate(i) {
   const c = JSON.parse(JSON.stringify(sbFleet[i]));
   c.id      = Date.now() + Math.random();
@@ -552,6 +478,7 @@ function sbDuplicate(i) {
   sbToast('Ship duplicated!', 'success');
 }
 
+// delete a fleet ship (asks first)
 function sbConfirmDelete(i) {
   document.getElementById('confirm-text').textContent =
     `Delete "${sbFleet[i].name || 'Unnamed Ship'}"? This cannot be undone.`;
@@ -565,16 +492,11 @@ function sbConfirmDelete(i) {
   openModal('modal-confirm');
 }
 
-// ═══════════════════════════════════════════════════════════
-//  SAVE TO ACCOUNT — uploads one built ship into the logged-in
-//  user's save_files/saved_ships, optionally marking it public.
-//  Entirely separate from sbSave() above, which only auto-persists
-//  the whole local fleet to localStorage — this is an explicit,
-//  per-ship action the user opts into.
-// ═══════════════════════════════════════════════════════════
+// ── save one ship to your account ──
 
 let _sbCloudSaveIndex = null;
 
+// the save-to-account window. Called by: 🌐 Share on a fleet card
 function sbOpenCloudSaveModal(i) {
   if (!window.EsAuth) {
     sbToast('Account features are not available on this page.', 'danger');
@@ -610,10 +532,7 @@ function sbOpenCloudSaveModal(i) {
   openModal('modal-cloud-save');
 }
 
-/** Every user gets one default save file, created on first cloud save and
- * reused after that — the schema supports multiple save files per user,
- * but a dedicated "manage save files" UI is a separate feature; this
- * keeps the common case (just save my ship) to one click. */
+// your default cloud save file, made on first use. Called by: the account save window
 async function _sbEnsureDefaultSaveFile(userId) {
   const { data: existing } = await window.supabaseClient
     .from('save_files').select('id').eq('user_id', userId).order('created_at', { ascending: true }).limit(1);
@@ -692,10 +611,7 @@ async function _sbEnsureDefaultSaveFile(userId) {
   });
 })();
 
-// ═══════════════════════════════════════════════════════════
-//  MODE ENTRY POINTS
-// ═══════════════════════════════════════════════════════════
-// Every way to put a ship into the fleet — shown in the empty fleet and in "＋ Add ship".
+// every way to add a ship (shown in the empty fleet and "＋ Add ship"). Called by: renderFleet, sbOpenAddShip
 function sbAddShipOptionsHtml() {
   let hasSave = false;
   try { hasSave = !!JSON.parse(localStorage.getItem('ES_SM_CURRENT') || 'null'); } catch (_) {}
@@ -710,6 +626,7 @@ function sbAddShipOptionsHtml() {
       <span class="sb-add-opt__hint">${hasSave ? 'On Saves &amp; Account, use “Import Fleet to Builder” or a ship\'s 🛠 Builder button' : 'Open a save on Saves &amp; Account, then use “Import Fleet to Builder”'}</span></span></a>
   </div>`;
 }
+// the "＋ Add ship" window. Called by: the fleet bar
 function sbOpenAddShip() {
   let m = document.getElementById('sb-add-ship-modal');
   if (!m) {
@@ -724,9 +641,11 @@ function sbOpenAddShip() {
     ${sbAddShipOptionsHtml()}</div>`;
   m.classList.add('active');
 }
+// close it
 function sbCloseAddShip() { const m = document.getElementById('sb-add-ship-modal'); if (m) m.classList.remove('active'); }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') sbCloseAddShip(); });
 
+// start from scratch. Called by: + New Ship
 function newShip() {
   sbRefreshLiveData();
   sbMode = 'new'; sbEditIdx = -1; sbSaveEditIdx = -1; sbEditMode = 'built';
@@ -735,6 +654,7 @@ function newShip() {
   showBuilderView();
 }
 
+// start from a game ship, outfits only. Called by: 🔧 Outfit Existing
 function openOutfitExisting() {
   sbRefreshLiveData();
   if (!sbAllShips.length) { sbToast('No ship data loaded yet.', 'danger'); return; }
@@ -742,6 +662,7 @@ function openOutfitExisting() {
   sbOpenShipPicker();
 }
 
+// start from a game ship, everything editable. Called by: ✏️ Edit Existing
 function openEditExisting() {
   sbRefreshLiveData();
   if (!sbAllShips.length) { sbToast('No ship data loaded yet.', 'danger'); return; }
@@ -749,9 +670,7 @@ function openEditExisting() {
   sbOpenShipPicker();
 }
 
-// ═══════════════════════════════════════════════════════════
-//  SHIP PICKER
-// ═══════════════════════════════════════════════════════════
+// pick a game ship to start from. Called by: openOutfitExisting, openEditExisting
 function sbOpenShipPicker() {
   const title = document.getElementById('sb-ship-picker-title');
   if (title) title.textContent = sbMode === 'outfit' ? 'Choose a Ship to Outfit' : 'Choose a Ship to Edit';
@@ -781,12 +700,13 @@ function sbOpenShipPicker() {
   openModal('modal-sb-ship-picker');
 }
 
-/** What players see for a game ship's internal name (its display name, if it has one). */
+// a game ship's display name, if it has one
 function sbShipLabel(name) {
   const ship = sbAllShips.find(x => x.name === name);
   return ship && window.ShipNames ? ShipNames.label(ship) : name;
 }
 
+// filter the ship picker. Called by: its search box
 function sbFilterShipPicker(val) {
   const q = val.toLowerCase();
   document.querySelectorAll('#sb-ship-picker-list .sb-picker-row').forEach(r => {
@@ -797,11 +717,7 @@ function sbFilterShipPicker(val) {
   });
 }
 
-// ═══════════════════════════════════════════════════════════
-//  SHARE LINKS — a ship inside a link (no account, nothing saved online)
-//  Only what differs from the game ship it's based on goes in the link,
-//  so most links stay short enough for Discord.
-// ═══════════════════════════════════════════════════════════
+// ── share links: only what differs from the game ship goes in the link ──
 function sbCompactDesign(s) {
   const src = s._sourceShip ? sbAllShips.find(x => x.name === s._sourceShip) : null;
   const base = src ? sbShipFromParsed(src) : sbBlank();
@@ -819,6 +735,7 @@ function sbCompactDesign(s) {
   if (Object.keys(ad).length) out.a = ad;
   return out;
 }
+// link data → a design. Called by: sbOpenSharedShip
 function sbExpandDesign(c) {
   const src = c.src ? sbAllShips.find(x => x.name === c.src) : null;
   const s = src ? sbShipFromParsed(src) : sbBlank();
@@ -828,14 +745,17 @@ function sbExpandDesign(c) {
   s.id = Date.now() + Math.random();
   return { ship: s, missingHull: !!(c.src && !src) };
 }
+// make and show a share link. Called by: sbShareCurrent, sbShareFleetShip, afUI.shareFit
 async function sbShareShip(design, what = 'this ship') {
   if (!window.ShareLinks) return;
   const url = await ShareLinks.make('shipBuilder.html', 'ship', { ship: sbCompactDesign(design) });
   ShareLinks.show(url, what);
 }
+// share the open ship. Called by: 🔗 Share link
 function sbShareCurrent() { onBuilderChange(); sbShareShip(sbCurrentShip, `“${sbCurrentShip.name || 'this ship'}”`); }
+// share a fleet ship. Called by: 🔗 Link on a fleet card
 function sbShareFleetShip(i) { const s = sbFleet[i]; if (s) sbShareShip(s, `“${s.name || 'this ship'}”`); }
-// Opening a shared link: show the ship as a new, unsaved design
+// open a shared link as a new, unsaved design. Called on page load
 async function sbOpenSharedShip() {
   if (!window.ShareLinks || !/[#&]ship=/.test(location.hash)) return;
   const data = await ShareLinks.read('ship');
@@ -857,6 +777,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (window.DataLoader) window.DataLoader.onReady(() => setTimeout(sbOpenSharedShip, 150));
 });
 
+// open a picked game ship. Called by: the ship picker
 function sbPickShip(encoded) {
   closeModal('modal-sb-ship-picker');
   const src = JSON.parse(decodeURIComponent(escape(atob(encoded))));
@@ -867,6 +788,7 @@ function sbPickShip(encoded) {
   if (sbMode === 'outfit') sbSwitchTab('outfits');
 }
 
+// game ship → builder design. Called by: sbPickShip, sbCompactDesign, sbExpandDesign
 function sbShipFromParsed(src) {
   const s = sbBlank();
   s.name        = src.name        || '';
@@ -902,9 +824,7 @@ function sbShipFromParsed(src) {
   if (rawMass != null && rawMass !== '') s.mass = String(rawMass);
   if (rawDrag != null && rawDrag !== '') s.drag = String(rawDrag);
 
-  // NEW (internal-ID pass): thread `internalId` through from whichever
-  // source shape the ship's outfits came in as, deriving it from
-  // pluginId+name when the source predates the internalId field.
+  // keep each outfit's internalId, whatever shape it came in
   const sourcePluginId = src._pn || src._pluginName || null;
   const outfitSource = src.outfits || src.outfitMap;
   if (outfitSource && typeof outfitSource === 'object' && !Array.isArray(outfitSource)) {
@@ -978,14 +898,7 @@ function sbShipFromParsed(src) {
   return s;
 }
 
-// ─────────────────────────────────────────────────────────
-//  Converts a parser.js-shaped hardpoint object (which uses
-//  "arc": {arc_1:-90, arc_2:50} for multi-number lines, and
-//  "under" / "under_2" for repeated-key occurrences — see
-//  PARSER_DOCUMENTATION.md §5.2-§5.4) into our internal
-//  { key: [occurrence, occurrence, ...] } shape, where each
-//  occurrence is `true` (bare flag) or an array of values.
-// ─────────────────────────────────────────────────────────
+// parser hardpoint → builder hardpoint attributes. Called by: sbShipFromParsed
 function _sbParsedHardpointToAttrs(obj, excludeKeys) {
   const attrs = {};
   if (!obj || typeof obj !== 'object') return attrs;
@@ -1028,9 +941,7 @@ function _sbParsedHardpointToAttrs(obj, excludeKeys) {
   return attrs;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  BUILDER POPULATE
-// ═══════════════════════════════════════════════════════════
+// fill the builder with sbCurrentShip. Called by: every way of opening a ship
 function sbPopulateBuilder() {
   const s = sbCurrentShip;
   const modeLabel = { new: '✏️ New Ship', edit: '✏️ Edit Ship', outfit: '🔧 Outfit Ship' }[sbMode] || '';
@@ -1079,6 +990,7 @@ function sbPopulateBuilder() {
   sbSwitchTab(sbMode === 'outfit' ? 'outfits' : 'attributes');
 }
 
+// something changed — update stats and raw tab. Called by: most edits, afUI, builderToSave
 function onBuilderChange() {
   if (!sbCurrentShip) return;
   const s = sbCurrentShip;
@@ -1095,9 +1007,7 @@ function onBuilderChange() {
   sbRenderRaw();
 }
 
-// ═══════════════════════════════════════════════════════════
-//  SAVE SHIP — routes to correct store based on sbEditMode
-// ═══════════════════════════════════════════════════════════
+// save the open ship to the right place (fleet, save fleet …). Called by: 💾 Save Ship
 function saveShip() {
   onBuilderChange();
   if (!sbCurrentShip.name) {
@@ -1139,28 +1049,20 @@ function saveShip() {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  CAPACITY TRACKING
-// ═══════════════════════════════════════════════════════════
+// ── capacity (outfit space, engine, weapon, cargo) ──
 
 // Capacity attributes come from the parser (gameKeys.js → Ship::FinishLoading's
 // "can't be negative" list); this is only the fallback before attrDefs loads.
 const SB_CAPACITY_FALLBACK = ['outfit space', 'engine capacity', 'weapon capacity', 'cargo space'];
+// which attributes are capacities
 function sbCapacityKeys() {
   return window.GameKeys ? window.GameKeys.capacityKeys(SB_CAPACITY_FALLBACK) : SB_CAPACITY_FALLBACK;
 }
 const sbTitleCase = k => String(k).replace(/\b\w/g, c => c.toUpperCase());
 
-// ── NEW (internal-ID pass) ──────────────────────────────────────────────
-// _sbOutfitLookup is now TWO maps in one object:
-//   byId[internalId]   → exact-plugin match, no collision risk at all.
-//   byName[name]        → first-loaded fallback bucket, used ONLY when no
-//                          pluginId/internalId is known for the outfit
-//                          being looked up (e.g. free-typed outfit names).
-// Previously this was a single flat `{ name: outfit }` map that silently
-// overwrote same-named outfits from different plugins — the exact
-// collision class this pass exists to close.
+// outfit lookup by name and by plugin::name
 let _sbOutfitLookup = null;
+// build the outfit lookup once. Called by: sbFindOutfit
 function sbGetOutfitLookup() {
   if (_sbOutfitLookup) return _sbOutfitLookup;
   const byId = {};
@@ -1177,13 +1079,7 @@ function sbGetOutfitLookup() {
   return _sbOutfitLookup;
 }
 
-/**
- * Look up an outfit by name, preferring an exact `pluginId::name` match
- * when `pluginId` is provided. Falls back to the old ambiguous name-only
- * lookup only when no pluginId is known — e.g. an outfit typed manually
- * into the free-text "Add Outfit" dialog, which was never attached to a
- * specific plugin in the first place.
- */
+// an outfit by name, the exact plugin first if known. Called by: capacity checks, outfit lists, export
 function sbFindOutfit(outfitName, pluginId) {
   const lookup = sbGetOutfitLookup();
   const cleanName = outfitName.replace(/^"([^"]*)"$/, '$1');
@@ -1194,6 +1090,7 @@ function sbFindOutfit(outfitName, pluginId) {
   return lookup.byName[cleanName] || null;
 }
 
+// one attribute of an outfit
 function sbGetOutfitAttrValue(outfitName, attrKey, pluginId) {
   const o = sbFindOutfit(outfitName, pluginId);
   if (!o) return 0;
@@ -1203,8 +1100,10 @@ function sbGetOutfitAttrValue(outfitName, attrKey, pluginId) {
   return isNaN(n) ? 0 : n;
 }
 
+// how much of a capacity an outfit uses
 function sbGetOutfitCapacityEffect(outfitName, capacityKey, pluginId) { return sbGetOutfitAttrValue(outfitName, capacityKey, pluginId); }
 
+// how much of a capacity the fitted outfits use
 function sbUsedCapacity(capacityKey) {
   if (!sbCurrentShip) return 0;
   const net = (sbCurrentShip.outfits || []).reduce((total, o) => {
@@ -1219,12 +1118,14 @@ function sbUsedEngineCapacity() { return sbUsedCapacity('engine capacity'); }
 function sbUsedWeaponCapacity() { return sbUsedCapacity('weapon capacity'); }
 function sbUsedCargoSpace()     { return sbUsedCapacity('cargo space'); }
 
+// a capacity on the ship (0 if missing)
 function sbShipCapacity(key) { return Number((sbCurrentShip?.attributes || {})[key]) || 0; }
 function sbMaxOutfitSpace()    { return sbShipCapacity('outfit space'); }
 function sbMaxEngineCapacity() { return sbShipCapacity('engine capacity'); }
 function sbMaxWeaponCapacity() { return sbShipCapacity('weapon capacity'); }
 function sbMaxCargoSpace()     { return sbShipCapacity('cargo space'); }
 
+// one capacity bar as HTML
 function sbCapacityBarHTML(label, used, max) {
   if (max <= 0) return '';
   const remaining = max - used;
@@ -1249,6 +1150,7 @@ function sbCapacityBarHTML(label, used, max) {
     </div>`;
 }
 
+// the capacity bars. Called by: attribute and outfit changes
 function sbRenderOutfitSpaceBar() {
   const el = document.getElementById('outfit-space-bar-wrap');
   if (!el || !sbCurrentShip) return;
@@ -1260,9 +1162,7 @@ function sbRenderOutfitSpaceBar() {
   el.innerHTML = bars.map(b => sbCapacityBarHTML(b.label, b.used, b.max)).join('');
 }
 
-// ═══════════════════════════════════════════════════════════
-//  ATTRIBUTE VALIDATION
-// ═══════════════════════════════════════════════════════════
+// ── attribute checks ──
 
 const SB_SIGNED_ATTRS = new Set([
   'shield protection','hull protection','energy protection','fuel protection',
@@ -1287,6 +1187,7 @@ const SB_SIGNED_ATTRS = new Set([
   'mass','drag',
 ]);
 
+// is this a valid value for the attribute? Called by: sbUpdateAttrVal, confirmAddAttr
 function sbValidateAttrValue(key, rawValue) {
   const v = parseFloat(rawValue);
   if (isNaN(v)) return { ok: true };
@@ -1300,6 +1201,7 @@ const SB_HARDPOINT_KEYS = {
   'turret mounts': { field: 'turrets', label: 'turret' },
 };
 
+// gun/turret count follows the gun ports / turret mounts attributes
 function sbSyncHardpoints(key, newVal) {
   const hp = SB_HARDPOINT_KEYS[key];
   if (!hp) return false;
@@ -1316,6 +1218,7 @@ function sbSyncHardpoints(key, newVal) {
   return false;
 }
 
+// put weapons on free hardpoints. Called by: outfit adds/changes, afUI.apply
 function sbAutoSlotWeapons(outfitName, count, outfitObj) {
   if (!outfitObj) return;
   const gunCost    = _sbGetPortCost(outfitObj, 'gun ports');
@@ -1324,6 +1227,7 @@ function sbAutoSlotWeapons(outfitName, count, outfitObj) {
   if (turretCost > 0) _sbFillEmptyPorts(sbCurrentShip.turrets, outfitName, turretCost * count);
 }
 
+// gun port or turret mount an outfit needs
 function _sbGetPortCost(outfitObj, portKey) {
   let val = (outfitObj.attributes && outfitObj.attributes[portKey] != null)
     ? outfitObj.attributes[portKey] : outfitObj[portKey];
@@ -1332,6 +1236,7 @@ function _sbGetPortCost(outfitObj, portKey) {
   return n < 0 ? Math.abs(n) : 0;
 }
 
+// fill empty ports with an outfit
 function _sbFillEmptyPorts(hardpoints, outfitName, needed) {
   if (!hardpoints || needed <= 0) return;
   const clean = outfitName.replace(/^"([^"]*)"$/, '$1');
@@ -1342,6 +1247,7 @@ function _sbFillEmptyPorts(hardpoints, outfitName, needed) {
   }
 }
 
+// an attribute box changed
 function sbUpdateAttrVal(inp) {
   const key = inp.dataset.key;
   const val = inp.value;
@@ -1364,6 +1270,7 @@ function sbUpdateAttrVal(inp) {
   sbRenderRaw();
 }
 
+// remove an attribute
 function sbRemoveAttr(k) {
   if (k === 'mass') sbCurrentShip.mass = '';
   else if (k === 'drag') sbCurrentShip.drag = '';
@@ -1371,6 +1278,7 @@ function sbRemoveAttr(k) {
   sbRenderAttrList(); sbUpdateQuickStats(); sbRenderRaw();
 }
 
+// the quick stats strip (capacities). Called by: most edits
 function sbUpdateQuickStats() {
   const el = document.getElementById('quick-stats');
   if (!el || !sbCurrentShip) return;
@@ -1410,22 +1318,7 @@ function sbUpdateQuickStats() {
 
   sbRenderOutfitSpaceBar();
 
-  // ── How this calls into ComputedStats ─────────────────────────────────
-  // getComputedStats() (defined in ComputedStats.js — not included in this
-  // pass) takes the WHOLE ship object plus a pluginId string, then does
-  // its own internal outfit resolution against window.allData for every
-  // outfit on the ship. It is NOT given per-outfit pluginId/internalId
-  // here — only sbCurrentShip and one plugin id (LOCAL_ID, the synthetic
-  // "local builds" plugin, not each individual outfit's real owning
-  // plugin). That means ComputedStats' own outfit resolution is a
-  // SEPARATE code path from sbFindOutfit/sbGetOutfitLookup above, and is
-  // NOT covered by this pass's internalId fix — it can only be fixed
-  // inside ComputedStats.js itself, which wasn't provided. If
-  // ComputedStats.js resolves outfits by name only (the same pattern this
-  // pass just fixed here), it has the same collision exposure and should
-  // get the equivalent fix: accept per-entry pluginId/internalId from
-  // sbCurrentShip.outfits (already present as of this pass) instead of
-  // re-deriving a name-only lookup internally.
+  // stats come from ComputedStats via shipBuilderStats
   if (typeof getComputedStats === 'function' && sbCurrentShip) {
     const LOCAL_ID = window.DataLoader?.LOCAL_PLUGIN_ID || '__local_builds__';
     const computed = getComputedStats(sbCurrentShip, LOCAL_ID);
@@ -1447,7 +1340,7 @@ function sbUpdateQuickStats() {
   }
 }
 
-// ── Tabs ──────────────────────────────────────────────────
+// builder tabs (Attributes, Outfits, Hardpoints …). Called by: sbPickShip, sbPopulateBuilder, the tab buttons
 function sbSwitchTab(name) {
   document.querySelectorAll('.builder-tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.builder-tab-content').forEach(t => t.classList.remove('active'));
@@ -1457,15 +1350,14 @@ function sbSwitchTab(name) {
   if (cnt) cnt.classList.add('active');
   if (name === 'raw') sbRenderRaw();
 }
+// wire up the tab buttons
 function initBuilderTabs() {
   document.querySelectorAll('.builder-tab').forEach(btn => {
     btn.addEventListener('click', () => sbSwitchTab(btn.dataset.tab));
   });
 }
 
-// ═══════════════════════════════════════════════════════════
-//  ATTRIBUTES
-// ═══════════════════════════════════════════════════════════
+// ── attributes tab ──
 const SB_ATTR_GROUPS = {
   'Identity':  ['category','mass','drag','required crew','bunks','cargo space','fuel capacity','cost'],
   'Combat':    ['shields','hull','hull repair rate','shield generation','shield energy','hull energy','hull heat','heat dissipation','energy capacity'],
@@ -1476,10 +1368,7 @@ const SB_ATTR_GROUPS = {
   'Cloaking':  ['cloak','cloaking energy','cloaking fuel','cloaking heat'],
 };
 
-// Groups for the attribute list. With attrDefs loaded, every attribute is
-// placed by AttributeSections.classify() — the same parser-driven sections
-// the Data Viewer and stats panels use — so new attributes from game updates
-// land in the right group automatically. SB_ATTR_GROUPS is the fallback.
+// attribute list groups (AttributeSections). Called by: sbRenderAttrList
 function sbAttrGroups(keys) {
   const AS = window.AttributeSections;
   if (!AS || !window.attrDefs || !window.attrDefs.attributes) return SB_ATTR_GROUPS;
@@ -1494,6 +1383,7 @@ function sbAttrGroups(keys) {
   return ordered;
 }
 
+// the attribute list. Called by: sbPopulateBuilder, attribute changes
 function sbRenderAttrList() {
   const el = document.getElementById('attr-list');
   if (!el || !sbCurrentShip) return;
@@ -1533,6 +1423,7 @@ function sbRenderAttrList() {
   el.innerHTML = html;
 }
 
+// one attribute row
 function sbAttrRow(k, v) {
   const sk = esc(k), sv = esc(String(v ?? ''));
   const hint = sbAttrHint(k);
@@ -1545,6 +1436,7 @@ function sbAttrRow(k, v) {
   </div>`;
 }
 
+// the add-attribute window. Called by: + Add Attribute
 function openAddAttr() {
   document.getElementById('new-attr-key').value = '';
   document.getElementById('new-attr-val').value = '';
@@ -1552,6 +1444,7 @@ function openAddAttr() {
   openModal('modal-add-attr');
   setTimeout(() => document.getElementById('new-attr-key').focus(), 80);
 }
+// add the attribute
 function confirmAddAttr() {
   const k = document.getElementById('new-attr-key').value.trim();
   const v = document.getElementById('new-attr-val').value.trim();
@@ -1564,6 +1457,7 @@ function confirmAddAttr() {
   closeModal('modal-add-attr');
   sbRenderAttrList(); sbUpdateQuickStats(); sbRenderRaw();
 }
+// attribute name suggestions
 function attrKeyAc(val) {
   const ac = document.getElementById('attr-key-ac');
   const matches = sbAttrKeys.filter(k => k.toLowerCase().includes(val.toLowerCase()));
@@ -1576,15 +1470,14 @@ function attrKeyAc(val) {
   }).join('');
   ac.classList.add('open');
 }
+// pick a suggestion
 function sbSelectAttrKey(k) {
   document.getElementById('new-attr-key').value = k;
   document.getElementById('attr-key-ac').classList.remove('open');
   document.getElementById('new-attr-val').focus();
 }
 
-// ═══════════════════════════════════════════════════════════
-//  OUTFITS
-// ═══════════════════════════════════════════════════════════
+// the outfits list. Called by: sbPopulateBuilder, outfit changes
 
 function sbRenderOutfitsList() {
   const outfits = sbCurrentShip.outfits || [];
@@ -1625,6 +1518,7 @@ function sbRenderOutfitsList() {
   sbRenderOutfitSpaceBar();
 }
 
+// the add-outfit window. Called by: + Add Outfit
 function openAddOutfit() {
   sbRefreshLiveData();
   if (sbAllOutfits.length) { sbOpenOutfitPicker(); }
@@ -1636,6 +1530,7 @@ function openAddOutfit() {
   }
 }
 
+// add the outfit
 function confirmAddOutfit() {
   const rawName = document.getElementById('new-outfit-name').value.trim().replace(/^"([^"]*)"$/, '$1');
   const count   = parseInt(document.getElementById('new-outfit-count').value) || 1;
@@ -1650,6 +1545,7 @@ function confirmAddOutfit() {
   sbRenderOutfitsList(); sbRenderGunsTurrets(); sbUpdateQuickStats(); sbRenderRaw();
 }
 
+// change an outfit's count
 function sbUpdateOutfitCount(i, v) {
   const newCount = parseInt(v) || 1;
   const oldCount = parseInt(sbCurrentShip.outfits[i].count) || 1;
@@ -1664,6 +1560,7 @@ function sbUpdateOutfitCount(i, v) {
   sbRenderOutfitsList(); sbRenderGunsTurrets(); sbUpdateQuickStats(); sbRenderRaw();
 }
 
+// remove an outfit
 function sbRemoveOutfit(i) {
   const outfit  = sbCurrentShip.outfits[i];
   const rawName = outfit.name.replace(/^"([^"]*)"$/, '$1');
@@ -1672,10 +1569,7 @@ function sbRemoveOutfit(i) {
   sbRenderOutfitsList(); sbRenderGunsTurrets(); sbUpdateQuickStats(); sbRenderRaw();
 }
 
-// NOTE: hardpoint `over` matching stays name-only, deliberately — a gun/
-// turret's "over" field in real Endless Sky syntax is just the outfit
-// name (there's no plugin-qualified form in the actual .txt grammar), so
-// there is no internalId to match against here even in principle.
+// hardpoint 'over' matches by name, like the game
 function _sbUnslotWeapons(outfitName, count) {
   const clean = outfitName.replace(/^"([^"]*)"$/, '$1');
   let remaining = count;
@@ -1686,6 +1580,7 @@ function _sbUnslotWeapons(outfitName, count) {
   }
 }
 
+// slot every weapon on a new ship. Called by: sbShipFromParsed
 function sbAutoSlotAllOutfits(s) {
   if (!sbAllOutfits.length) return;
   for (const o of (s.outfits || [])) {
@@ -1700,8 +1595,10 @@ function sbAutoSlotAllOutfits(s) {
   }
 }
 
+// free ports of a kind
 function _sbEmptyPortCount(hardpoints) { return (hardpoints || []).filter(hp => !hp.over || hp.over.trim() === '').length; }
 
+// is there room for this outfit? (asks before going over) Called by: every outfit add
 function sbCheckOutfitSpace(outfitName, count, pluginId) {
   const capacityChecks = [
     { key: 'outfit space',    label: 'Outfit space',    max: sbMaxOutfitSpace(),    used: sbUsedOutfitSpace() },
@@ -1727,7 +1624,7 @@ function sbCheckOutfitSpace(outfitName, count, pluginId) {
   return true;
 }
 
-// ── Outfit picker ─────────────────────────────────────────
+// the Add Outfit window. Called by: openAddOutfit
 function sbOpenOutfitPicker() {
   const list = document.getElementById('sb-outfit-picker-list');
   const caps = {
@@ -1805,6 +1702,7 @@ function sbOpenOutfitPicker() {
   openModal('modal-sb-outfit-picker');
 }
 
+// filter the outfit picker. Called by: its search box
 function sbFilterOutfitPicker(val) {
   const q = val.toLowerCase();
   document.querySelectorAll('#sb-outfit-picker-list .sb-picker-row').forEach(r => {
@@ -1815,6 +1713,7 @@ function sbFilterOutfitPicker(val) {
   });
 }
 
+// add from the picker. Called by: a picker row
 function sbAddOutfitFromPicker(encoded) {
   const payload  = JSON.parse(decodeURIComponent(escape(atob(encoded))));
   const rawName  = payload.name.replace(/^"([^"]*)"$/, '$1');
@@ -1832,9 +1731,7 @@ function sbAddOutfitFromPicker(encoded) {
   sbRenderOutfitsList(); sbRenderGunsTurrets(); sbUpdateQuickStats(); sbRenderRaw();
 }
 
-// ═══════════════════════════════════════════════════════════
-//  GUNS / TURRETS / BAYS / ENGINES
-// ═══════════════════════════════════════════════════════════
+// guns, turrets, bays and engines. Called by: sbPopulateBuilder
 function sbRenderGunsTurrets() {
   sbRenderHP('guns',    'guns-list',    'gun',    true);
   sbRenderHP('turrets', 'turrets-list', 'turret', true);
@@ -1843,13 +1740,7 @@ function sbRenderGunsTurrets() {
   sbRenderEngines();
 }
 
-// ─────────────────────────────────────────────────────────
-//  GENERIC HARDPOINT SUB-ATTRIBUTES (angle, arc, under, zoom,
-//  etc. — see PARSER_DOCUMENTATION.md §5.2-§5.4). Stored as
-//  hp.attrs = { key: [occurrence, occurrence, ...] } where an
-//  occurrence is `true` (bare flag, e.g. "under") or an array
-//  of values (one entry per number/word on that line).
-// ─────────────────────────────────────────────────────────
+// one hardpoint attribute line (angle, arc, zoom …) → { key, values }
 function _sbParseHardpointAttrLine(rawLine) {
   const p = sbTok(rawLine.trim());
   if (!p.length) return null;
@@ -1862,6 +1753,7 @@ function _sbParseHardpointAttrLine(rawLine) {
   return { key, occurrence: rest.map(sbStripQ) };
 }
 
+// hardpoint attributes → text lines. Called by: sbGenerateES
 function _sbAttrsToESLines(attrs, indent) {
   const lines = [];
   if (!attrs) return lines;
@@ -1878,10 +1770,7 @@ function _sbAttrsToESLines(attrs, indent) {
   return lines;
 }
 
-// Pulls the first occurrence of `key` out of an attrs object so it can be
-// written inline on the hardpoint's own line (e.g. engine zoom). Any
-// additional occurrences of that same key are left behind and still emitted
-// as their own indented lines.
+// take one key out of a hardpoint's attributes (it's written inline)
 function _sbExtractInlineToken(attrs, key) {
   if (!attrs || !attrs[key] || !attrs[key].length) return { value: '', rest: attrs };
   const occs  = attrs[key];
@@ -1894,6 +1783,7 @@ function _sbExtractInlineToken(attrs, key) {
   return { value, rest };
 }
 
+// short summary of a hardpoint's attributes
 function _sbAttrsSummaryHTML(field, idx, attrs) {
   if (!attrs) return '';
   const tags = [];
@@ -1906,11 +1796,12 @@ function _sbAttrsSummaryHTML(field, idx, attrs) {
   return tags.length ? `<div style="width:100%;display:flex;flex-wrap:wrap;gap:4px;margin-top:2px;">${tags.join('')}</div>` : '';
 }
 
-// ── Hardpoint Extra Attributes modal (angle, arc, under, zoom, ...) ──────
+// ── hardpoint extra attributes window ──
 let _sbHPAttrTarget = null;  // { field, idx }
 let _sbHPAttrValues = [];    // value boxes currently being composed for the "add/edit line" row
 let _sbHPAttrEditing = null; // { key, occIdx } — set while an existing line is loaded for editing
 
+// open the extra-attributes window for a hardpoint
 function sbOpenHPAttrEditor(field, idx) {
   _sbHPAttrTarget = { field, idx };
   _sbHPAttrEditing = null;
@@ -1969,8 +1860,7 @@ function sbRenderHPAttrsModalList() {
   el.innerHTML = rows.join('');
 }
 
-// Loads an existing hardpoint attribute line back into the compose fields so
-// it can be edited, rather than only being deletable and re-addable.
+// load an existing line back into the edit boxes
 function sbEditHPAttrFromModal(field, idx, key, occIdx) {
   const hp = sbCurrentShip[field] && sbCurrentShip[field][idx];
   if (!hp || !hp.attrs || !hp.attrs[key] || hp.attrs[key][occIdx] === undefined) return;
@@ -1993,6 +1883,7 @@ function sbCancelHPAttrEdit() {
   sbUpdateHPAttrComposeUI();
 }
 
+// add/update the line
 function sbConfirmAddHPAttr() {
   if (!_sbHPAttrTarget) return;
   const { field, idx } = _sbHPAttrTarget;
@@ -2051,6 +1942,7 @@ function sbRemoveHPAttrFromModal(field, idx, key, occIdx) {
   sbRenderHPAttrsModalList();
 }
 
+// gun/turret rows. Called by: sbRenderGunsTurrets
 function sbRenderHP(field, elId, label, showOver) {
   const el = document.getElementById(elId); if (!el) return;
   const items = sbCurrentShip[field] || [];
@@ -2068,6 +1960,7 @@ function sbRenderHP(field, elId, label, showOver) {
     : `<div style="color:var(--c-text-dim);font-size:0.82rem;font-style:italic;padding:6px 0;">No ${label}s defined.</div>`);
 }
 
+// bay rows. Called by: sbRenderGunsTurrets
 function sbRenderBays(field, elId, label) {
   const el = document.getElementById(elId); if (!el) return;
   const items = sbCurrentShip[field] || [];
@@ -2088,6 +1981,7 @@ function sbRenderBays(field, elId, label) {
 
 const SB_ENGINE_TYPE_LABEL = { engine: 'Engine', reverse: 'Reverse', steering: 'Steering' };
 
+// engine rows. Called by: sbRenderGunsTurrets
 function sbRenderEngines() {
   const el = document.getElementById('engines-list'); if (!el) return;
   const items = sbCurrentShip.engines || [];
@@ -2107,6 +2001,7 @@ function sbRenderEngines() {
     : `<div style="color:var(--c-text-dim);font-size:0.82rem;font-style:italic;padding:6px 0;">No engine points defined.</div>`);
 }
 
+// add a gun, turret, bay or engine
 function addGunTurret(type) {
   if (type === 'engine')  { (sbCurrentShip.engines  = sbCurrentShip.engines  || []).push({ coords:'0 0', type:'engine' }); sbRenderEngines(); sbRenderRaw(); return; }
   if (type === 'drone')   { (sbCurrentShip.drones    = sbCurrentShip.drones   || []).push({ coords:'0 0', launchEffect:'', position:'' }); sbRenderBays('drones',   'drones-list',   'drone');   sbRenderRaw(); return; }
@@ -2119,9 +2014,7 @@ function addGunTurret(type) {
 function sbUpdateHP(f, i, p, v) { sbCurrentShip[f][i][p] = v; sbRenderRaw(); }
 function sbRemoveHP(f, i) { sbCurrentShip[f].splice(i,1); sbRenderGunsTurrets(); sbUpdateQuickStats(); sbRenderRaw(); }
 
-// ═══════════════════════════════════════════════════════════
-//  LEAKS
-// ═══════════════════════════════════════════════════════════
+// ── leaks ──
 function sbRenderLeaksList() {
   const el = document.getElementById('leaks-list'); if (!el) return;
   const leaks = sbCurrentShip.leaks || [];
@@ -2138,6 +2031,7 @@ function sbUpdateLeakField(i, field, v) { sbCurrentShip.leaks[i][field] = parseI
 function sbUpdateLeak(i, v) { sbUpdateLeakField(i, 'openChance', v); }
 function sbRemoveLeak(i) { sbCurrentShip.leaks.splice(i, 1); sbRenderLeaksList(); sbRenderRaw(); }
 
+// pick an effect (explode / leak). Called by: addExplodeEffect, addLeakEffect
 function sbOpenEffectPicker(targetField) {
   sbRefreshLiveData();
   const list    = document.getElementById('sb-effect-picker-list');
@@ -2200,11 +2094,10 @@ function sbAddEffectFromPicker(nameJson, targetField) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  WEAPON SUB-BLOCK
-// ═══════════════════════════════════════════════════════════
+// ── weapon block ──
 const SB_WEAPON_FIELDS = ['blast radius', 'shield damage', 'hull damage', 'hit force'];
 
+// the weapon block. Called by: sbPopulateBuilder
 function sbRenderWeaponBlock() {
   const el = document.getElementById('weapon-block'); if (!el) return;
   const w = sbCurrentShip.weapon || {};
@@ -2220,9 +2113,7 @@ function sbUpdateWeaponField(inp) {
   sbRenderRaw();
 }
 
-// ═══════════════════════════════════════════════════════════
-//  EXPLODE
-// ═══════════════════════════════════════════════════════════
+// ── explode effects ──
 function sbRenderExplodeLists() { sbRenderExplodeList('explode','explode-list'); sbRenderExplodeList('finalExplode','final-explode-list'); sbRenderLeaksList(); }
 function sbRenderExplodeList(field, elId) {
   const el = document.getElementById(elId); if (!el) return;
@@ -2240,15 +2131,14 @@ function addLeakEffect()        { sbOpenEffectPicker('leaks'); }
 function sbUpdateExplode(f, i, p, v) { sbCurrentShip[f][i][p] = p === 'count' ? (parseInt(v) || 1) : v; sbRenderRaw(); }
 function sbRemoveExplode(f, i) { sbCurrentShip[f].splice(i, 1); sbRenderExplodeLists(); sbRenderRaw(); }
 
-// ═══════════════════════════════════════════════════════════
-//  ES GENERATOR
-// ═══════════════════════════════════════════════════════════
+// ── export to the game's text format ──
 function _sbEngineKeyword(type) {
   if (type === 'reverse')  return '"reverse engine"';
   if (type === 'steering') return '"steering engine"';
   return 'engine';
 }
 
+// a design as game text. Called by: the raw tab, export, shipBuilderFleets
 function sbGenerateES(s) {
   const T = '\t', TT = '\t\t';
   const L = [];
@@ -2302,11 +2192,7 @@ function sbGenerateES(s) {
     }
   }
 
-  // Engines (including reverse/steering variants) — zoom is edited through
-  // the extra-attributes popup like everything else, but the first zoom
-  // value is written inline on the hardpoint line itself to match the ES
-  // format; any further occurrences and all other attrs (angle, under,
-  // arc, ...) round-trip generically (see §5.2-§5.4 of the parser docs).
+  // engine zoom is edited in the extra-attributes window, written inline here
   for (const e of (s.engines || [])) {
     const parts = (e.coords || '0 0').split(/\s+/);
     const { value: zoomVal, rest: engineAttrs } = _sbExtractInlineToken(e.attrs, 'zoom');
@@ -2353,9 +2239,7 @@ function sbGenerateES(s) {
   return L.join('\n');
 }
 
-// ═══════════════════════════════════════════════════════════
-//  ES PARSER
-// ═══════════════════════════════════════════════════════════
+// ── read the game's text format ──
 function sbParseES(text) {
   const ships = []; let cur = null, block = null, subblock = null, lastHardpoint = null;
   const flush = () => { if (cur) ships.push(cur); };
@@ -2457,16 +2341,16 @@ function sbTok(str) {
 }
 function sbStripQ(s){s=s.trim();return(s.startsWith('"')&&s.endsWith('"'))?s.slice(1,-1):s;}
 
-// ═══════════════════════════════════════════════════════════
-//  RAW TAB
-// ═══════════════════════════════════════════════════════════
+// ── raw tab ──
 let sbRawDirty = false;
+// show the design as text. Called by: most edits
 function sbRenderRaw() {
   if (sbRawDirty) return;
   const el = document.getElementById('raw-output');
   if (el && sbCurrentShip) el.value = sbGenerateES(sbCurrentShip);
 }
 function onRawEdit() { sbRawDirty = true; }
+// read pasted text into the design
 function importRaw() {
   const parsed = sbParseES(document.getElementById('raw-output').value);
   if (!parsed.length) { sbToast('Could not parse ship data.', 'danger'); return; }
@@ -2480,9 +2364,7 @@ function copyOutput() {
     .then(() => sbToast('Copied!', 'success')).catch(() => sbToast('Copy failed.', 'danger'));
 }
 
-// ═══════════════════════════════════════════════════════════
-//  EXPORT
-// ═══════════════════════════════════════════════════════════
+// ── export ──
 function renderExportChecklist() {
   const cl = document.getElementById('export-checklist'); if (!cl) return;
   const allShips = [
@@ -2498,6 +2380,7 @@ function renderExportChecklist() {
   ).join('');
 }
 
+// text for the ticked ships. Called by: generateExport, copyExport, downloadExport
 function sbGetExportText() {
   const allShips = [
     ...sbSaveFleet.map((s, i) => ({ s, key: `save-${i}` })),
@@ -2513,12 +2396,12 @@ function generateExport() { const el=document.getElementById('export-output'); i
 function copyExport()     { const t=sbGetExportText(); if(!t){sbToast('Nothing to copy.','danger');return;} navigator.clipboard.writeText(t).then(()=>sbToast('Copied!','success')).catch(()=>sbToast('Copy failed.','danger')); }
 function downloadExport() { const t=sbGetExportText(); if(!t){sbToast('Nothing to export.','danger');return;} sbDL(t,'ships.txt'); sbToast('Downloaded ships.txt','success'); }
 function exportAll()      { const t=[...sbSaveFleet,...sbFleet].map(s=>sbGenerateES(s)).join('\n\n'); if(!t){sbToast('No ships.','danger');return;} sbDL(t,'fleet.txt'); sbToast('Downloaded fleet.txt','success'); }
+// download text as a file
 function sbDL(text, name) { const u=URL.createObjectURL(new Blob([text],{type:'text/plain'})); Object.assign(document.createElement('a'),{href:u,download:name}).click(); URL.revokeObjectURL(u); }
 
-// ═══════════════════════════════════════════════════════════
-//  IMPORT (paste)
-// ═══════════════════════════════════════════════════════════
+// ── import (paste) ──
 function openImport() { document.getElementById('import-text').value=''; openModal('modal-import'); }
+// import pasted ship data
 function doImport() {
   const parsed = sbParseES(document.getElementById('import-text').value);
   if (!parsed.length) { sbToast('Could not parse any ships.', 'danger'); return; }
@@ -2527,13 +2410,12 @@ function doImport() {
   sbToast(`Imported ${parsed.length} ship(s)!`, 'success');
 }
 
-// ═══════════════════════════════════════════════════════════
-//  MODALS / TOAST / UTIL
-// ═══════════════════════════════════════════════════════════
+// ── windows, messages, small helpers ──
 function openModal(id)  { document.getElementById(id).classList.add('active'); }
 function closeModal(id) { document.getElementById(id).classList.remove('active'); }
 
 let _sbToastTimer = null;
+// a short message at the bottom. Called by: nearly everything
 function sbToast(msg, type='') {
   const el = document.getElementById('toast'); if (!el) return;
   el.textContent = msg;
@@ -2544,9 +2426,7 @@ function sbToast(msg, type='') {
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-// ═══════════════════════════════════════════════════════════
-//  INIT
-// ═══════════════════════════════════════════════════════════
+// ── start ──
 document.addEventListener('DOMContentLoaded', () => {
   sbLoad();
   sbLoadSaveShips();

@@ -1,36 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  autoFitting/afThreat.js — fit a ship to beat a particular enemy
-//
-//  1. Threat profile. Pick a government (every ship it flies, from the
-//     parser's "Governments" location data) or specific ships. Each enemy is
-//     measured with its own loadout (AfStats) and the results averaged:
-//       • how much of their damage is missiles, and how those missiles
-//         find you (radar / optical / infrared / plain tracking)
-//       • shield vs hull damage, plus ion, heat, slowing, scrambling,
-//         disruption … and their piercing
-//       • their weapon range, speed and turning
-//       • their defences: shields/hull and regen, protections, anti-missile
-//         and jamming (which work against YOUR missiles)
-//
-//  2. Counter score — an estimated duel against one average enemy, using
-//     the game's own rules (DamageProfile.cpp, Projectile.cpp, Hardpoint.cpp):
-//       protection         damage ÷ (1 + protection)
-//       radar jamming      lock chance ÷ (1 + jamming × range falloff)
-//       optical jamming    shrinks your apparent size the same way
-//       infrared tracking  scales with how hot you run
-//       anti-missile       each shot kills a missile when
-//                          rand(anti-missile) > rand(missile strength)
-//       shields block      50% of ion/heat/slowing/scrambling damage
-//     ion damage drains your energy, heat damage heats you, slowing slows
-//     you, scrambling jams your weapons — each reduced by matching
-//     resistance/protection. If one side out-ranges and out-runs the other
-//     it can stay out of reach, so the slower, shorter-ranged side does less.
-//     Score = time they need to destroy you ÷ time you need to destroy them.
-//
-//  window.AfThreat. Needs AfStats and ShipDefinition.
-// ═══════════════════════════════════════════════════════════════════════════
+// Auto-fit "🎯 Beat an enemy": what an enemy brings (from their loadouts) and a duel model using the game's own formulas.
 
 (function () {
   const S = () => window.AfStats;
@@ -42,6 +12,7 @@
   const RES_KEY = { ion: 'ion', heat: 'heat', slowing: 'slowing', scrambling: 'scramble', disruption: 'disruption', corrosion: 'corrosion', discharge: 'discharge', burn: 'burn', leak: 'leak' };
 
   function outfitList(o) { return window.ShipDefinition ? window.ShipDefinition.outfitList(o) : Object.entries(o || {}).map(([n, v]) => [n, Number(v) || 1]); }
+  // every ship and outfit we may use
   function catalogue() {
     const hulls = new Map(), all = new Map(), outfits = new Map();
     for (const p of Object.values(window.AfStats.gameData())) {
@@ -51,10 +22,10 @@
     }
     return { hulls, all, outfits };
   }
-  // who flies a ship, according to the selected plugins only
+  // who flies a ship (selected plugins only)
   const govsOf = s => [...new Set(S().activeLocations(s.locations).flatMap(l => l.Governments || []))];
 
-  /** Governments that fly at least one known ship → [{ name, ships }] */
+  // governments that fly at least one known ship. Called by: afUI
   function governments() {
     const { all } = catalogue();
     const count = new Map();
@@ -62,7 +33,7 @@
     return [...count.entries()].map(([name, ships]) => ({ name, ships })).sort((a, b) => b.ships - a.ships || a.name.localeCompare(b.name));
   }
 
-  /** The ships an enemy choice stands for. */
+  // the ships an enemy choice stands for. Called by: afUI.refreshFoe
   function shipsFor({ government, ships }) {
     const { all } = catalogue();
     if (ships && ships.length) return ships.map(n => all.get(n)).filter(Boolean);
@@ -70,6 +41,7 @@
     return [];
   }
 
+  // one enemy ship's numbers
   function measure(ship, cat) {
     const hull = ship.baseShip ? cat.hulls.get(ship.baseShip) : ship;
     if (!hull) return null;
@@ -77,7 +49,7 @@
     return d;
   }
 
-  // ── per-ship pieces used by both the profile and the duel ───────────────
+  // ── one ship's attack and defence ──
   function offence(d) {
     const out = { shield: 0, hull: 0, missileShield: 0, missileHull: 0, missileRate: 0, missileStrength: 0, piercing: 0,
                   status: Object.fromEntries(STATUS.map(k => [k, 0])), track: { radar: 0, optical: 0, infrared: 0, generic: 0 }, range: 0, am: [] };
@@ -101,6 +73,7 @@
     out.piercing = pierceW ? out.piercing / pierceW : 0;
     return out;
   }
+  // how hard a ship is to hurt
   function defence(d) {
     const g = k => num(d.raw[k]);
     const res = {}, prot = {};
@@ -113,7 +86,7 @@
     };
   }
 
-  /** Average enemy built from a list of ships. */
+  // average enemy from a list of ships. Called by: afUI.refreshFoe
   function profile(ships) {
     const cat = catalogue();
     const off = [], def = [], names = [];
@@ -148,9 +121,9 @@
     };
   }
 
-  // ── duel model ───────────────────────────────────────────────────────────
+  // ── duel model ──
   const jamFall = j => j > 0 ? j * (1 - Math.min(1, ENGAGE / (500 + Math.sqrt(j) * 500))) : 0;
-  /** Share of missiles that still find a target with these defences (relative to none). */
+  // share of missiles still finding the target with these defences
   function missileHitShare(track, target) {
     const p = (r, o, i, g) => 1 - (1 - Math.min(1, r)) * (1 - Math.min(1, o)) * (1 - Math.min(1, i)) * (1 - Math.min(1, g));
     const base = p(track.radar, track.optical, track.infrared, track.generic);
@@ -159,20 +132,18 @@
     const withDef = p(track.radar / (1 + jamFall(target.radarJam)), track.optical / (1 + jamFall(target.opticalJam)), track.infrared * irScale, track.generic);
     return Math.max(0.05, withDef / base);
   }
-  /** Share of incoming missiles shot down: anti-missile capacity vs missiles per second. */
-  // Hardpoint::FireAntiMissile: a shot kills when rand(strength) > rand(missile strength)
+  // share of incoming missiles shot down (anti-missile vs missiles/s)
   const killChance = (am, ms) => { ms = Math.max(1, ms); return am > ms ? 1 - ms / (2 * am) : am / (2 * ms); };
+  // share intercepted
   function interceptShare(amList, missileRate, missileStrength) {
     if (!missileRate || !amList || !amList.length) return 0;
     const killsPerSec = amList.reduce((s, x) => s + x.rate * killChance(x.strength, missileStrength), 0);
     return Math.min(0.9, (killsPerSec / missileRate) * 0.7);    // ~70%: turrets aren't always in range or facing
   }
+  // shield damage after protection
   function scaleShield(dmg, prot) { return dmg / (1 + prot); }
 
-  /**
-   * The duel. `me` is our derived fit; `p` the enemy profile.
-   * → { score, ttkThem, ttkMe, myDps, theirDps, parts }
-   */
+  // our fit vs the enemy profile → times to kill, DPS, notes. Called by: makeCounter, explain
   function duel(me, p, n = 1) {
     n = Math.max(1, Math.round(n));
     const mOff = offence(me), mDef = defence(me);
@@ -190,7 +161,7 @@
     inShield = scaleShield(inShield * (1 - pierce), mDef.shieldProt) * (1 + disrupt);
     inHull = inHull / (1 + mDef.hullProt);
     const pierced = scaleShield(e.shield, 0) * pierce / (1 + mDef.hullProt);
-    // ion drains energy, heat heats, slowing slows, scrambling jams weapons (shields block 50% of each)
+    // status damage: ion drains energy, heat heats, slowing slows, scrambling jams (shields block half)
     const st = k => Math.max(0, e.status[k] * 0.5 / (1 + mDef.prot[k]) - mDef.res[k] * 60);
     const ionDrain = st('ion'), heatIn = st('heat'), slow = st('slowing'), scramble = st('scrambling');
     // ── our damage reaching them ──
@@ -232,7 +203,7 @@
     };
   }
 
-  /** Score function for the optimiser (goal 'counter'). */
+  // score function for the optimiser. Called by: afWorker, afUI
   function makeCounter(p, n = 1) {
     return (d, f) => {
       const r = duel(d, p, n);
@@ -244,9 +215,10 @@
     };
   }
 
-  // ── words ────────────────────────────────────────────────────────────────
+  // ── words ──
   const pct = x => `${Math.round(x * 100)}%`;
   const fmt = (n, dp = 0) => (Number.isFinite(n) ? n : 0).toLocaleString(undefined, { maximumFractionDigits: dp });
+  // one-line enemy summary. Called by: afUI
   function describe(p) {
     const e = p.offence, d = p.defence, tot = e.shield + e.hull;
     const lines = [], priorities = [];
@@ -280,7 +252,7 @@
     return { lines, priorities: [...new Set(priorities)] };
   }
 
-  /** Why the new fit works, in a few lines. */
+  // why the new fit works, in a few lines. Called by: afUI.finish
   function explain(before, after, p, n = 1) {
     const a = duel(before, p, n), b = duel(after, p, n), out = [];
     const who = n > 1 ? `${n} average ones at once` : 'an average one';

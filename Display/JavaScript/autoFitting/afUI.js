@@ -1,18 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  autoFitting/afUI.js — the "⚡ Auto-fit" window in the ship builder
-//
-//  Pick a goal, choose which outfits count as "available to you" (factions,
-//  buying, stealing with its story consequences, mission rewards, licences,
-//  what you already own), set the turning/speed you won't go below, and it
-//  builds the best fit it can for the hull you're editing — with the
-//  stats before/after, where to get every outfit, what stealing would cost
-//  and how to undo that, and warnings (energy, heat, fuel, ammo uptimes).
-//
-//  Needs: AfStats, AfPool, AfOptimizer, shipBuilder.js (sbCurrentShip …),
-//         ShipDefinition (for enemy ships' loadouts).
-// ═══════════════════════════════════════════════════════════════════════════
+// The ⚡ Auto-fit window in the builder: goals, filters, targets, results.
 
 (function () {
   const S = () => window.AfStats, P = () => window.AfPool, O = () => window.AfOptimizer;
@@ -29,14 +17,17 @@
 
   // Remembered between visits: never use secondary weapons, and outfits never to use.
   const PREFS_KEY = 'af_prefs_v1';
+  // saved choices (exclude list, no secondaries)
   function loadPrefs() { try { const p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); return { noSecondary: !!p.noSecondary, exclude: Array.isArray(p.exclude) ? p.exclude : [] }; } catch (_) { return { noSecondary: false, exclude: [] }; } }
+  // save them
   function savePrefs() { try { localStorage.setItem(PREFS_KEY, JSON.stringify({ noSecondary: ui.prefs.noSecondary, exclude: ui.prefs.exclude })); } catch (_) {} }
 
-  // Small removable chip (ship or outfit name + ×)
+  // small removable chip
   function chip(inner, act, name) {
     return `<span class="af-chip">${inner}<button type="button" class="af-chip__x" data-af="${act}" data-name="${h(name)}" aria-label="Remove ${h(name)}" title="Remove">×</button></span>`;
   }
   let styled = false;
+  // add the CSS once
   function addStyles() {
     if (styled) return; styled = true;
     const css = document.createElement('style');
@@ -58,27 +49,30 @@
     document.head.appendChild(css);
   }
 
-  // ── data helpers ─────────────────────────────────────────────────────────
+  // ── data helpers ──
   function outfitIndex() {
     const m = new Map();
     for (const p of Object.values(window.AfStats.activeData())) for (const o of p.outfits || []) if (o && o.name && !m.has(o.name)) m.set(o.name, o);
     return m;
   }
+  // outfits on the open design
   function designOutfits(design) {
     return (design.outfits || []).map(o => [String(o.name).replace(/^"([^"]*)"$/, '$1'), Number(o.count) || 1]);
   }
+  // every game ship (selected plugins)
   function allShips() {
     const m = new Map();
     for (const p of Object.values(window.AfStats.gameData())) for (const s of [...(p.ships || []), ...(p.variants || [])]) if (s && s.name && !m.has(s.name)) m.set(s.name, s);
     return m;
   }
+  // an enemy ship's outfits
   function shipLoadout(s, ships) {
     const D = window.ShipDefinition;
     const outs = D ? D.outfitList(s.outfits) : [];
     const hull = s.baseShip ? ships.get(s.baseShip) : s;
     return { base: S().hullAttrs(hull || s), outs };
   }
-  /** Damage mix of chosen enemies (or of every armed ship, weighted by damage). */
+  // damage mix of the chosen enemies (or every armed ship). Called by: run
   function enemyProfile(names) {
     const ships = allShips(), idx = outfitIndex();
     const pick = names && names.length ? names.map(n => ships.get(n)).filter(Boolean) : [...ships.values()];
@@ -89,13 +83,12 @@
     return O().damageProfile(ds);
   }
 
-  // Ship names as players know them: display name first, internal name after.
+  // ship names: display name first
   const SN = () => window.ShipNames;
   const shipLabel = name => { const s = allShips().get(name); return s && SN() ? SN().label(s) : name; };
   const outfitHtml = name => (window.OutfitNames ? window.OutfitNames.html(name) : h(name));
   const shipHtml = name => { const s = allShips().get(name); return s && SN() ? SN().html(s) : h(name); };
-  // Type-ahead for ships: matches the display name or the internal name, and
-  // lists the display name first with the internal name dimmed underneath.
+  // ship type-ahead (display or internal name)
   function shipSearch(q) {
     if (window.NameSearch) { const game = allShips(); return window.NameSearch.search('ships', q).filter(it => game.has(it.value)); }
     const SNs = SN(), out = [];
@@ -107,6 +100,7 @@
     }
     return out.sort((a, b) => b[0] - a[0]).slice(0, 50).map(x => x[1]);
   }
+  // outfit type-ahead
   function outfitSearch(q) {
     if (window.NameSearch) return window.NameSearch.search('outfits', q).filter(it => !ui.prefs.exclude.includes(it.value));
     const out = [];
@@ -117,6 +111,7 @@
     }
     return out.sort((a, b) => b[0] - a[0]).slice(0, 50).map(x => x[1]);
   }
+  // type-ahead on the enemy boxes. Called by: render
   function bindShipPickers() {
     if (!window.UiKit) return;
     const tg = document.getElementById('af-tgt-add');
@@ -135,7 +130,7 @@
     hook('af-enemy-add', name => { if (!ui.enemies.includes(name)) ui.enemies.push(name); ui.result = null; render(); });
   }
 
-  // ── window ───────────────────────────────────────────────────────────────
+  // ── the window ──
   function modal() {
     let m = document.getElementById('af-modal');
     if (m) return m;
@@ -203,8 +198,10 @@
     document.body.appendChild(m);
     return m;
   }
+  // close (stops a running search)
   function close() { runId++; if (worker) { worker.terminate(); worker = null; } document.getElementById('af-modal')?.classList.remove('active'); ui = null; }
 
+  // open for the ship being edited. Called by: ⚡ Auto-fit
   async function open() {
     if (!S() || !P() || !O()) return;
     if (typeof onBuilderChange === 'function') onBuilderChange();
@@ -240,7 +237,7 @@
     render();
   }
 
-  // ── render ───────────────────────────────────────────────────────────────
+  // ── drawing ──
   function render() {
     const body = document.getElementById('af-body');
     if (!ui || !body) return;
@@ -360,6 +357,7 @@
   // ── Targets: any stat or attribute, at least / at most / about / as much / as little ──
   const MODES = [['min', 'at least'], ['max', 'at most'], ['near', 'as close as possible to'], ['more', 'as much as possible'], ['less', 'as little as possible']];
   const PRIOS = [['must', 'Must'], ['high', 'High'], ['normal', 'Normal'], ['low', 'Low']];
+  // the targets list
   function targetsHtml() {
     const rows = ui.targets.map((t, i) => {
       const now = S().statValue(ui.current, t.id);
@@ -382,6 +380,7 @@
       ${ui.goal === 'custom' && !ui.targets.length ? '<div style="color:var(--c-warn-text,#fbbf24);font-size:0.82rem;margin-top:6px;">“Just my targets” needs at least one target.</div>' : ''}
     </details>`;
   }
+  // target type-ahead
   function targetSearch(q) {
     const out = [];
     const U = window.UiKit;
@@ -400,6 +399,7 @@
     return out.sort((a, b) => b[0] - a[0]).slice(0, 50).map(x => x[1]);
   }
 
+  // "similar ships" note
   function peerNote() {
     const p = ui.peers;
     if (!p) return 'All-round compares against this ship\'s own stock loadout (no similar ships to compare with).';
@@ -410,6 +410,7 @@
     return `All-round scores damage, speed, turning, toughness and cargo against similar ships — ${p.count} ${why} (${src}); typically turning ${t}°/s, top speed ${sp}, cargo ${fmt(p.cargo)}. Closest: ${p.examples.map(n => h(shipLabel(n))).join(', ')}.`;
   }
 
+  // ✅/❌ checks list
   function checksHtml(r) {
     if (!r.checks) return '';
     const bad = r.checks.filter(c => !c.ok);
@@ -421,13 +422,13 @@
     </details>`;
   }
 
-  // Send the fit (and what it's up against) to the battle simulator.
-  // The design with this result's outfits (and weapons on the hardpoints)
+  // the result as a design (weapons on hardpoints). Called by: shareFit, testInBattle
   function fitDesign() {
     const d = JSON.parse(JSON.stringify(ui.design));
     d.outfits = ui.result.outfits.map(([name, count]) => ({ name, count }));
     for (const hp of [...(d.guns || []), ...(d.turrets || [])]) hp.over = '';
     const weaponsLeft = new Map(ui.result.outfits);
+    // put weapons on hardpoints
     const slot = (list, isTurret) => { for (const hp of list || []) for (const [n, k] of weaponsLeft) {
       const o = ui.idx.get(n) || {}; const a = o.attributes || o;
       if (k > 0 && (a.weapon || o.weapon) && ((Number(a['turret mounts']) || 0) < 0) === isTurret) { hp.over = n; weaponsLeft.set(n, k - 1); break; } } };
@@ -435,11 +436,13 @@
     d.name = `${d.name || 'Ship'} (auto-fit)`;
     return d;
   }
+  // 🔗 Share this fit
   function shareFit() {
     if (!ui || !ui.result || typeof window.sbShareShip !== 'function') return;
     window.sbShareShip(fitDesign(), 'this auto-fit');
   }
 
+  // ⚔ Test in Battle Simulator (new tab)
   function testInBattle() {
     if (!ui || !ui.result) return;
     const d = fitDesign();
@@ -460,6 +463,7 @@
     window.open('BattleSim.html', '_blank');
   }
 
+  // how each target came out
   function targetsResultHtml(d) {
     if (!ui.targets.length) return '';
     const label = { min: 'at least', max: 'at most', near: 'about', more: 'as much as possible', less: 'as little as possible' };
@@ -477,6 +481,7 @@
     return `<h4 style="margin:14px 0 4px;font-size:0.9rem;">Your targets</h4><div style="overflow-x:auto;"><table style="width:100%;font-size:0.84rem;">${rows}</table></div>`;
   }
 
+  // before/after table
   function statRows(a, b, peer) {
     const P = peer || {};
     const rows = [
@@ -502,6 +507,7 @@
   // For outfits that add room (outfit space, weapon/engine capacity, mounts …):
   // what they add and what they cost, so it's clear why they're in the fit.
   const ROOM_KEYS = ['outfit space', 'weapon capacity', 'engine capacity', 'gun ports', 'turret mounts', 'cargo space', 'bunks'];
+  // what an expander added
   function expanderNote(name) {
     const o = ui.idx.get(name) || {};
     const a = o.attributes || o;
@@ -511,6 +517,7 @@
     return `Adds ${adds.map(([k, v]) => `+${fmt(v, 4)} ${k}`).join(', ')}${costs.length ? ` · costs ${costs.map(([k, v]) => `${fmt(v, 4)} ${k}`).join(', ')}` : ''}`;
   }
 
+  // the result panel
   function resultHtml() {
     const r = ui.result, d = r.derived;
     const icon = { buy: '🛒', plunder: '⚔', mission: '📜', owned: '📦', keep: '📌' };
@@ -549,6 +556,7 @@
       <div style="overflow-x:auto;"><table style="width:100%;font-size:0.84rem;">${rows}</table></div>`;
   }
 
+  // rebuild the enemy profile
   function refreshFoe() {
     const T = window.AfThreat; if (!T || !ui) return;
     ui.result = null;
@@ -557,7 +565,7 @@
     ui.foe.describe = ui.foe.profile ? T.describe(ui.foe.profile) : null;
   }
 
-  // ── run ──────────────────────────────────────────────────────────────────
+  // ── running a search ──
   function candidates() {
     const f = { ...ui.filters, factions: ui.factions && ui.factions.size ? ui.factions : null };
     const access = new Map(), list = [];
@@ -576,8 +584,10 @@
   // A hull needs these before anything can be fitted to it: weight and drag (so it
   // can move at all), room for outfits, and room for engines.
   const HULL_NEEDS = [['mass', 'mass'], ['drag', 'drag'], ['outfit space', 'outfit space'], ['engine capacity', 'engine capacity']];
+  // does the hull lack the attributes auto-fit needs?
   function missingHull() { return HULL_NEEDS.filter(([k]) => !(Number(ui.base[k]) > 0)).map(([, l]) => l); }
 
+  // start a search. Called by: Find the best fit
   function run() {
     if (!ui || ui.loading) return;
     ui.notice = null;
@@ -620,6 +630,7 @@
 
   // ── Running the search in the background (Web Worker) with a progress bar ──
   let worker = null, runId = 0;
+  // move the progress bar
   function setProgress(pct, text) {
     ui.progressPct = Math.max(ui.progressPct || 0, Math.min(99, pct));
     ui.progressText = text;
@@ -628,6 +639,7 @@
     if (t) t.textContent = text;
     const box = bar && bar.closest('.af-progress'); if (box) box.setAttribute('aria-valuenow', String(Math.round(ui.progressPct)));
   }
+  // progress from the worker
   function onProgress(m) {
     if (m.pass === 3) { setProgress(95, 'Looking for the best next upgrades…'); return; }
     if (m.pass === 2) {
@@ -640,6 +652,7 @@
     else if (m.phase === 'suggestions') setProgress(95, 'Looking for the best next upgrades…');
     else if (m.phase === 'cleanup') setProgress(84, 'Fine-tuning — swapping and removing outfits that don\'t pull their weight…');
   }
+  // result in — add notes, suggestions and show it
   function finish(job, r) {
     try {
       setProgress(99, 'Checking the result…');
@@ -657,6 +670,7 @@
     }
     ui.running = false; render();
   }
+  // run the search in the background worker (or on the page if workers aren't available). Called by: run
   function runJob(job) {
     const id = ++runId;
     const { access, ...msg } = job;
@@ -694,13 +708,14 @@
     };
     worker.postMessage(msg);
   }
+  // Cancel
   function cancelRun() {
     runId++;
     if (worker) { worker.terminate(); worker = null; }
     ui.running = false; ui.notice = 'Auto-fit cancelled.'; render();
   }
 
-  // For the all-round build: the single best swap or addition toward each feature.
+  // best swap/addition toward each feature (fallback when the worker isn't used). Called by: finish
   function suggestions(r, list) {
     const out = [];
     const base = ui.base, idx = ui.idx;
@@ -732,7 +747,7 @@
     return out;
   }
 
-  // ── apply to the ship being edited ──────────────────────────────────────
+  // ── putting the fit on the ship ──
   function apply() {
     if (!ui || !ui.result || typeof sbCurrentShip === 'undefined') return;
     const idx = ui.idx;

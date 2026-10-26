@@ -1,72 +1,20 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  shipBuilderStats.js  —  Live Stats Panel for Ship Builder
-//
-//  INTEGRATION
-//  ─────────────────────────────────────────────────────────────────────────────
-//  1. Add mount point to shipBuilder.html:
-//         <div id="sbs-panel-mount"></div>
-//
-//  2. Load AFTER the existing scripts in shipBuilder.html:
-//         <script src="../JavaScript/weaponStats.js"></script>
-//         <script src="../JavaScript/computedStats.js"></script>
-//         <script src="../JavaScript/attributeSections.js"></script>
-//         <script src="../JavaScript/itemStats.js"></script>
-//         <script src="../JavaScript/shipBuilderStats.js"></script>
-//
-//  3. Add ONE call at the very END of the DOMContentLoaded block:
-//         SBS.hookIntoBuilder();
-//
-//  DESIGN PHILOSOPHY
-//  ─────────────────────────────────────────────────────────────────────────────
-//  All calculation — outfit contribution merging, weapon DPS, heat-derived
-//  values — is delegated to window.ItemStats (see ItemStats.js), the same
-//  backend AttributeDisplay.js and CompareDisplay.js use. This file's own
-//  code is limited to two things ItemStats can't know about:
-//    1. Adapting the ship builder's in-progress, not-yet-saved data shapes
-//       (ship.outfits as an array of {name: '"Quoted Name"', count}, mass/
-//       drag as separate top-level string fields, sbAllOutfits as outfits
-//       the user is still editing and hasn't saved to window.allData yet)
-//       into the plain {attributes, outfits} shape ItemStats expects.
-//    2. The live tab UI itself (cards, sections, accordions).
-//
-//  Section/tab grouping is delegated to the shared AttributeSections module
-//  (window.AttributeSections, also used internally by ItemStats), so this
-//  panel groups attributes identically to CompareDisplay.js and
-//  AttributeDisplay.js. Each tab below names the canonical section(s) (from
-//  AttributeSections.SECTION_ORDER) it draws from — AttributeSections.classify()
-//  decides membership. Where a tab splits a canonical section into finer
-//  visual sub-cards (e.g. "Shields & Hull" → separate Shields and Hull
-//  cards), `subFilter` is a purely COSMETIC narrowing of an already-resolved
-//  set of keys — it never re-decides which section/tab an attribute belongs to.
-//
-//  "Other"      tab = attributes whose canonical section isn't referenced
-//                      by any named tab below.
-//  "Everything" tab = ALL attributes (plus weapon DPS) with no filtering.
-// ═══════════════════════════════════════════════════════════════════════════════
+// The Live Ship Stats panel under the builder: tabbed cards built from the same rows as the Data Viewer.
 
 const SBS = (() => {
     'use strict';
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  STATE
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── state ──
 
     let _panel      = null;
     let _activeTab  = 'combat';
     let _rafPending = false;
     let _hooked     = false;
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  TAB DEFINITIONS
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── tabs ──
 
-    // Each card takes the shared ItemStats rows (raw attributes AND the game's
-    // computed stats) whose section — decided by AttributeSections from the
-    // attribute definitions — is one of `canonical`. `subFilter` only splits a
-    // section into smaller cards by the row's own name; `only` picks raw
-    // attributes ('raw') or calculated stats ('computed').
+    // each card: rows from these sections, split by name (subFilter), raw or calculated only (only)
     const TAB_DEFS = [
         {
             id: 'combat',
@@ -140,15 +88,12 @@ const SBS = (() => {
         return set;
     })();
 
-    // Returns true if a key's canonical section (per AttributeSections) is
-    // covered by a named tab.
+    // is this key's section shown on a tab? Called by: _tabOther
     function _isCovered(attrDefs, key) {
         return _coveredCanonicalSections.has(window.AttributeSections.classify(attrDefs, key));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  HOOK INTO BUILDER
-    // ─────────────────────────────────────────────────────────────────────────
+    // redraw when the builder's ship changes. Called on page load
 
     function hookIntoBuilder() {
         if (_hooked) return;
@@ -186,9 +131,7 @@ const SBS = (() => {
         console.log('[SBS] Hooked into builder.');
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  REFRESH
-    // ─────────────────────────────────────────────────────────────────────────
+    // redraw now. Called by: the builder after edits
 
     function refresh() {
         if (_rafPending) return;
@@ -205,21 +148,9 @@ const SBS = (() => {
         });
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  BUILDER-SHAPE ADAPTERS
-    //
-    //  Everything below in this section exists ONLY to translate the ship
-    //  builder's in-progress data shapes into the plain {attributes, outfits}
-    //  shape window.ItemStats expects. No formulas or classification logic
-    //  live here — they're one call away in ItemStats.
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── builder ship → the shape ItemStats expects ──
 
-    // Outfit index = every saved outfit (across all plugins, via ItemStats)
-    // PLUS whatever the user is still editing in the builder itself
-    // (sbAllOutfits) that hasn't been saved to window.allData yet. Saved
-    // outfits take priority on a name collision, matching the original
-    // builder behaviour (a still-editing draft shouldn't clobber the
-    // canonical saved version of an outfit with the same name).
+    // saved outfits plus any being edited. Called by: _renderContent
     function _buildOutfitIndex() {
         const merged = window.ItemStats.buildOutfitIndex();
         const sbOutfits = (typeof sbAllOutfits !== 'undefined') ? sbAllOutfits : [];
@@ -231,10 +162,7 @@ const SBS = (() => {
         return merged;
     }
 
-    // Normalizes a builder ship object into the plain shape ItemStats
-    // functions expect: `attributes` (with mass/drag folded in from their
-    // separate top-level string fields) and `outfits` (array of
-    // {name, count} with quote-wrapped names trimmed and counts parsed).
+    // builder ship → { attributes, outfits }. Called by: _shipRows, _buildEffectiveAttrs
     function _normalizedShipItem(ship) {
         const attributes = { ...(ship.attributes || {}) };
         if (ship.mass !== undefined && ship.mass !== '') attributes.mass = parseFloat(ship.mass) || 0;
@@ -250,20 +178,18 @@ const SBS = (() => {
         return { attributes, outfits };
     }
 
-    // Base ship attrs + every installed outfit's numeric attribute
-    // contributions, merged. Delegates entirely to ItemStats.buildEffectiveAttrs.
+    // ship + outfits (ItemStats). Called by: _renderContent
     function _buildEffectiveAttrs(ship, outfitIdx) {
         return window.ItemStats.buildEffectiveAttrs(_normalizedShipItem(ship), outfitIdx);
     }
 
-    // Fleet weapon DPS summary + per-weapon profiles. Delegates to
-    // ItemStats.getShipWeaponData, which itself wraps window.WeaponStats.
+    // weapon DPS (ItemStats). Called by: _renderContent
     function _computeWeaponStats(ship, outfitIdx) {
         try { return window.ItemStats.getShipWeaponData(_normalizedShipItem(ship), outfitIdx); }
         catch (e) { console.warn('[SBS] WeaponStats error:', e); return null; }
     }
 
-    // The shared rows for this ship (raw + computed), tidied — see _renderContent.
+    // rows for this ship (raw + calculated), tidied. Called by: _renderContent
     function _shipRows(ship, eff, ad, outfitIdx) {
         const IS = window.ItemStats;
         const all = [
@@ -274,11 +200,13 @@ const SBS = (() => {
         return IS.tidyRows ? IS.tidyRows(ad, all) : all;
     }
     const _isComputed = r => r.source !== window.ItemStats.SOURCE.RAW && r.source !== window.ItemStats.SOURCE.HARDPOINT;
+    // a row as a card (skips empty / zero)
     function _rowCard(r) {
         const raw = Number(r.raw);
         if (!r.value || (isFinite(raw) && raw === 0)) return '';
         return _card(r.label, window.ItemStats.formatRowDisplay(r), r.unit || '', _isComputed(r));
     }
+    // rows for one card. Called by: _tabKeyword, _tabWeapons
     function _rowsFor(rows, sec) {
         const wanted = new Set(sec.canonical);
         return rows.filter(r => wanted.has(r.section)
@@ -287,9 +215,7 @@ const SBS = (() => {
             && (sec.only !== 'computed' || _isComputed(r)));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  DOM MOUNT
-    // ─────────────────────────────────────────────────────────────────────────
+    // add the panel to the page
 
     function _mount() {
         const mount = document.getElementById('sbs-panel-mount');
@@ -337,9 +263,7 @@ const SBS = (() => {
         });
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  RENDER DISPATCH
-    // ─────────────────────────────────────────────────────────────────────────
+    // draw the current tab. Called by: refresh, tab clicks
 
     function _renderContent(ship) {
         const el = document.getElementById('sbs-content');
@@ -349,10 +273,7 @@ const SBS = (() => {
         const eff          = _buildEffectiveAttrs(ship, outfitIdx);
         const wData         = _computeWeaponStats(ship, outfitIdx);
         const ad           = window.attrDefs || null;
-        // The same rows the Data Viewer, Compare and outfit expander show: raw
-        // attributes, the game's computed stats (max speed, acceleration, turn
-        // rate, afterburner …), heat figures — sorted into sections and tidied
-        // by ItemStats/AttributeSections.
+        // same rows the Data Viewer, Compare and outfit expander show
         const rows = _shipRows(ship, eff, ad, outfitIdx);
 
         let html = '';
@@ -370,16 +291,7 @@ const SBS = (() => {
         el.innerHTML = html || `<div class="sbs-empty">No data available.</div>`;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  GENERIC CANONICAL-SECTION TAB RENDERER
-    //
-    //  For each visual sub-card in the tabDef, collect every attr key from
-    //  eff whose AttributeSections.classify() result is one of the card's
-    //  `canonical` sections, then (optionally) narrow that set with a purely
-    //  cosmetic `subFilter` regex — e.g. splitting "Shields & Hull" into a
-    //  Shields card and a Hull card. Membership itself is never re-decided
-    //  here; it's always AttributeSections.classify()'s call.
-    // ─────────────────────────────────────────────────────────────────────────
+    // cards for a tab, from its sections. Called by: _renderContent
 
     function _tabKeyword(rows, tabDef) {
         let html = '';
@@ -390,34 +302,13 @@ const SBS = (() => {
         return html || `<div class="sbs-empty">No ${tabDef.label} attributes found.</div>`;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  TAB: WEAPONS
-    //
-    //  Three tiers of data:
-    //
-    //  1. Ship-level capacity cards — same canonical section + subFilter as
-    //     the "weapons" tab definition above (capSec below), so they stay in
-    //     sync automatically if that definition ever changes.
-    //
-    //  2. Fleet DPS summary from ItemStats.getShipWeaponData (wraps WeaponStats).
-    //
-    //  3. Per-weapon detail accordion — for each installed weapon outfit we
-    //     walk the raw outfit.weapon object and display EVERY field found on
-    //     it via ItemStats.getRawAttributeRows, regardless of what those
-    //     fields are. No hardcoded key list.
-    //
-    //  Computed values from the WeaponStats profile (shots/s, range, DPS
-    //  breakdown) are appended after the raw fields under a "── Per Second
-    //  ──" divider so nothing is lost.
-    // ─────────────────────────────────────────────────────────────────────────
+    // one weapon's rates, per-second values and costs. Called by: _tabWeapons
 
     function _weaponDetailSection(outfitName, count, outfit, profile, ad) {
         const w   = outfit.weapon || {};
         const sps = profile.shotsPerSecond || 0;
 
-        // ── A) Rate / behaviour fields from raw weapon object ──────────────
-        // Per-shot firing costs (start with "firing ") and damage values
-        // (end with " damage") are handled in section B instead.
+        // firing costs and timings from the weapon itself
         const skip = new Set();
         for (const key of Object.keys(w)) {
             const lk = key.toLowerCase();
@@ -427,7 +318,7 @@ const SBS = (() => {
             .map(r => ({ label: r.label, display: r.value, unit: r.unit }))
             .sort((a, b) => a.label.localeCompare(b.label));
 
-        // ── B) Per-second computed values ──────────────────────────────────
+        // per-second values
         const perSecRows = [];
         perSecRows.push({ label: 'Shots/s', display: window.ItemStats.fmtNum(sps), unit: '' });
         if (profile.effectiveRange)
@@ -437,7 +328,6 @@ const SBS = (() => {
         for (const [costKey, costVal] of Object.entries(profile.firingCosts || {}).sort((a, b) => a[0].localeCompare(b[0])))
             if (costVal) perSecRows.push({ label: window.ItemStats.labelForKey(costKey.replace(/^firing /, '')) + ' Cost', display: window.ItemStats.fmtNum(costVal * sps), unit: '/s' });
 
-        // ── Build HTML ─────────────────────────────────────────────────────
         const countLabel = count > 1 ? ` <span class="sbs-wt-count">×${count}</span>` : '';
         const badges = [
             profile.isHoming      ? '<span class="sbs-badge sbs-badge--blue">HOMING</span>' : '',
@@ -472,10 +362,9 @@ const SBS = (() => {
 </div>`;
     }
 
+    // capacity, DPS and per-weapon blocks. Called by: _renderContent
     function _tabWeapons(wData, eff, ad, outfitIdx, rows) {
-        // ── Capacity section — same canonical sections + subFilter used by
-        // the "weapons" tab definition above, so this stays in sync
-        // automatically if that definition changes.
+        // capacity card (same rules as the weapons tab definition)
         const capSec = TAB_DEFS.find(t => t.id === 'weapons').sections[0];
         const capCards = _rowsFor(rows || [], capSec).map(_rowCard).join('');
         const capSection = capCards ? _section('📦 Capacity', capCards) : '';
@@ -483,7 +372,7 @@ const SBS = (() => {
         if (!wData || !wData.weaponCount)
             return capSection + `<div class="sbs-section"><div class="sbs-empty">No weapons installed.</div></div>`;
 
-        // ── Fleet DPS summary ──────────────────────────────────────────────
+        // fleet DPS
         let sumCards = '';
         sumCards += _card('Total DPS',    wData.totalDps,          'dps', wData.totalDps  > 0);
         sumCards += _card('Shield DPS',   wData.shieldDps,         'dps', wData.shieldDps > 0);
@@ -500,7 +389,7 @@ const SBS = (() => {
             for (const a of (wData.ammoRequired || []))
                 ammoCards += _card(_esc(a.ammoOutfitName), window.ItemStats.fmtNum(a.totalShotsPerSecond), 'rounds/s');
 
-        // ── Per-weapon detail sections ─────────────────────────────────────
+        // one block per weapon
         let detailHtml = '';
         for (const w of (wData.weapons || [])) {
             const outfit = outfitIdx[w.outfitName];
@@ -515,14 +404,7 @@ const SBS = (() => {
              + detailHtml;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  TAB: OTHER
-    //
-    //  Shows every key in eff whose canonical section (per AttributeSections)
-    //  isn't referenced by any named tab. Applies displayMultiplier +
-    //  displayUnit from attrDefs. Also shows string attributes from the base
-    //  ship that don't match any covered section.
-    // ─────────────────────────────────────────────────────────────────────────
+    // everything no tab covers. Called by: _renderContent
 
     function _tabOther(rows, ship, ad) {
         let cards = rows.filter(r => !_coveredCanonicalSections.has(r.section)).map(_rowCard).join('');
@@ -534,9 +416,7 @@ const SBS = (() => {
         return _section('📋 Uncategorised Attributes', cards);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  TAB: EVERYTHING — every row, grouped by section (same order everywhere)
-    // ─────────────────────────────────────────────────────────────────────────
+    // every row, by section. Called by: _renderContent
 
     function _tabEverything(rows, ship, wData) {
         const bySection = {};
@@ -556,9 +436,7 @@ const SBS = (() => {
         return html || `<div class="sbs-empty">No attributes found.</div>`;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  HTML HELPERS  (pure presentation — no calculation)
-    // ─────────────────────────────────────────────────────────────────────────
+    // one stat card. Called by: the tab builders
 
     function _card(label, value, unit, highlight) {
         if (value === null || value === undefined) return '';
@@ -569,6 +447,7 @@ const SBS = (() => {
         return `<div class="sbs-card${cls}"><div class="sbs-label">${_esc(label)}</div><div class="sbs-value">${fmtVal}${unitTag}</div></div>`;
     }
 
+    // a titled group of cards
     function _section(title, content) {
         if (!content || !content.trim()) return '';
         return `<div class="sbs-section"><div class="sbs-section-title">${_esc(title)}</div><div class="sbs-cards">${content}</div></div>`;
@@ -581,9 +460,7 @@ const SBS = (() => {
             .replace(/>/g, '&gt;');
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  PUBLIC API
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── window.ShipBuilderStats ──
 
     return { refresh, hookIntoBuilder, _mount };
 

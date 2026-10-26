@@ -1,16 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  autoFitting/afWorker.js — runs auto-fit in the background
-//
-//  The search can take a few seconds. Running it here (a Web Worker) keeps
-//  the page fully responsive — scrolling, clicking, typing all keep working
-//  — while it sends back progress for the loading bar.
-//
-//  In:  { base, list, goal, opts, keep, mine, idx, counter: {profile, count} | null }
-//  Out: { type: 'progress', phase, steps, outfits, pass }
-//       { type: 'done', result }  |  { type: 'error', message }
-// ═══════════════════════════════════════════════════════════════════════════
+// Runs the auto-fit search in the background so the page never freezes; sends progress back.
 
 self.window = self;              // the shared modules expect a `window`
 importScripts('afStats.js', 'afOptimizer.js', 'afThreat.js');
@@ -23,6 +13,7 @@ self.onmessage = e => {
     const opts = { ...job.opts };
     if (job.counter) opts.counter = self.AfThreat.makeCounter(job.counter.profile, job.counter.count);
 
+    // one pass of the optimiser
     const run = (options, pass) => O.optimize({
       base: job.base, candidates: job.list, goal: job.goal, options, keep: job.keep,
       reference: job.mine, referenceIndex: job.idx,
@@ -55,6 +46,7 @@ self.onmessage = e => {
   }
 };
 
+// best swap/addition toward each feature (All-round)
 function suggestions(S, r, job) {
   const out = [], base = job.base, idx = job.idx, now = r.derived;
   const metric = {
