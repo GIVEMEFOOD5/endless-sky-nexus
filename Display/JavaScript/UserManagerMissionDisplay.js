@@ -1,37 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  UserManagerMissionDisplay.js  —  front-end renderer
-//
-//  Same job as before: ask MissionLoader for data and push it
-//  onto the page. No parsing, no formatting, no plugin-selection
-//  logic of its own — that all now lives in generalPluginStuff.js
-//  (window.PluginManager), the app's shared picker module.
-//
-//  One addition since last time: after MissionLoader hands back the
-//  formatted catalog, it's run through MissionStatusHelper.decorateMissions()
-//  — the "helper" layer — which attaches a `.status` (in progress /
-//  available / completed / failed / declined / mixed / not encountered)
-//  to each mission by cross-referencing whatever save is currently
-//  loaded via the save reader page. This file still doesn't do any of
-//  that cross-referencing itself — it just renders whatever `.status`
-//  it's handed, the same way it already renders whatever `.bodyHtml`
-//  it's handed.
-//
-//  Load order this file depends on:
-//    1. generalPluginStuff.js    (defines window.PluginManager)
-//    2. missionLoader.js         (defines window.MissionLoader,
-//                                  and the window.DataLoader shim
-//                                  generalPluginStuff.js talks to)
-//    3. missionStatusHelper.js   (defines window.MissionStatusHelper —
-//                                  OPTIONAL: if not loaded, status
-//                                  badges are simply skipped, nothing
-//                                  else breaks)
-//    4. saveCleanupHelper.js     (defines window.SaveCleanupHelper —
-//                                  also OPTIONAL, same deal: no cleanup
-//                                  panel, nothing else breaks)
-//    5. this file
-// ═══════════════════════════════════════════════════════════
+// The Missions page: cards, filters, status badges, the mission window, Complete/Remove and the save cleanup panel.
 
 (function () {
 
@@ -50,7 +19,7 @@ const cleanupPanelEl = document.getElementById('saveCleanupPanel');
 const HAS_STATUS_HELPER  = typeof window.MissionStatusHelper !== 'undefined';
 const HAS_CLEANUP_HELPER = typeof window.SaveCleanupHelper   !== 'undefined';
 
-// ── Loader events ────────────────────────────────────────────
+// ── loader events ──
 document.addEventListener('missionsLoadStart', () => {
     if (statusEl) statusEl.textContent = 'Loading missions…';
 });
@@ -79,9 +48,7 @@ searchInput.addEventListener('input', applyFiltersAndRender);
 if (statusFilterEl) statusFilterEl.addEventListener('change', applyFiltersAndRender);
 if (jobBoardFilterEl) jobBoardFilterEl.addEventListener('change', applyFiltersAndRender);
 if (offerFilterEl) offerFilterEl.addEventListener('change', applyFiltersAndRender);
-// A save too big for localStorage arrives a moment later, rebuilt from its stored file.
-// Which conditions the game computes (parsed from its source) — refines
-// the "Can I get it?" filter once loaded.
+// a big save arrives a moment later (rebuilt from its file)
 if (window.GameKeys) window.GameKeys.loadGameRules().then(r => {
     if (r && window.MissionLoader && MissionLoader.isReady && MissionLoader.isReady()) refreshMissions();
 });
@@ -89,27 +56,18 @@ document.addEventListener('esSaveCacheReady', () => {
     if (window.MissionLoader && MissionLoader.isReady && MissionLoader.isReady()) refreshMissions();
 });
 
-// Event delegation: card clicks now open the mission detail modal
-// instead of expanding inline (see MissionModal below) — more room for
-// action buttons than an inline dropdown had.
+// clicking a card opens the mission window
 listEl.addEventListener('click', (e) => {
     const head = e.target.closest('.mission-head');
     if (head) MissionModal.open(head.closest('.mission-card').dataset.id);
 });
 
-// ── PluginManager hook ───────────────────────────────────────
-// generalPluginStuff.js calls this every time the active plugin set
-// changes — from the picker, from reordering, or from removing a plugin
-// in the active list. It's the ONE place display refreshes get triggered
-// from now; we don't listen for 'pluginsChanged' ourselves.
+// redraw after the selected plugins change. Called by: generalPluginStuff
 window._renderCardsFromManager = async function (/* resetTab */) {
     refreshMissions();
 };
 
-// The current save lives in localStorage, set by a DIFFERENT page (the
-// Save Reader). If that page is open in another tab and the save gets
-// switched while this page is sitting idle, the 'storage' event is how
-// this tab finds out — localStorage doesn't push updates any other way.
+// the save can change in another tab
 if (HAS_STATUS_HELPER) {
     window.addEventListener('storage', (e) => {
         if (e.key === 'ES_SM_CURRENT' || (e.key && e.key.startsWith('ES_SM_SAVE_'))) {
@@ -118,10 +76,9 @@ if (HAS_STATUS_HELPER) {
     });
 }
 
-// ── Bootstrap ────────────────────────────────────────────────
-// Show the list as soon as the first missions are in ('missionsLoaded' fires
-// then) — MissionLoader re-renders again once the rest have arrived.
+// ── start: show the list as soon as the first missions are in ──
 let _missionsBooted = false;
+// show the list once. Called by: missionsLoaded
 function _bootMissionList() {
     if (_missionsBooted) return;
     _missionsBooted = true;
@@ -137,19 +94,10 @@ MissionLoader.load()
 // have to stuff raw mission data into the HTML string itself.
 let currentMissions = new Map();
 
-// The full decorated catalog, recomputed only when the underlying data
-// actually changes (initial load, active-plugin change) — NOT on every
-// keystroke. Decorating 8000+ missions means running MissionStatusHelper
-// over the whole save's condition set each time, and re-reading + JSON-
-// parsing the save from localStorage on top of that; doing that per
-// keystroke in the search box would make typing visibly laggy for no
-// reason, since the save and catalog aren't changing while someone types.
+// the decorated list, rebuilt only when the data changes
 let allDecoratedMissions = [];
 
-// ── Status badge styling ─────────────────────────────────────
-// Maps MissionStatusHelper.STATUS values to a CSS modifier class and a
-// short badge label (the full label with counts/history still shows in
-// the card body's field grid — this is just the at-a-glance version).
+// ── status badges ──
 const STATUS_BADGE = HAS_STATUS_HELPER ? {
     [MissionStatusHelper.STATUS.IN_PROGRESS]:     { cls: 'active',    text: 'In progress' },
     [MissionStatusHelper.STATUS.AVAILABLE]:       { cls: 'available', text: 'Available' },
@@ -158,26 +106,15 @@ const STATUS_BADGE = HAS_STATUS_HELPER ? {
     [MissionStatusHelper.STATUS.DECLINED]:        { cls: 'declined',  text: 'Declined' },
     [MissionStatusHelper.STATUS.MIXED]:           { cls: 'mixed',     text: 'Mixed history' },
     [MissionStatusHelper.STATUS.OFFERED_ONLY]:    { cls: 'offered',   text: 'Offered' },
-    // NOT_ENCOUNTERED deliberately has no entry — the vast majority of a
-    // full mission catalog will be this, and a badge on every single card
-    // would be pure noise. No entry here = no badge rendered (see
-    // statusBadgeHtml below), not an error.
+    // "not encountered" gets no badge (most missions)
 } : {};
 
-// When a mission is flagged (unreachableCompletePath) AND its literal
-// status is Failed or Declined specifically, the detected pattern means
-// that status is very likely not genuine — see missionStatusHelper.js's
-// detectQuestionableResolution() for the two confirmed patterns this
-// covers. Rather than showing an alarming "Failed" badge next to a
-// warning icon explaining it's probably fine, the badge itself shows
-// "Completed" in that case — the warning icon stays, so it's still
-// clear this is an inferred read, not a literal engine-reported one.
-// Left as MIXED/OFFERED_ONLY/NOT_ENCOUNTERED as-is even when flagged —
-// those aren't a clean single "this looks like failure" to override.
+// flagged + failed/declined → shown as completed
 function effectiveStatus(m) {
     if (!m.status) return null;
     return MissionStatusHelper.effectiveStatus(m.status);
 }
+// why a status was corrected
 function overrideReason(m) {
     return m.status.completedByCondition ? m.status.completedByConditionReason : m.status.unreachableCompletePathReason;
 }
@@ -186,6 +123,7 @@ const OFFER_BADGE = {
     now:    { cls: 'available', text: 'Can be offered' },
     almost: { cls: 'offered',   text: 'One step away' },
 };
+// "can get it now" badge
 function offerBadgeHtml(m) {
     const b = m.offer && OFFER_BADGE[m.offer.state];
     if (!b) return '';
@@ -193,6 +131,7 @@ function offerBadgeHtml(m) {
     return `<span class="mission-status-badge mission-status-badge--${b.cls}" title="${esc(tip)}">${esc(b.text)}</span>`;
 }
 
+// status badge
 function statusBadgeHtml(m) {
     if (!m.status) return '';
     const overridden = effectiveStatus(m) !== m.status.status;
@@ -218,18 +157,12 @@ function esc(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// ── Render ────────────────────────────────────────────────────
-// Expensive: pulls the full catalog from MissionLoader and, if available,
-// decorates every mission with its save-file status. Only call this when
-// the underlying data actually changed — see allDecoratedMissions above.
+// reload missions and statuses. Called by: plugin/save changes
 function refreshMissions() {
     let missions = MissionLoader.getAllMissions();
 
     if (HAS_STATUS_HELPER) {
-        // Prefer the cleaned-up "Updated Save" if the cleanup helper has
-        // one, so removing a failed-mission line or a triggered event
-        // actually changes what shows here rather than leaving badges
-        // pointed at the untouched original forever.
+        // prefer the cleaned-up save if there is one
         const save = HAS_CLEANUP_HELPER
             ? (SaveCleanupHelper.getUpdatedSave() || MissionStatusHelper.getCurrentSave())
             : MissionStatusHelper.getCurrentSave();
@@ -261,22 +194,14 @@ function refreshMissions() {
     renderCleanupPanel();
 }
 
-// Cheap: just search text + status dropdown + job-board checkbox over
-// the already-decorated catalog. Safe to call on every keystroke.
+// search + filters over the list (cheap)
 function applyFiltersAndRender() {
     const q = searchInput.value.trim().toLowerCase();
     let filtered = q ? allDecoratedMissions.filter(m => m.searchText.includes(q)) : allDecoratedMissions;
 
     const statusPick = statusFilterEl ? statusFilterEl.value : '';
     if (statusPick && HAS_STATUS_HELPER) {
-        // Uses effectiveStatus() rather than the literal m.status.status,
-        // so a mission showing as "Completed" (because of the failed/
-        // declined-may-not-be-genuine override — see effectiveStatus
-        // above) actually shows up under the Completed filter, and
-        // doesn't show up under Failed/Declined even though that's its
-        // literal recorded status. Keeping the filter and the badges
-        // agreeing with each other matters more here than keeping the
-        // filter tied to the raw underlying data.
+        // filters use the status as shown
         filtered = statusPick === 'has_status'
             ? filtered.filter(m => effectiveStatus(m) !== MissionStatusHelper.STATUS.NOT_ENCOUNTERED)
             : filtered.filter(m => effectiveStatus(m) === statusPick);
@@ -296,9 +221,7 @@ function applyFiltersAndRender() {
     currentMissions = new Map(filtered.map(m => [m.id, m]));
 
     countLabel.textContent = `${filtered.length} mission${filtered.length === 1 ? '' : 's'}`;
-    // Draw cards in batches: thousands of missions at once made phones
-    // (and slower computers) stall. More are added as you scroll near the
-    // end, or with the button.
+    // draw cards in batches so phones don't stall
     lastFiltered = filtered;
     shownCount = Math.min(filtered.length, MISSION_BATCH);
     listEl.innerHTML = filtered.length
@@ -309,10 +232,12 @@ function applyFiltersAndRender() {
 
 const MISSION_BATCH = 60;
 let lastFiltered = [], shownCount = 0, moreObserver = null;
+// "Show more" button
 function moreButtonHtml() {
     const left = lastFiltered.length - shownCount;
     return left > 0 ? `<button class="btn btn-secondary" id="missionShowMore" style="width:100%;margin-top:10px;">Show ${Math.min(left, MISSION_BATCH)} more (${left} left)</button>` : '';
 }
+// next batch of cards
 function showMoreMissions() {
     const btn = document.getElementById('missionShowMore');
     if (!btn) return;
@@ -322,6 +247,7 @@ function showMoreMissions() {
     btn.outerHTML = moreButtonHtml();
     watchMore();
 }
+// auto-load more near the bottom
 function watchMore() {
     const btn = document.getElementById('missionShowMore');
     if (!btn) return;
@@ -332,6 +258,7 @@ function watchMore() {
     moreObserver.observe(btn);
 }
 
+// one mission card
 function cardHtml(m) {
     return `
       <div class="mission-card" data-id="${m.id}">
@@ -346,26 +273,14 @@ function cardHtml(m) {
       </div>`;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Mission detail modal
-//
-//  Clicking a card opens the mission's full content in a modal instead
-//  of expanding it inline — reuses the app's shared .modal-overlay /
-//  .modal-box--detail classes (same ones the ship-detail and plugin-
-//  picker modals already use) so it looks consistent everywhere else.
-//
-//  Built to be extended from OTHER scripts, not just edited here:
-//  call MissionModal.registerAction(fn) any time (even from a script
-//  loaded after this one) and every mission's modal will include
-//  whatever button HTML `fn(mission)` returns. Return null/'' from
-//  `fn` to skip adding a button for missions where it doesn't apply.
-// ═══════════════════════════════════════════════════════════
+// ── the mission window (extend with registerAction / registerNote) ──
 const MissionModal = (function () {
     let overlayEl, titleEl, pluginEl, bodyEl, actionsEl;
     let openMissionId = null;
     const actionBuilders = [];
     const noteBuilders = [];
 
+    // add the window to the page
     function inject() {
         if (document.getElementById('missionModalOverlay')) return;
 
@@ -412,10 +327,7 @@ const MissionModal = (function () {
             toggle.textContent = (box.classList.contains('open') ? '▾' : '▸') + ' View full raw structure';
         });
 
-        // One delegated listener covers every action button registered
-        // via registerAction, however many get added over time — a
-        // builder's returned HTML just needs a `data-mission-action="x"`
-        // attribute on its button for this to find it again.
+        // one listener for every action button
         actionsEl.addEventListener('click', (e) => {
             const btn = e.target.closest('[data-mission-action]');
             if (!btn) return;
@@ -424,10 +336,12 @@ const MissionModal = (function () {
         });
     }
 
+    // page event
     function _fireEvent(name, detail) {
         document.dispatchEvent(new CustomEvent(name, { detail, bubbles: true }));
     }
 
+    // open the mission window
     function open(missionId) {
         const m = currentMissions.get(missionId);
         if (!m) return;
@@ -446,19 +360,18 @@ const MissionModal = (function () {
         overlayEl.classList.add('active');
     }
 
+    // close it
     function close() {
         overlayEl.classList.remove('active');
         openMissionId = null;
     }
 
+    // add an action button to the window
     function registerAction(buildFn) {
         actionBuilders.push(buildFn);
     }
 
-    // Same extension pattern as registerAction, but for informational
-    // banners prepended to the body instead of buttons in the footer —
-    // e.g. the "this mission might only resolve via failure" warning
-    // below. Call from any script, any time.
+    // add a note to the mission window
     function registerNote(buildFn) {
         noteBuilders.push(buildFn);
     }
@@ -473,11 +386,7 @@ const MissionModal = (function () {
 
 window.MissionModal = MissionModal;
 
-// Example of the extension point above — remove this freely, it's just
-// a demonstration. Fires 'missionModalAction' with action:'copy-name',
-// caught nowhere by default; add a document.addEventListener for it
-// (or your own action name) wherever you want the button to actually do
-// something. See `data-mission-action` in the actionsEl listener above.
+// example note — safe to remove
 MissionModal.registerAction(m => `
     <button class="btn-cleanup-reset" data-mission-action="copy-name">Copy internal name</button>
 `);
@@ -486,9 +395,7 @@ document.addEventListener('missionModalAction', (e) => {
     navigator.clipboard?.writeText(e.detail.mission.name).catch(() => {});
 });
 
-// Warning banner for the "this status may not mean what it looks like"
-// patterns — see missionStatusHelper.js's detectQuestionableResolution()
-// for exactly what this does and doesn't catch.
+// warning for statuses that may mislead
 if (HAS_STATUS_HELPER) {
     MissionModal.registerNote(m => {
         if (!m.offer || m.offer.state === 'active') return '';
@@ -517,17 +424,7 @@ if (HAS_STATUS_HELPER) {
     });
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Complete / remove mission — only shown for a mission the save is
-//  Complete Mission shows for any mission NOT already fully completed —
-//  in progress, available, declined, offered-only, never encountered,
-//  or resolved with a mixed history. It only hides once a mission's
-//  status is a clean "completed successfully" with nothing else mixed
-//  in, since completing it again would just be redundant. Remove
-//  Mission shows for ANY mission regardless of status — see
-//  saveCleanupHelper.js's removeMission() for exactly what it clears
-//  in each case (held, available, or already-resolved).
-// ═══════════════════════════════════════════════════════════
+// ── Complete / Remove (with a save open) ──
 if (HAS_CLEANUP_HELPER && HAS_STATUS_HELPER) {
 
     MissionModal.registerAction(m => {
@@ -544,17 +441,11 @@ if (HAS_CLEANUP_HELPER && HAS_STATUS_HELPER) {
         return buttons.join('\n');
     });
 
-    // Reads the mission's own onComplete-triggered payment/outfit/ship
-    // grants — the OTHER trigger points (onOffer, onAccept, onVisit...)
-    // are deliberately excluded since those already fired earlier in a
-    // real playthrough, not at completion. See saveCleanupHelper.js's
-    // header note on "complete a mission" for the full reasoning.
+    // what completing gives (payment, outfits, ships)
     function computeOnCompleteRewards(m) {
         const onCompleteTriggers = (m.payment && m.payment.triggers && m.payment.triggers.onComplete) || [];
         let credits = onCompleteTriggers.reduce((sum, t) => sum + (t.base || 0), 0);
-        // No onComplete-specific payment entry found — apparentPayment is
-        // the estimate Endless Sky itself shows the player, so it's a
-        // reasonable fallback, just less precise than a real trigger.
+        // no on-complete payment — use the game's estimate
         if (credits === 0 && onCompleteTriggers.length === 0 && m.payment && m.payment.apparentPayment) {
             credits = m.payment.apparentPayment;
         }
@@ -567,9 +458,7 @@ if (HAS_CLEANUP_HELPER && HAS_STATUS_HELPER) {
         return { credits, outfits, ships };
     }
 
-    // Builds a confirm-dialog message that actually describes what's
-    // about to happen for THIS mission's current status, rather than a
-    // one-size-fits-all sentence that's only accurate for held missions.
+    // confirm message for removing a mission
     function describeRemoval(m) {
         if (m.status.isHeld)      return 'This deletes its held mission data and clears its tracking conditions.';
         if (m.status.isAvailable) return 'This removes it from the available-jobs list and clears its tracking conditions.';
@@ -624,13 +513,7 @@ if (HAS_CLEANUP_HELPER && HAS_STATUS_HELPER) {
     });
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Save cleanup panel — lists failed-mission conditions and already-
-//  triggered events found in the current save, with buttons to remove
-//  them. Every removal edits the "Updated Save" (see
-//  saveCleanupHelper.js) only — the original imported save is never
-//  touched, so this is always safe to experiment with.
-// ═══════════════════════════════════════════════════════════
+// ── save cleanup panel: failed missions you can remove ──
 if (cleanupPanelEl && HAS_CLEANUP_HELPER) {
     cleanupPanelEl.addEventListener('click', (e) => {
         const removeFailedBtn = e.target.closest('[data-remove-failed]');
@@ -664,6 +547,7 @@ if (cleanupPanelEl && HAS_CLEANUP_HELPER) {
     });
 }
 
+// draw the cleanup panel. Called by: refreshMissions
 function renderCleanupPanel() {
     if (!cleanupPanelEl || !HAS_CLEANUP_HELPER) return;
 
@@ -708,40 +592,6 @@ function renderCleanupPanel() {
     `;
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Optional HTML this file looks for (all safe to omit — the
-//  corresponding badges/filtering just won't appear if they're not on
-//  the page):
-//
-//  Status filter dropdown, next to the search box:
-//    <select id="statusFilterSelect">
-//      <option value="">All statuses</option>
-//      <option value="has_status">Has any save data</option>
-//      <option value="in_progress">In progress</option>
-//      <option value="available_not_accepted">Available</option>
-//      <option value="completed_successfully">Completed</option>
-//      <option value="completed_unsuccessfully">Failed</option>
-//      <option value="declined">Declined</option>
-//      <option value="mixed">Mixed history</option>
-//      <option value="offered_only">Offered only</option>
-//    </select>
-//
-//  Hide-job-board checkbox, next to the search box:
-//    <label>
-//      <input type="checkbox" id="jobBoardFilterCheckbox">
-//      Hide job board missions
-//    </label>
-//
-//  "No save loaded" notice, shown only when MissionStatusHelper has no
-//  current save to cross-reference against:
-//    <p id="noSaveNotice" class="hidden">
-//      No save loaded — status badges need a save imported on the Save
-//      Reader page first.
-//    </p>
-//
-//  Save cleanup panel — rendered entirely by renderCleanupPanel() above,
-//  just needs an empty container:
-//    <div class="panel" id="saveCleanupPanel"></div>
-// ═══════════════════════════════════════════════════════════
+// ── optional HTML this page looks for ──
 
 })();

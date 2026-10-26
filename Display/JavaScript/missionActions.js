@@ -1,22 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  missionActions.js — "mark this mission done and give me its rewards"
-//
-//  Reads a mission's `on complete` block (the parser's raw tree:
-//  [{ key, values, children }]) and turns it into a list of changes for a
-//  save, mirroring what the game's GameAction does when you finish it:
-//    payment            → credits (the fixed part; distance-based pay can't
-//                         be worked out here and is noted)
-//    outfit X [n]       → outfits added to (or, if negative, taken from) cargo
-//    give ship M [name] → a new ship
-//    "c" = / += / -= / ++ / --, set, clear → condition changes
-//    event E [d] [max]  → event scheduled d days from the save's date
-//  plus the mission's own "<name>: offered" / "<name>: done" conditions.
-//  Anything else (dialogs, conversations, logs, fail …) is listed as skipped.
-//
-//  Works in Node and the browser (window.MissionActions).
-// ═══════════════════════════════════════════════════════════════════════════
+// Completing a mission in a save: what it would do (rewards, events) and doing it.
 
 (function (root, factory) {
   const api = factory();
@@ -26,18 +10,19 @@
   const clean = v => String(v ?? '').replace(/^"([^"]*)"$/, '$1');
   const n = v => { const x = Number(v); return Number.isFinite(x) ? x : null; };
 
-  // ── calendar (the game uses the ordinary Gregorian calendar) ────────────
+  // ── calendar (the game uses the normal Gregorian calendar) ──
   function addDays({ day, month, year }, days) {
     const d = new Date(Date.UTC(year, month - 1, day));
     d.setUTCDate(d.getUTCDate() + Math.round(days));
     return { day: d.getUTCDate(), month: d.getUTCMonth() + 1, year: d.getUTCFullYear() };
   }
 
+  // one block of the mission
   function block(raw, trigger) {
     return (raw || []).find(e => e && e.key === 'on' && Array.isArray(e.values) && e.values[0] === trigger) || null;
   }
 
-  /** What completing this mission would do. */
+  // what completing it would do. Called by: saveEditor
   function summarize(raw) {
     const out = { credits: 0, paymentNote: null, outfits: [], ships: [], conditions: [], events: [], skipped: [] };
     const b = block(raw, 'complete');
@@ -68,7 +53,7 @@
     return out;
   }
 
-  /** Plain-English lines for showing the summary to someone. */
+  // that in plain English. Called by: saveEditor, UserManagerMissionDisplay
   function describe(sum) {
     const lines = [];
     if (sum.credits) lines.push(`${sum.credits.toLocaleString()} credits${sum.paymentNote ? ` (${sum.paymentNote})` : ''}`);
@@ -80,7 +65,7 @@
     return lines;
   }
 
-  // condition arithmetic, as the game evaluates it (integers)
+  // condition arithmetic as the game does it (whole numbers)
   function applyOp(cur, op, value, getCond) {
     const rhs = value == null ? 0 : (n(value) ?? (getCond ? getCond(clean(value)) : 0));
     switch (op) {
@@ -99,12 +84,7 @@
     }
   }
 
-  /**
-   * Apply to an EsSaveFile.SaveFile.
-   *   mode: 'rewards' (mark done + give rewards) | 'done' (mark done only) | 'reset' (make offerable again)
-   *   addShip(model, name) → true if the ship could be added (needs game data)
-   * Returns the list of what was done.
-   */
+  // apply to a save (mode: 'rewards' = done + rewards, 'done' = just done). Called by: saveEditor, UserManagerMissionDisplay
   function apply(doc, missionName, sum, { mode = 'rewards', addShip } = {}) {
     const done = [];
     const get = c => Number(doc.getCondition(c)) || 0;
