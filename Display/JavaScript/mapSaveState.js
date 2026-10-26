@@ -1,29 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  mapSaveState.js — shows the Systems map as the selected pilot sees it
-//
-//  When a save is open in "Saves & Account" and the "As <pilot> sees it"
-//  layer is on (default), this replays the save's `changes` block onto the
-//  merged map data exactly the way the game does on load
-//  (UniverseObjects::Change): most entries are just `event "Name"`, which
-//  are looked up in the `game_events` table (raw event text written by
-//  parser.js) and their system/planet/government/link changes applied.
-//
-//  Applied: system government, position (new systems), links, attributes,
-//  hidden / inaccessible / shrouded, planets added/removed; planet
-//  government, spaceport, shipyard, outfitter; government colours;
-//  top-level link / unlink. Systems that are hidden or inaccessible and
-//  that this pilot has never visited are left off the map.
-//  Missions: a mission is hidden once it has been offered as many times as
-//  it can repeat (non-repeatable: once) — the same rule as Mission::CanOffer.
-//
-//  With the layer off the map is the plain data-file universe, every
-//  mission included.
-//
-//  Needs esSaveFile.js; saveVault.js for the save text (saves imported
-//  before editing existed only give mission history, not map changes).
-// ═══════════════════════════════════════════════════════════════════════════
+// The map as your pilot sees it: replays your save's story events (governments, links, planets) and filters missions.
 
 (function () {
   const PREF_KEY = 'es_map_pilot_view';
@@ -41,7 +18,7 @@
   let timeline = { cutIndex: null, previews: [] };
   let pluginOrder = [];
 
-  // ── which save is selected ───────────────────────────────────────────────
+  // ── which save ──
   async function loadSelectedSave() {
     const id = readJSON('ES_SM_CURRENT');
     if (!id) return null;
@@ -58,7 +35,7 @@
     };
   }
 
-  // ── event definitions ────────────────────────────────────────────────────
+  // ── event definitions ──
   async function fetchEvents(names, activeOutputNames) {
     const wanted = [...names].filter(n => ![...eventCache.keys()].some(k => k.endsWith('\u0000' + n)));
     const sb = window.supabaseClient;
@@ -75,8 +52,7 @@
     }
     return order;
   }
-  // Every active plugin's definition of an event, in plugin order (later
-  // plugins extend/override earlier ones, as the game loads them).
+  // every selected plugin's version of an event, in plugin order
   function eventChangeNodes(name, pluginOrder) {
     const out = [];
     for (const pid of pluginOrder) {
@@ -94,7 +70,7 @@
     return out;
   }
 
-  // ── prepare (async) — called before the map is rebuilt ───────────────────
+  // ── before the map is rebuilt (async) ──
   async function prepare(activeOutputNames) {
     ctx = await loadSelectedSave();
     summary = null;
@@ -114,8 +90,7 @@
     if (nested.size) await fetchEvents(nested, activeOutputNames);
   }
 
-  // The save's history as steps: one per day the game recorded changes on
-  // (the save writes a `date d m y` line before each day's changes).
+  // your save's history as steps (one per day with changes)
   function historySteps() {
     const changes = (ctx && ctx.changes) || [];
     const steps = [];
@@ -132,7 +107,7 @@
     });
     return steps.filter(st => st.events.length);
   }
-  /** Names of every event in the replayed part of the save's history. */
+  // events that have happened in the replayed history. Called by: mapTimeline
   function happenedEvents() {
     const changes = (ctx && ctx.changes) || [];
     const out = new Map();
@@ -143,18 +118,20 @@
     }
     return out;
   }
+  // preview / step through events. Called by: mapTimeline
   function setTimeline(patch) {
     timeline = { ...timeline, ...patch };
     if (typeof window._renderCardsFromManager === 'function') window._renderCardsFromManager(false);
   }
 
-  // ── apply (sync) — mutates the freshly formatted map data ────────────────
+  // ── apply the events to the freshly built map ──
   function apply({ systemsByName, planetsBySystem, governmentColors, pluginDataMap, activeOutputNames }) {
     notesBySystem = new Map();
     lastMap = { systemsByName, pluginDataMap, activeOutputNames };
     const usingSave = !!(ctx && pilotView);
     if (!usingSave && !timeline.previews.length) { summary = null; document.dispatchEvent(new CustomEvent('mapSaveStateApplied')); return; }
     let notePrefix = '';
+    // "what changed" note
     const note = (sys, text) => { if (!notesBySystem.has(sys)) notesBySystem.set(sys, []); notesBySystem.get(sys).push(notePrefix + text); };
 
     // base flags (not part of the formatted systems)
@@ -198,6 +175,7 @@
       }
     };
 
+    // system by name (created if new)
     function sysFor(name, node) {
       let s = systemsByName.get(name);
       if (s) return s;
@@ -211,6 +189,7 @@
       return s;
     }
 
+    // apply a system change (government, links, objects …)
     function applySystem(name, node) {
       const s = sysFor(name, node);
       if (!s) return;
@@ -270,6 +249,7 @@
       flags.set(name, f);
     }
 
+    // apply a planet change
     function applyPlanet(name, node) {
       const p = planetByName.get(name);
       if (!p) return;
@@ -310,6 +290,7 @@
       }
     }
 
+    // apply a government change (colour)
     function applyGovernment(name, node) {
       const col = node.children.find(c => c.tokens && c.tokens[0] === 'color' && c.tokens.length >= 4);
       if (!col) return;
@@ -344,8 +325,7 @@
     document.dispatchEvent(new CustomEvent('mapSaveStateApplied'));
   }
 
-  // Non-repeatable (or repeat-limited) missions already offered as often as
-  // they can be are gone for this pilot.
+  // drop missions already offered as many times as they can be
   function filterMissions(missions, pluginDataMap, activeOutputNames) {
     if (!ctx || !pilotView) return missions;
     const limit = new Map();
@@ -365,7 +345,7 @@
     return kept;
   }
 
-  // ── UI ───────────────────────────────────────────────────────────────────
+  // ── the "as your pilot sees it" switch ──
   function renderToggle() {
     const layers = document.querySelector('.map-layers');
     if (!layers) return;
@@ -390,6 +370,7 @@
     document.getElementById('mapPilotViewLabel').textContent = ctx ? `👤 As ${ctx.pilot} sees it` : '👤 As your pilot sees it (no save open)';
   }
 
+  // "— as Pilot X sees it" for the subtitle
   function subtitleSuffix() {
     if (!summary) return '';
     const bits = [];
@@ -404,6 +385,7 @@
     return ' · ' + bits.join(' · ');
   }
 
+  // save-related lines in the details panel
   function detailsHtml(system) {
     const notes = notesBySystem.get(system.name);
     if (!notes || !notes.length) return '';
@@ -420,7 +402,7 @@
 
   window.MapSaveState = { prepare, apply, filterMissions, detailsHtml, subtitleSuffix, isActive: () => !!(ctx && pilotView),
     context: () => ctx, lastMap: () => lastMap,
-    // timeline (mapTimeline.js)
+    // timeline state (mapTimeline.js)
     historySteps, happenedEvents, setTimeline, timeline: () => ({ ...timeline }),
     usingSave: () => !!(ctx && pilotView),
     fetchEvents, eventChangeNodes, pluginOrder: () => pluginOrder };

@@ -1,92 +1,23 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  mapDataFormatter.js  —  Endless Sky Ship Builder / Systems Map
-//
-//  STAGE 2 of the map pipeline: FORMAT THE DATA.
-//  Takes the raw, per-plugin arrays handed over by mapDataLoader.js
-//  (whatever shape mapParser.js happens to output that week — this
-//  file is deliberately defensive about missing/renamed fields since
-//  the parser is under active development) and reshapes them into a
-//  single lean, merged structure the rest of the map pipeline can
-//  rely on without knowing anything about plugins.
-//
-//  MERGE MODEL (mirrors mapParser.js's own doc comment)
-//  ------------------------------------------------------
-//  A system can be touched by more than one active plugin (an
-//  overhaul mod editing a vanilla system's government, a small mod
-//  only adding a link). So systems merge ADDITIVELY, in the same
-//  order the plugins are active (PluginManager's order — first
-//  plugin in the active list has lowest priority, matching parser.js
-//  processing plugins.json top-to-bottom):
-//    - links                → union, de-duplicated by name
-//    - attributes           → union, de-duplicated
-//    - government, pos      → last plugin to define it wins
-//    - name / displayName   → first plugin to define it wins (stable identity)
-//  Every merged system keeps `_definedBy` (every plugin that touched
-//  it) so the display layer can show provenance on hover.
-//
-//  Public API on window.MapDataFormatter:
-//    .formatSystems(pluginDataMap, activeOrder)  → Map<name, FormattedSystem>
-//    .formatGalaxies(pluginDataMap)              → FormattedGalaxy[]
-//    .formatWormholes(pluginDataMap)             → FormattedWormholeLink[]
-//    .formatPlanets(pluginDataMap, activeOrder)  → Map<systemName, FormattedPlanet[]>
-//    .attachPlanets(systemsMap, planetsBySystem) → mutates systemsMap in place
-//    .formatMissions(pluginDataMap, activeOrder, planetsBySystem) → FormattedMission[]
-//    .formatStars(pluginDataMap, activeOrder)    → Map<spriteName, StarAttributes>
-//    .formatGovernments(pluginDataMap, activeOrder) → Map<govName, {color, swizzle}>
-//
-//  FormattedSystem shape:
-//    { name, x, y, government, attributes: string[],
-//      links: string[], wormhole: boolean, hasPlanets: boolean,
-//      planets: FormattedPlanet[], objectTree: RawObjectNode[],
-//      ramscoopModifier: {universal,addend,multiplier}|null,
-//      habitableOverride: number|null, definedBy: string[] }
-//  `objectTree` is kept verbatim from systems.json (star + planet + moon
-//  nodes, recursively) — mapCalculations.js's computeSolarAttributes()
-//  walks it to find which nodes are stars, and this file's own
-//  attachPlanets() walks it to match each planet to its map-icon sprite.
-//
-//  FormattedPlanet shape (from planets.json, keyed back to its system
-//  via the `systemName` field the parser already stamps on every
-//  planet — this file just groups by that key):
-//    { name, government, hasSpaceport, hasShipyard, hasOutfitter,
-//      wormhole: string|null, attributes: string[],
-//      landscapes: string[],   // landing-screen art, e.g. "land/earthrise"
-//      sprite: string|null,    // map-icon sprite, e.g. "planet/earth" — attached by attachPlanets()
-//      definedBy: string[] }
-//
-//  FormattedMission shape (from missions.json — see formatMissions()'s
-//  own doc comment for how `source` gets split into these fields):
-//    { name, displayName, isJob, repeatable, payment: number|null,
-//      sourceType: 'planet'|'filter'|'unresolved'|'none',
-//      sourceSystem: string|null,   // set only when sourceType === 'planet'
-//      sourcePlanet: string|null,
-//      sourceFilter: rawFilterTree|null,  // set only when sourceType === 'filter'
-//      definedBy: string[] }
-//
-//  StarAttributes shape (from stars.json — see mapCalculations.js's
-//  BASELINE_STAR_TABLE doc comment for where the vanilla numbers
-//  ultimately come from, and why this file's output takes priority
-//  over that baseline when both exist for the same sprite):
-//    { power: number|null, wind: number|null, icon: string|null,
-//      habitable: number|null, mass: number|null }
-// ═══════════════════════════════════════════════════════════
+// Turns the raw map data from Supabase into what the map draws: systems, planets, galaxies, wormholes, missions, stars, governments.
 
 (function () {
 
-// ── Small defensive readers (parser output shape drifts sometimes) ──
+// ── small readers (the parser's shapes vary a little) ──
 
 function _readName(raw) {
     return raw?.name ?? raw?.displayName ?? null;
 }
 
+// position
 function _readPos(raw) {
     const p = raw?.pos;
     if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') return null;
     return { x: p.x, y: p.y };
 }
 
+// link names
 function _readLinkNames(raw) {
     const links = raw?.links;
     if (!Array.isArray(links)) return [];
@@ -95,27 +26,26 @@ function _readLinkNames(raw) {
         .filter(Boolean);
 }
 
+// attributes
 function _readAttributes(raw) {
     const attrs = raw?.attributes;
     if (!Array.isArray(attrs)) return [];
     return attrs.filter(a => typeof a === 'string');
 }
 
+// government
 function _readGovernment(raw) {
     const g = raw?.government;
     return (typeof g === 'string' && g.trim()) ? g.trim() : 'Uninhabited';
 }
 
 
+// object tree
 function _readObjectTree(raw) {
     return Array.isArray(raw?.objectTree) ? raw.objectTree : [];
 }
 
-/** System-level `ramscoop` override — universal/addend/multiplier, each
- *  defaulting per the wiki when the system doesn't define that particular
- *  sub-field (not when the whole block is absent, which instead means
- *  "no override at all", kept as null so the display layer can tell the
- *  difference between "default because unset" and "explicitly default"). */
+// a system's ramscoop override (universal/addend/multiplier)
 function _readRamscoopModifier(raw) {
     const rs = raw?.ramscoop;
     if (!rs || typeof rs !== 'object') return null;
@@ -126,18 +56,14 @@ function _readRamscoopModifier(raw) {
     };
 }
 
+// habitable zone override
 function _readHabitableOverride(raw) {
     return typeof raw?.habitable === 'number' ? raw.habitable : null;
 }
 
-// ── Systems ──────────────────────────────────────────────────
+// ── systems ──
 
-/**
- * @param {Map<string, RawPluginMapData>} pluginDataMap  keyed by outputName
- * @param {string[]} activeOrder  outputNames in PluginManager priority order
- *                                (index 0 = lowest priority, last = highest)
- * @returns {Map<string, FormattedSystem>}
- */
+// merge every plugin's systems into one map. Called by: mapDisplay._loadAndRender
 function formatSystems(pluginDataMap, activeOrder) {
     const merged = new Map();
 
@@ -147,11 +73,7 @@ function formatSystems(pluginDataMap, activeOrder) {
 
         for (const raw of plugin.systems) {
             const name = _readName(raw);
-            // Labels (e.g. "label core") and namesless nodes aren't real
-            // systems — mapParser.js stores galaxy background labels in
-            // the galaxies array, but some plugin output has historically
-            // leaked them into systems too. Skip anything without a
-            // usable position; it can't be placed on the map anyway.
+            // labels and nameless nodes aren't real systems
             const pos = _readPos(raw);
             if (!name || !pos) continue;
 
@@ -218,7 +140,7 @@ function formatSystems(pluginDataMap, activeOrder) {
     return out;
 }
 
-/** Marks systems that are one end of a wormhole link (for a distinct display treatment). */
+// mark systems at either end of a wormhole
 function applyWormholeFlags(systemsMap, wormholeLinks) {
     for (const link of wormholeLinks) {
         const from = systemsMap.get(link.from);
@@ -229,7 +151,7 @@ function applyWormholeFlags(systemsMap, wormholeLinks) {
     return systemsMap;
 }
 
-// ── Galaxies (background cluster labels / sprites) ──────────
+// galaxy pictures and labels
 
 function formatGalaxies(pluginDataMap) {
     const seen = new Map();
@@ -248,7 +170,7 @@ function formatGalaxies(pluginDataMap) {
     return [...seen.values()];
 }
 
-// ── Wormholes ────────────────────────────────────────────────
+// wormhole links (from → to)
 
 function formatWormholes(pluginDataMap) {
     const out = [];
@@ -269,19 +191,9 @@ function formatWormholes(pluginDataMap) {
     return out;
 }
 
-// ── Planets ──────────────────────────────────────────────────
+// ── planets ──
 
-/**
- * planets.json is a flat array of every planet across every system,
- * each one carrying the name of the system it belongs to. This groups
- * them back by that `systemName` key and merges duplicates (a planet
- * redefined by a higher-priority active plugin) the same way systems
- * merge: scalars last-write-wins, `definedBy` accumulates.
- *
- * @param {Map<string, RawPluginMapData>} pluginDataMap
- * @param {string[]} activeOrder  same priority order used in formatSystems
- * @returns {Map<string, FormattedPlanet[]>} keyed by systemName
- */
+// every planet, with its system
 function formatPlanets(pluginDataMap, activeOrder) {
     const byPlanetName = new Map(); // planet name -> merged entry (handles redefinition)
 
@@ -330,16 +242,7 @@ function formatPlanets(pluginDataMap, activeOrder) {
     return bySystem;
 }
 
-/**
- * Attaches each system's planet list (from formatPlanets) onto the
- * already-merged systems Map, and refines `hasPlanets` — the flag
- * formatSystems() sets is only a "some plugin listed a planet ref
- * here" guess from systems.json; this replaces it with the real
- * count from planets.json when that data is available. Also attaches
- * each planet's map-icon `sprite` (e.g. "planet/earth"), read from the
- * system's objectTree and matched back to the planet by name — that
- * sprite lives on the system's object definition, not in planets.json.
- */
+// put each system's planets on it
 function attachPlanets(systemsMap, planetsBySystem) {
     for (const [systemName, planetList] of planetsBySystem) {
         const system = systemsMap.get(systemName);
@@ -360,29 +263,9 @@ function attachPlanets(systemsMap, planetsBySystem) {
     return systemsMap;
 }
 
-// ── Missions ─────────────────────────────────────────────────
+// ── missions ──
 
-/**
- * A mission's `source` is one of:
- *   { type: 'planet', ref: { name } }   — concrete: exactly one planet
- *   { type: 'filter', value: [...raw filter tree...] }  — generic: any
- *                                          planet/system matching the filter
- *                                          (job-board template missions
- *                                          mostly look like this)
- *   null                                 — no explicit source (chained /
- *                                          event-triggered; not placeable)
- * This reads that + the `job` location tag and hands back a flat,
- * still-plugin-merged-by-priority list. Concrete sources are resolved
- * to a system name right here (using the planet→system map
- * formatPlanets() already built) so mapCalculations.js never needs to
- * know planets.json exists; filter trees are left untouched for
- * mapCalculations.evaluateMissionFilter() to walk.
- *
- * @param {Map<string, RawPluginMapData>} pluginDataMap
- * @param {string[]} activeOrder
- * @param {Map<string, FormattedPlanet[]>} planetsBySystem  from formatPlanets()
- * @returns {FormattedMission[]}
- */
+// missions with where they're offered (a planet, or a filter)
 function formatMissions(pluginDataMap, activeOrder, planetsBySystem) {
     // planet name -> system name, built once from the same grouped data
     // attachPlanets() uses, so this is guaranteed consistent with it.
@@ -435,29 +318,16 @@ function formatMissions(pluginDataMap, activeOrder, planetsBySystem) {
     return [...byName.values()];
 }
 
-/** Best-effort single payment figure for tooltip display — Endless Sky
- *  payments are base + multiplier*distance, evaluated at mission-accept
- *  time, so this can only report the flat "onComplete" base amount, not
- *  the true final payout. Good enough as a rough guide, not a promise. */
+// one payment figure for the tooltip
 function _readMissionPayment(raw) {
     const triggers = raw?.payment?.triggers?.onComplete;
     if (!Array.isArray(triggers) || triggers.length === 0) return null;
     return triggers.reduce((sum, t) => sum + (t.base || 0), 0) || null;
 }
 
-// ── Stars (solar power/wind attributes, per sprite) ─────────
+// ── stars ──
 
-/**
- * stars.json is one entry per distinct star sprite a plugin defines —
- * vanilla's own star types (g0, m3, black-hole, ...) plus anything a
- * mod adds. Later-active plugins can override a sprite's numbers
- * (last-write-wins), which is how a mod could reasonably reskin a
- * star type's behaviour, not just its picture.
- *
- * @param {Map<string, RawPluginMapData>} pluginDataMap
- * @param {string[]} activeOrder
- * @returns {Map<string, {power:number|null, wind:number|null, icon:string|null, habitable:number|null, mass:number|null}>}
- */
+// each star sprite's power and wind
 function formatStars(pluginDataMap, activeOrder) {
     const out = new Map();
     for (const outputName of activeOrder) {
@@ -478,21 +348,9 @@ function formatStars(pluginDataMap, activeOrder) {
     return out;
 }
 
-// ── Governments (real map colors, per name) ─────────────────
+// ── governments ──
 
-/**
- * governments.json is one entry per distinct government name a plugin
- * defines or overrides — vanilla's own factions (Republic, Free Worlds,
- * Pirate, ...) plus anything a mod adds or re-colors. Later-active
- * plugins win on conflict, same merge rule as stars.
- *
- * Not every government defines a `color` line (many vanilla ones don't
- * — e.g. "Alpha", "Author", "Escort"), so `color` can legitimately be
- * null here; mapCalculations.buildGovernmentPalette() falls back to an
- * assigned palette color for those rather than guessing a real one.
- *
- * @returns {Map<string, {color:[r,g,b]|null, swizzle:number|string|null}>}
- */
+// each government's map colour
 function formatGovernments(pluginDataMap, activeOrder) {
     const out = new Map();
     for (const outputName of activeOrder) {

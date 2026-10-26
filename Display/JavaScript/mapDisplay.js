@@ -1,48 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  mapDisplay.js  —  Endless Sky Ship Builder / Systems Map
-//
-//  STAGE 4 of the map pipeline: DISPLAY IT INTELLIGENTLY.
-//  Owns the canvas, draws systems/links/labels at a level of detail
-//  chosen by mapCalculations.js, wires up mouse AND touch input
-//  (pan, pinch-zoom, tap, hover), renders the legend/search/tooltip
-//  UI, and shows loading progress while mapDataLoader.js fetches
-//  (potentially large) per-plugin map files.
-//
-//  Dependencies (must be loaded before this file):
-//    mapDataLoader.js      — window.MapDataLoader
-//    mapDataFormatter.js   — window.MapDataFormatter
-//    mapCalculations.js    — window.MapCalculations
-//    generalPluginStuff.js — window.PluginManager  (which plugins are active)
-//    dataLoader.js         — window.DataLoader     (populates window.allData
-//                             so the shared plugin picker has something to list)
-//    Animator.js, ImageGrabber.js — window.fetchSprite / initImageIndex /
-//                             setCurrentPlugin, for planet & star art. Optional
-//                             in the sense that this file checks `typeof` before
-//                             calling them, so the map still works without images
-//                             if they're ever left out — it just won't have art.
-//
-//  INTEGRATION WITH GeneralPluginStuff
-//  ------------------------------------
-//  generalPluginStuff.js owns "which plugins are active" sitewide and
-//  calls `window._renderCardsFromManager(resetTab)` every time that
-//  selection changes (plugin added/removed/reordered, or on first
-//  load). This file defines that hook: on every call, it asks
-//  PluginManager for the current active list, downloads/merges just
-//  those plugins' map data, and redraws. No other page logic needs
-//  to know the map exists.
-//
-//  JOB BOARD TOGGLE
-//  -----------------
-//  A checkbox (#mapJobBoardToggle, in Systems.html) controls whether
-//  job-related mission markers/badges show at all. Story (non-job)
-//  missions with a concrete source always show — they aren't part of
-//  what's being toggled. See mapCalculations.js's buildMissionIndex()
-//  for how "where could a job start" is computed, including its
-//  documented approximation for generic (filter-based) job-board
-//  templates.
-// ═══════════════════════════════════════════════════════════
+// The Systems Map page: draws the galaxy, handles zoom/pan, tooltips, the details panel and search.
 
 (function () {
 
@@ -54,18 +12,7 @@ let searchInput, resultsEl, legendListEl, tooltipEl, subtitleEl, loadingEl, load
 
 let dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-/**
- * Escapes text before it goes into an innerHTML template. Everything
- * rendered by this file — system/planet/mission names, governments,
- * plugin ids — ultimately comes from plugin data, which can contain
- * anything, including Endless Sky's own templating placeholders like
- * "<planet>" in an unresolved mission name. Without escaping, the
- * browser reads that as an actual (unknown) HTML tag and silently
- * drops it, which is exactly the kind of "why did half this mission
- * name disappear" bug that's easy to miss without real data — this
- * showed up in testing with the real missions.json and is why every
- * interpolation site in this file uses this.
- */
+// escape text before it goes into HTML
 function _esc(str) {
     return String(str ?? '').replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -94,9 +41,7 @@ let selected = null;
 let selectedPlanet = null; // planet name, scoped to `selected` — cleared whenever the system selection changes
 let hasFitCamera = false;
 
-// ═══════════════════════════════════════════════════════════
-//  Bootstrapping
-// ═══════════════════════════════════════════════════════════
+// find the page elements. Called by: init
 
 function _grabDom() {
     canvas = document.getElementById('mapCanvas');
@@ -113,12 +58,14 @@ function _grabDom() {
     detailsPanelEl = document.getElementById('mapDetailsPanel');
 }
 
+// galaxy / wormhole layer switches. Called by: init
 function _wireLayerToggles() {
     const g = document.getElementById('mapGalaxyToggle'), wh = document.getElementById('mapWormholeToggle');
     if (g) { g.checked = showGalaxyImage; g.addEventListener('change', () => { showGalaxyImage = g.checked; _draw(); }); }
     if (wh) { wh.checked = showWormholes; wh.addEventListener('change', () => { showWormholes = wh.checked; _draw(); }); }
 }
 
+// job board layer switch. Called by: init
 function _wireJobBoardToggle() {
     if (!jobBoardToggleEl) return;
     jobBoardToggleEl.checked = jobBoardOn;
@@ -129,6 +76,7 @@ function _wireJobBoardToggle() {
     });
 }
 
+// start the page. Called on page load
 function init() {
     _grabDom();
     _wireCanvasInput();
@@ -145,9 +93,7 @@ function init() {
         _showError('dataLoader.js must be loaded before mapDisplay.js');
         return;
     }
-    // Ships/outfits are irrelevant to the map, but DataLoader populates
-    // window.allData with plugin metadata, which is what the shared
-    // plugin picker (PluginManager) reads to build its list.
+    // DataLoader gives the plugin list (ships/outfits aren't needed here)
     window.DataLoader.onReady(() => {
         window.PluginManager.initDefaultPlugin();
         if (typeof initImageIndex === 'function') initImageIndex(); // for planet/star art
@@ -161,7 +107,7 @@ function init() {
     });
 }
 
-// This is the hook generalPluginStuff.js calls on every plugin-selection change.
+// redraw after the selected plugins change. Called by: generalPluginStuff
 window._renderCardsFromManager = async function (resetView) {
     const active = window.PluginManager.getActivePlugins()
         .filter(id => id !== window.PluginManager.LOCAL_PLUGIN_ID); // no ship builds on a starmap
@@ -172,6 +118,7 @@ window._renderCardsFromManager = async function (resetView) {
     await _loadAndRender(active, resetView);
 };
 
+// load the selected plugins' maps and draw. Called by: _renderCardsFromManager
 async function _loadAndRender(activeOutputNames, resetView) {
     _setLoading(true, activeOutputNames.length);
     try {
@@ -224,9 +171,7 @@ async function _loadAndRender(activeOutputNames, resetView) {
             selected = null;
             selectedPlanet = null;
         } else if (selected) {
-            // A plugin toggle may have re-shaped or removed the previously
-            // selected system — re-point at the fresh object, or clear the
-            // selection (and the details panel with it) if it's gone.
+            // keep the selected system if it still exists
             const fresh = systemsByName.get(selected.name) || null;
             selected = fresh;
             if (!fresh || !fresh.planets.some(p => p.name === selectedPlanet)) selectedPlanet = null;
@@ -241,9 +186,7 @@ async function _loadAndRender(activeOutputNames, resetView) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Loading UI (these files can be large — show real progress)
-// ═══════════════════════════════════════════════════════════
+// loading progress. Called by: init
 
 function _wireLoadProgress() {
     document.addEventListener('mapPluginLoaded', e => {
@@ -252,16 +195,19 @@ function _wireLoadProgress() {
     });
 }
 
+// show/hide the loading message
 function _setLoading(isLoading, total) {
     if (!loadingEl) return;
     loadingEl.style.display = isLoading ? 'flex' : 'none';
     if (isLoading && loadingBarEl) loadingBarEl.style.width = '4%';
 }
 
+// show an error
 function _showError(message) {
     if (subtitleEl) subtitleEl.textContent = `⚠ ${message}`;
 }
 
+// subtitle under the title
 function _updateSubtitle(activeOutputNames) {
     if (!subtitleEl) return;
     subtitleEl.textContent =
@@ -272,9 +218,7 @@ function _updateSubtitle(activeOutputNames) {
         (window.MapSaveState ? window.MapSaveState.subtitleSuffix() : '');
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Legend
-// ═══════════════════════════════════════════════════════════
+// government colour legend. Called by: _loadAndRender
 
 function _renderLegend() {
     if (!legendListEl) return;
@@ -296,9 +240,7 @@ function _renderLegend() {
     });
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Canvas sizing
-// ═══════════════════════════════════════════════════════════
+// fit the canvas to its box. Called by: init, on resize
 
 function _resizeCanvas() {
     if (!canvas) return;
@@ -308,14 +250,9 @@ function _resizeCanvas() {
     _draw();
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Drawing
-// ═══════════════════════════════════════════════════════════
+// ── drawing ──
 
-// ── Galaxy pictures ──────────────────────────────────────────
-// Each galaxy (and background label like "Core" or "Deep") names a sprite.
-// Look it up through the site's image index first (plugins have their own
-// pictures); for the base game, fall back to the game's own image files.
+// load the game's galaxy pictures (Milky Way, labels …). Called by: _loadAndRender
 function _loadBackdrops(list) {
     galaxyBackdrops = list.map(g => ({ ...g, img: null, retina: false }));
     for (const g of galaxyBackdrops) {
@@ -327,6 +264,7 @@ function _loadBackdrops(list) {
         });
     }
 }
+// load one image
 function _loadImg(src) {
     return new Promise(resolve => {
         const img = new Image();
@@ -342,6 +280,7 @@ const LOCAL_BACKDROPS = {
     'ui/milky way':     { src: '../Images/galaxy/milky-way.webp',     mapW: 4096, mapH: 4096 },
     'ui/patir cluster': { src: '../Images/galaxy/patir-cluster.webp', mapW: 780,  mapH: 780 },
 };
+// one galaxy picture (shipped copy, image index, then the game's files)
 async function _loadBackdropImage(sprite) {
     const local = LOCAL_BACKDROPS[sprite];
     if (local) {
@@ -367,12 +306,7 @@ async function _loadBackdropImage(sprite) {
     return null;
 }
 
-// ── Wormholes ───────────────────────────────────────────────
-// A wormhole only exists once its planet is actually in the system — the
-// game adds many of them later through story events (e.g. "The Eye" only
-// appears when the Wanderers' story opens it). So a link counts only while
-// the system it starts from holds a planet that is that wormhole. Like the
-// game's own map, only "mappable" wormholes are drawn.
+// wormholes open right now: the system has the wormhole's planet (added by story events). Called by: _drawWormholes, activeWormholes
 function _activeWormholeLinks() {
     const inSystem = (sys, name) => (sys.planets || []).some(p => p.wormhole === name || p.name === name);
     return wormholeLinks.filter(l => {
@@ -382,6 +316,7 @@ function _activeWormholeLinks() {
     });
 }
 
+// dashed purple wormhole lines with direction arrows. Called by: _draw
 function _drawWormholes(visibleNames, w, h, linkWidth) {
     if (!wormholeLinks.length) return;
     const activeLinks = _activeWormholeLinks();
@@ -390,6 +325,7 @@ function _drawWormholes(visibleNames, w, h, linkWidth) {
     for (const l of activeLinks) { const a = systemsByName.get(l.from), b = systemsByName.get(l.to); if (a) a.wormhole = true; if (b) b.wormhole = true; }
     const pairKeys = new Set(activeLinks.map(l => `${l.from}→${l.to}`));
     const drawn = new Set();
+    // an arrowhead
     const arrow = (x, y, ang, size) => {
         ctx.beginPath();
         ctx.moveTo(x, y);
@@ -427,10 +363,12 @@ function _drawWormholes(visibleNames, w, h, linkWidth) {
     ctx.restore();
 }
 
+// systems that pass the layer filters
 function _visibleSet() {
     return systemsArr.filter(s => activeGovFilters.has(s.government));
 }
 
+// draw everything. Called by: most changes
 function _draw() {
     if (!ctx) return;
     const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -465,8 +403,7 @@ function _draw() {
         ctx.globalAlpha = 1;
     }
 
-    // Hyperspace links — a soft glow underneath and a bright line on top, so
-    // they stand out from the galaxy picture
+    // jump lanes: soft glow underneath, bright line on top
     const linkPath = () => {
         ctx.beginPath();
         for (const seg of linkSegments) {
@@ -535,17 +472,7 @@ function _draw() {
     }
 }
 
-/**
- * Draws small overlay glyphs on top of a system's government dot for
- * mission activity there:
- *   - a small white flag  — one or more STORY missions start here
- *     (always shown; not gated by the Job Board toggle)
- *   - a small gold diamond — job-board work is available here, either
- *     a fixed job or a matching generic job template (only shown when
- *     jobBoardOn — this is exactly the thing the toggle controls)
- * Both are tiny and offset from the dot so they read as a badge, not
- * a second system.
- */
+// small mission icons on a system. Called by: _draw
 function _drawMissionMarkers(p, s, nodeRadius) {
     const bucket = missionIndex.concreteBySystem.get(s.name);
     const storyCount = bucket ? bucket.story.length : 0;
@@ -580,9 +507,7 @@ function _drawMissionMarkers(p, s, nodeRadius) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Input — mouse (desktop) + touch (mobile), same camera ops
-// ═══════════════════════════════════════════════════════════
+// mouse and touch: pan, zoom, hover, click. Called by: init
 
 function _wireCanvasInput() {
     let dragging = false, moved = false, lastX = 0, lastY = 0;
@@ -680,6 +605,7 @@ function _wireCanvasInput() {
     });
 }
 
+// which system is under the mouse
 function _updateHover(sx, sy, clientX, clientY) {
     const world = MapCalculations.screenToWorld(cam, sx, sy, canvas.clientWidth, canvas.clientHeight);
     const thresh = (MapCalculations.lod(cam).nodeRadius + 6) / cam.scale;
@@ -689,9 +615,7 @@ function _updateHover(sx, sy, clientX, clientY) {
     else _hideTooltip();
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Tooltip
-// ═══════════════════════════════════════════════════════════
+// hover tooltip. Called by: _updateHover
 
 function _showTooltip(s, clientX, clientY) {
     if (!tooltipEl) return;
@@ -711,14 +635,7 @@ function _showTooltip(s, clientX, clientY) {
     tooltipEl.style.top = (clientY - wrapRect.top + 14) + 'px';
 }
 
-/**
- * Mission section of the tooltip: names every concrete (fixed-planet)
- * mission that starts here, split into story vs job-board, plus — only
- * while the Job Board toggle is on — how many generic job templates
- * could also spawn here (an approximation; see mapCalculations.js's
- * evaluateMissionFilter doc comment for exactly what that does and
- * doesn't check).
- */
+// missions offered in this system (tooltip)
 function _missionsHtml(s) {
     const bucket = missionIndex.concreteBySystem.get(s.name);
     const genericCount = missionIndex.genericJobMatchCount.get(s.name) || 0;
@@ -743,12 +660,7 @@ function _missionsHtml(s) {
     return `<div class="map-tooltip-missions">${rows.join('')}</div>`;
 }
 
-/**
- * Renders the planets.json data actually attached to this system:
- * each planet's own government (which can differ from the system's —
- * e.g. a pirate-held world in an otherwise Republic system) plus
- * small badges for shipyard/outfitter/spaceport access.
- */
+// planets in this system (tooltip)
 function _planetsHtml(planets) {
     if (!planets || planets.length === 0) return '';
     const rows = planets.slice(0, 6).map(p => {
@@ -764,24 +676,14 @@ function _planetsHtml(planets) {
     return `<div class="map-tooltip-planets">${rows}${more}</div>`;
 }
 
+// hide the tooltip
 function _hideTooltip() {
     if (tooltipEl) tooltipEl.style.display = 'none';
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Details panel (below the viewport — not a popup)
-//
-//  Clicking/tapping a system fills this in. It's deliberately a
-//  plain section on the page rather than a modal or floating popup:
-//  a mis-click just replaces its contents, there's nothing to
-//  dismiss and no focus trap, so it can't turn an accidental tap
-//  into a frustrating dead end. Clicking a planet row inside it
-//  drills into that planet; a "back" link returns to the system view.
-// ═══════════════════════════════════════════════════════════
+// ── details panel under the map ──
 
-/** Single entry point for "the user picked this system" — used by
- *  mouse click, touch tap, and search-result selection alike, so the
- *  details panel and camera-selection state never drift out of sync. */
+// pick a system (click, tap, search, link). Called by: input, search, MapView.selectSystem
 function _selectSystem(system) {
     selected = system;
     selectedPlanet = null;
@@ -789,6 +691,7 @@ function _selectSystem(system) {
     _draw();
 }
 
+// details panel buttons. Called by: init
 function _wireDetailsPanel() {
     if (!detailsPanelEl) return;
     detailsPanelEl.addEventListener('click', e => {
@@ -806,6 +709,7 @@ function _wireDetailsPanel() {
     });
 }
 
+// draw the details panel. Called by: _selectSystem
 function _renderDetailsPanel() {
     if (!detailsPanelEl) return;
     if (!selected) {
@@ -818,6 +722,7 @@ function _renderDetailsPanel() {
     _hydrateSpriteThumbs();
 }
 
+// a system's details
 function _renderSystemDetails(s) {
     const links = s.links.length ? s.links.map(_esc).join(', ') : '—';
     const bucket = missionIndex.concreteBySystem.get(s.name);
@@ -849,19 +754,7 @@ function _renderSystemDetails(s) {
     `;
 }
 
-/**
- * Star image(s) plus Solar Power / Solar Wind for the system, computed
- * via MapCalculations.computeSolarAttributes() from each star object's
- * catalog entry (see mapCalculations.js's BASELINE_STAR_TABLE doc
- * comment for where those numbers come from). There's no separate
- * "heat" number in Endless Sky — Power is what governs both solar
- * collection AND solar-heat outfits, which is stated here rather than
- * inventing a second figure. The system-level `ramscoop` override
- * (universal/addend/multiplier) is shown as its own raw fact, not
- * folded into a single combined "fuel rate" — the exact interaction
- * between it and the wind-based formula below isn't something I could
- * independently verify, so it's shown separately rather than guessed.
- */
+// star pictures and solar power / wind
 function _starSolarHtml(s) {
     const solar = MapCalculations.computeSolarAttributes(s, starTable);
     if (solar.stars.length === 0) {
@@ -898,21 +791,13 @@ function _starSolarHtml(s) {
     `;
 }
 
-/**
- * Placeholder for a sprite image, hydrated asynchronously after the
- * innerHTML containing it is set — see _hydrateSpriteThumbs(). Doing
- * it this way (render text/structure synchronously, fill in images
- * after) keeps the details panel responsive even though fetchSprite()
- * is async and can be slow on a first-time image-index build.
- */
+// placeholder for a sprite, filled in later
 function _spriteThumbHtml(sprite, altText, sizeClass) {
     if (!sprite) return '';
     return `<div class="map-sprite-thumb ${sizeClass || ''}" data-sprite="${_esc(sprite)}" title="${_esc(altText || sprite)}"></div>`;
 }
 
-/** Finds every not-yet-loaded sprite placeholder in the details panel
- *  and fills it in via window.fetchSprite. Fire-and-forget per image —
- *  one missing/slow sprite doesn't block the others. */
+// load the sprites into their placeholders. Called by: _renderDetailsPanel
 function _hydrateSpriteThumbs() {
     if (typeof fetchSprite !== 'function' || !detailsPanelEl) return;
     const placeholders = detailsPanelEl.querySelectorAll('[data-sprite]');
@@ -935,6 +820,7 @@ function _hydrateSpriteThumbs() {
     });
 }
 
+// one planet line
 function _planetRowHtml(p) {
     const badges = [
         p.hasSpaceport ? '<span class="map-badge-chip">port</span>' : null,
@@ -953,6 +839,7 @@ function _planetRowHtml(p) {
     `;
 }
 
+// a planet's details
 function _renderPlanetDetails(system, planetName) {
     const p = system.planets.find(pl => pl.name === planetName);
     if (!p) {
@@ -973,9 +860,7 @@ function _renderPlanetDetails(system, planetName) {
         ? ` <span class="map-details-links">(differs from ${_esc(system.name)}'s ${_esc(system.government)})</span>`
         : '';
 
-    // Landing-screen art (the actual "picture of the planet"), falling
-    // back to the small map-icon sprite if this plugin has no landscape
-    // art recorded for it.
+    // landing picture, else the small map icon
     const landscapeImage = p.landscapes.length
         ? _spriteThumbHtml(p.landscapes[0], p.name, 'map-planet-landscape')
         : _spriteThumbHtml(p.sprite, p.name, 'map-planet-landscape');
@@ -1005,6 +890,7 @@ function _renderPlanetDetails(system, planetName) {
     `;
 }
 
+// missions in this system
 function _systemMissionsHtml(s, bucket, genericCount) {
     const hasStory = bucket && bucket.story.length > 0;
     const hasJobs = bucket && bucket.jobs.length > 0;
@@ -1020,6 +906,7 @@ function _systemMissionsHtml(s, bucket, genericCount) {
     return `<div class="map-details-section"><h3>Missions</h3><div class="map-mission-list">${rows.join('')}</div>${approxNote}</div>`;
 }
 
+// missions on this planet
 function _planetMissionsHtml(storyHere, jobsHere) {
     if (storyHere.length === 0 && jobsHere.length === 0) {
         return `<div class="map-details-section"><h3>Missions starting here</h3><div class="map-details-links">None on record for this exact planet.</div></div>`;
@@ -1032,9 +919,7 @@ function _planetMissionsHtml(storyHere, jobsHere) {
 }
 
 
-// ═══════════════════════════════════════════════════════════
-//  Search
-// ═══════════════════════════════════════════════════════════
+// system search box. Called by: init
 
 function _wireSearch() {
     if (!searchInput) return;
@@ -1067,9 +952,7 @@ function _wireSearch() {
     });
 }
 
-// ═══════════════════════════════════════════════════════════
-//  Zoom / reset controls
-// ═══════════════════════════════════════════════════════════
+// zoom / reset buttons. Called by: init
 
 function _wireControls() {
     const zoomIn = document.getElementById('mapZoomIn');
@@ -1093,6 +976,7 @@ function _wireControls() {
 
 // ── Share links: Systems.html#system=Sol&planet=Earth (readable, no account) ──
 let _sharedOpened = false;
+// open a shared #system=… link
 function _openSharedLocation() {
     if (_sharedOpened) return;
     const p = new URLSearchParams(window.location.hash.replace(/^#/, ''));
@@ -1104,6 +988,7 @@ function _openSharedLocation() {
     const planet = p.get('planet');
     if (planet) { selectedPlanet = planet; _renderDetailsPanel(); }
 }
+// 🔗 Share selected system
 function _shareLocation() {
     if (!selected) { alert('Click a system on the map first, then share it.'); return; }
     const q = new URLSearchParams({ system: selected.name });
@@ -1115,7 +1000,7 @@ window.shareMapLocation = _shareLocation;
 
 // Lets other map add-ons (mapTradeHelper.js) point the map at a system.
 window.MapView = {
-    /** Wormhole links open right now (after story events / your save), for checks and debugging. */
+    // open wormholes, for checks
     activeWormholes: () => _activeWormholeLinks().map(l => `${l.name}: ${l.from} → ${l.to}`),
     selectSystem(name, { center = true } = {}) {
         const s = systemsByName.get(name);

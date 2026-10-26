@@ -1,75 +1,12 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  mapDataLoader.js  —  Endless Sky Ship Builder / Systems Map
-//
-//  STAGE 1 of the map pipeline: GRAB THE DATA, PUSH IT FORWARD.
-//  This file's only job is fetching raw map data (systems /
-//  galaxies / wormholes / planets / missions / stars) per plugin and
-//  handing it, unmodified, to whoever asks for it. It does NOT
-//  reshape, merge, or compute anything — see mapDataFormatter.js
-//  for that.
-//
-//  Mirrors dataLoader.js's plugin-discovery pattern (data/index.json)
-//  so the Systems page lists exactly the same plugins as every other
-//  page, but only downloads the (large) map files for plugins that
-//  are actually active — ships/outfits/effects are never touched here.
-//
-//  LOCAL HOST SUPPORT
-//  -------------------
-//  When this page is served from localhost/127.0.0.1/file-relative
-//  dev servers, data is read from the repo's own `data/` folder
-//  (two levels up from Display/HTML) instead of GitHub raw. This
-//  means local edits to data/*.json show up immediately without
-//  waiting on a commit + the monthly Action, and the page still
-//  works with no network access at all. Anywhere else (GitHub Pages,
-//  production) it falls back to raw.githubusercontent.com, same as
-//  dataLoader.js.
-//
-//  SLIM FILES (forward-compatible)
-//  --------------------------------
-//  Full `systems.json` / `planets.json` / `missions.json` files can
-//  be tens of megabytes (they carry the entire objectTree,
-//  descriptions, conversation text, etc. — none of which the map
-//  needs). This loader always tries a slim companion file first:
-//      dataFiles/systemsMap.json   →  [{name,pos,government,links,attributes}, ...]
-//      dataFiles/galaxiesMap.json  →  [{name,pos,sprite}, ...]
-//      dataFiles/planetsMap.json   →  [{name,systemName,government,hasSpaceport,
-//                                        hasShipyard,hasOutfitter,wormhole}, ...]
-//      dataFiles/missionsMap.json  →  [{name,displayName,locations,repeatable,
-//                                        payment,source}, ...]
-//  and transparently falls back to the full `systems.json` /
-//  `galaxies.json` / `planets.json` / `missions.json` if the slim
-//  file doesn't exist (404). If the parser is ever updated to emit
-//  these slim files (recommended — see this repo's README), every
-//  page using this loader gets the bandwidth win for free, no code
-//  changes needed elsewhere.
-//
-//  Public API on window.MapDataLoader:
-//    .discoverPlugins()            → Promise<{sourceName: [{outputName, displayPluginName}]}>
-//    .loadPlugins(outputNames)     → Promise<Map<outputName, RawPluginMapData>>
-//    .getCached(outputName)        → RawPluginMapData | null
-//    .isCached(outputName)         → boolean
-//    .clearCache()                 → drop everything and refetch next time
-//
-//  RawPluginMapData shape:
-//    { outputName, sourceName, displayName,
-//      systems: [...], galaxies: [...], wormholes: [...], planets: [...],
-//      missions: [...], stars: [...], governments: [...],
-//      slim: boolean }   // true if the slim map files were used
-//
-//  Custom events fired on document:
-//    'mapDataLoadStart'   { detail: { outputNames } }
-//    'mapPluginLoaded'    { detail: { outputName, index, total } }
-//    'mapPluginLoadError' { detail: { outputName, message } }
-//    'mapDataLoadEnd'     { detail: { loaded: [outputName, ...] } }
-// ═══════════════════════════════════════════════════════════
+// Loads each plugin's map (systems, planets, links, fleets, trade, missions) from the ready-made files or Supabase.
 
 (function () {
 
 const REPO_URL = 'GIVEMEFOOD5/endless-sky-nexus';
 
-// ── Environment detection: local dev server vs. production ─────
+// running locally?
 function _isLocalHost() {
     const h = location.hostname;
     return h === 'localhost' || h === '127.0.0.1' || h === '' || location.protocol === 'file:';
@@ -80,18 +17,16 @@ const BASE_URL = _isLocalHost()
     ? '../../data'
     : `https://raw.githubusercontent.com/${REPO_URL}/main/data`;
 
-// ── Internal state ───────────────────────────────────────────
+// ── state ──
 const _cache = new Map(); // outputName -> RawPluginMapData
 let _pluginIndex = null;  // data/index.json, cached once per page load
 
+// page event
 function _fireEvent(name, detail) {
     document.dispatchEvent(new CustomEvent(name, { detail: detail || {} }));
 }
 
-// ── Plugin discovery (same source of truth as dataLoader.js) ───
-// Was a fetch of data/index.json; now a query against the plugins table,
-// grouped back into the same {sourceName: [{outputName, displayPluginName}]}
-// shape _findPluginMeta below already expects.
+// plugin list (same as DataLoader), grouped by source. Called by: loadPlugins, prefetch
 async function discoverPlugins() {
     if (_pluginIndex) return _pluginIndex;
     const { fetchAllRows } = window.SupabaseHelpers;
@@ -105,6 +40,7 @@ async function discoverPlugins() {
     return _pluginIndex;
 }
 
+// plugin's display name and id
 function _findPluginMeta(index, outputName) {
     for (const [sourceName, list] of Object.entries(index)) {
         const hit = list.find(p => p.outputName === outputName);
@@ -113,15 +49,9 @@ function _findPluginMeta(index, outputName) {
     return { sourceName: outputName, displayName: outputName };
 }
 
-/**
- * Loads one plugin's map data via filtered Supabase queries instead of
- * fetching JSON files. No "slim" variant needed anymore — a filtered
- * query already only pulls this one plugin's rows, which is the same
- * bandwidth win the slim files existed for, without needing a second
- * parser output format to maintain.
- */
-// The whole map for one plugin in one request, or null (function not installed).
+// one plugin's map: file, then get_plugin_map, then table by table
 let _rpcMapMissing = false;
+// the whole map in one request (null if not installed)
 async function _rpcMap(pluginId) {
     if (_rpcMapMissing) return null;
     try {
@@ -134,7 +64,9 @@ async function _rpcMap(pluginId) {
     } catch (_) { return null; }
 }
 
+// one plugin's map (browser cache first)
 async function _loadOnePlugin(outputName, meta) {
+    // fetch fresh from Supabase
     async function buildFresh() {
     const { fetchAllRows, groupBy } = window.SupabaseHelpers;
 
@@ -177,9 +109,7 @@ async function _loadOnePlugin(outputName, meta) {
 
         const systemIds   = systemRows.map(s => s.id);
         const wormholeIds = wormholeRows.map(w => w.id);
-        // Ask for a few hundred ids at a time: a list of every system id in one
-        // request makes the web address too long for big plugins (the request
-        // then fails and the map would have no jump links, fleets or trade).
+        // ask for 100 ids at a time (a long id list makes the request too big)
         const byIds = async (table, column, ids, select) => {
             const parts = [];
             for (let i = 0; i < ids.length; i += 100) parts.push(ids.slice(i, i + 100));
@@ -299,16 +229,9 @@ async function _loadOnePlugin(outputName, meta) {
         : await buildFresh(); // graceful fallback if esCache.js isn't on this page yet
 }
 
-/**
- * Loads (or returns cached copies of) every outputName requested.
- * Fetches run sequentially per-plugin (not Promise.all) so the
- * 'mapPluginLoaded' progress events arrive in a sane order for a
- * loading UI — these files are large enough that progress matters,
- * especially on mobile connections.
- */
-// One in-flight load per plugin, shared by everyone who asks (e.g. the early
-// prefetch below and the real render) — never downloads the same map twice.
+// every requested plugin's map (cached), all at once. Called by: mapDisplay._loadAndRender
 const _inflight = new Map();
+// one download per plugin, shared by everyone asking
 function _loadShared(index, outputName) {
     if (_cache.has(outputName)) return Promise.resolve(_cache.get(outputName));
     if (_inflight.has(outputName)) return _inflight.get(outputName);
@@ -321,6 +244,7 @@ function _loadShared(index, outputName) {
     return p;
 }
 
+// see above
 async function loadPlugins(outputNames) {
     const wanted = [...new Set(outputNames)].filter(Boolean);
     _fireEvent('mapDataLoadStart', { outputNames: wanted });
@@ -347,11 +271,7 @@ async function loadPlugins(outputNames) {
     return ordered;
 }
 
-/**
- * Start downloading the map straight away, before the rest of the page is
- * ready — for the plugins the visitor had selected last time (or the base
- * game). The real render picks up the same download when it gets there.
- */
+// start downloading the map straight away (last selected plugins). Called by: mapDisplay.init
 async function prefetch() {
     try {
         let names = null;
@@ -367,8 +287,11 @@ async function prefetch() {
     } catch (_) { /* the normal load will report any problem */ }
 }
 
+// cached map (or undefined)
 function getCached(outputName) { return _cache.get(outputName) || null; }
+// is it cached?
 function isCached(outputName) { return _cache.has(outputName); }
+// forget cached maps
 function clearCache() { _cache.clear(); }
 
 window.MapDataLoader = {

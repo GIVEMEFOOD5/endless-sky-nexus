@@ -1,34 +1,16 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  mapTradeHelper.js — "💰 Trade runs" panel on Systems.html
-//
-//  Uses the selected save to suggest commodity trades:
-//    • prices are the pilot's CURRENT ones — base price from the system's
-//      `trade` line, shifted by the supply the save records for that system
-//      (`economy` block), the same formula the game uses:
-//          price = base + trunc(scale · erf(supply / limit))   (System::Price;
-//          scale and limit are read from System.cpp by the parser)
-//    • reach is counted in hyperspace jumps along the (save-adjusted) links,
-//      from the system the pilot is in
-//    • profit uses the free cargo space of the ships travelling with the
-//      flagship (not parked, same system): ship cargo space + cargo-space
-//      outfits, minus cargo already carried.
-//  Only systems with a spaceport can trade. By default only systems this
-//  pilot has visited are used, since those are the prices the pilot knows.
-//
-//  Needs mapSaveState.js (save + the adjusted map) and mapDisplay.js
-//  (window.MapView to jump to a system).
-// ═══════════════════════════════════════════════════════════════════════════
+// The 💰 Trade panel on the map: best buy-here, sell-there runs within a few jumps.
 
 (function () {
   const h = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const fmt = n => Math.round(n).toLocaleString();
   const PREF = 'es_map_trade_prefs';
   let prefs = (() => { try { return { maxJumps: 4, visitedOnly: true, ...(JSON.parse(localStorage.getItem(PREF)) || {}) }; } catch (_) { return { maxJumps: 4, visitedOnly: true }; } })();
+  // save the panel settings
   const savePrefs = () => { try { localStorage.setItem(PREF, JSON.stringify(prefs)); } catch (_) {} };
 
-  // Abramowitz–Stegun 7.1.26 (max error 1.5e-7 — far below one credit here)
+  // error function (for the game's price curve)
   function erf(x) {
     const s = Math.sign(x); x = Math.abs(x);
     const t = 1 / (1 + 0.3275911 * x);
@@ -36,6 +18,7 @@
     return s * y;
   }
 
+  // each commodity's base price
   function basePrices(pluginDataMap, activeOutputNames) {
     const out = new Map();       // system → Map(commodity → base)
     for (const name of activeOutputNames) {
@@ -49,6 +32,7 @@
     return out;
   }
 
+  // what each system sells
   function supplies(doc) {
     const eco = doc.topAll('economy').pop();   // a damaged save can have several; the game keeps the last
     const out = new Map();
@@ -66,12 +50,14 @@
     return out;
   }
 
+  // name → outfit
   function outfitIndex() {
     const idx = new Map();
     for (const p of Object.values(window.allData || {})) for (const o of p.outfits || []) if (o && o.name && !idx.has(o.name)) idx.set(o.name, o);
     return idx;
   }
 
+  // your ship's cargo space
   function cargoSpace(doc) {
     const outfits = outfitIndex();
     const here = doc.system;
@@ -88,6 +74,7 @@
     return { total: Math.max(0, total), free: Math.max(0, Math.floor(total - used)), used: Math.ceil(used), ships };
   }
 
+  // work out the best runs
   function compute() {
     const ss = window.MapSaveState;
     const ctx = ss && ss.context();
@@ -109,6 +96,7 @@
       return s && base.has(name) && (s.planets || []).some(p => p.hasSpaceport) &&
              (!prefs.visitedOnly || ctx.visitedSystems.has(name) || name === start);
     };
+    // price in a system (the game's formula)
     const priceAt = (sys, c) => {
       const b = base.get(sys)?.get(c);
       if (b == null) return null;
@@ -130,7 +118,7 @@
     const pathTo = name => { const p = [name]; while (prev.has(p[0])) p.unshift(prev.get(p[0])); return p; };
     const reachable = [...dist.keys()].filter(canTrade);
 
-    // jumps between any two reachable systems (BFS from each — small graphs)
+    // jumps between systems (breadth-first search)
     const jumpsBetween = (a, b) => {
       if (a === b) return 0;
       const seen = new Map([[a, 0]]); const q = [a];
@@ -170,13 +158,13 @@
     fromHere.forEach(score); anywhere.forEach(score);
     fromHere.sort((a, b) => b.perJump - a.perJump);
     anywhere.sort((a, b) => b.perJump - a.perJump);
-    // one row per (buy, sell, commodity); keep the best few
+    // best few rows per buy/sell/commodity
     const uniq = arr => { const seen = new Set(); return arr.filter(r => { const k = `${r.c}|${r.buyAt}|${r.sellAt}`; if (seen.has(k)) return false; seen.add(k); return true; }); };
     return { start, cargo, fromHere: uniq(fromHere).slice(0, 8), anywhere: uniq(anywhere).slice(0, 12), pathTo,
              reachable: reachable.length, pilot: ctx.pilot, hasEconomy: supply.size > 0 };
   }
 
-  // ── panel ────────────────────────────────────────────────────────────────
+  // ── panel ──
   function panel() {
     let p = document.getElementById('mapTradePanel');
     if (p) return p;
@@ -190,6 +178,7 @@
 
   const sysLink = name => `<button type="button" class="map-trade-sys" data-sys="${h(name)}" style="background:none;border:none;padding:0;color:var(--c-accent-text);cursor:pointer;text-decoration:underline;font:inherit;">${h(name)}</button>`;
 
+  // results table
   function table(rows, showStart) {
     if (!rows.length) return '<p style="color:var(--c-text-dim);margin:6px 0 0;">Nothing profitable within reach.</p>';
     return `<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:0.86rem;">
@@ -204,6 +193,7 @@
       </tbody></table></div>`;
   }
 
+  // draw the panel
   function render() {
     const p = panel();
     if (!p) return;
@@ -235,6 +225,7 @@
     bind(p);
   }
 
+  // wire up its inputs
   function bind(p) {
     const j = p.querySelector('#mapTradeJumps'), v = p.querySelector('#mapTradeVisited');
     if (j) j.onchange = () => { prefs.maxJumps = Number(j.value); savePrefs(); render(); };

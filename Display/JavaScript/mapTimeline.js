@@ -1,28 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  mapTimeline.js — "🕰 Timeline" panel on Systems.html
-//
-//  Works with or without a save:
-//
-//  • Preview any event: tick events to see the galaxy as if they had
-//    happened (governments, links, systems and planets change on the map).
-//    Events come from `game_events` (raw event text stored by parser.js).
-//  • Story branches: which missions trigger which events, and on what —
-//    accepting, declining, completing, failing… — with their delay, from
-//    each mission's `event_triggers` (missionParser.js).
-//
-//  With a save open (and "As <pilot> sees it" on), it starts from that
-//  pilot's galaxy:
-//  • History slider: step back through the days the save recorded story
-//    changes on, and watch the map rewind.
-//  • Coming up: events the save has scheduled, with their dates.
-//  • Events that already happened are marked as such and can't be
-//    "previewed" again; branches for missions the pilot can no longer get
-//    are hidden.
-//
-//  Needs mapSaveState.js (replay engine) and mapDisplay.js.
-// ═══════════════════════════════════════════════════════════════════════════
+// The 🕰 Timeline panel on the map: preview story events, step through your pilot's history.
 
 (function () {
   const h = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -45,7 +23,7 @@
   let expanded = new Set();
   let renderTimer = null;
 
-  // ── data ─────────────────────────────────────────────────────────────────
+  // ── data ──
   async function loadEventNames() {
     const order = S().pluginOrder();
     const key = order.join('|');
@@ -64,7 +42,7 @@
     return allEvents;
   }
 
-  // event name → [{ mission, missionName, trigger, delay, delayMax }]
+  // event → missions that trigger it
   function triggerIndex() {
     const map = S().lastMap();
     const idx = new Map(), missions = new Map();
@@ -85,8 +63,7 @@
     return { idx, missions };
   }
 
-  // Events that sit inside a `conversation` in the mission's raw tree only
-  // happen if the player picks the matching option in-game.
+  // events inside a conversation only happen if the pilot picks that choice
   function choiceEvents(raw) {
     const out = new Set();
     const walk = (nodes, inConv) => {
@@ -101,7 +78,7 @@
     return out;
   }
 
-  // Can this pilot still get the mission? (same offer-count rule as the game)
+  // can this pilot still get the mission? (the game's own offer rule)
   function missionStillPossible(m, conds) {
     if (!conds) return true;
     const limit = m.repeatable ? (Number(m.repeatLimit) || 0) : 1;
@@ -110,6 +87,7 @@
     return active || !(limit > 0 && offered >= limit);
   }
 
+  // what an event changes, in words
   function describeChanges(name) {
     const nodes = S().eventChangeNodes(name, S().pluginOrder());
     const lines = [];
@@ -126,7 +104,7 @@
     return lines;
   }
 
-  // ── panel ────────────────────────────────────────────────────────────────
+  // ── panel ──
   function panel() {
     let p = document.getElementById('mapTimelinePanel');
     if (p) return p;
@@ -138,6 +116,7 @@
     return p;
   }
 
+  // one event row
   function eventRow(name, { happened, scheduled, triggers, previews, disabledReason }) {
     const on = previews.includes(name);
     const isOpen = expanded.has(name);
@@ -158,6 +137,7 @@
     </div>`;
   }
 
+  // draw the panel. Called by: mapDisplay after loading
   async function render() {
     const p = panel();
     if (!p || !S()) return;
@@ -290,6 +270,7 @@
     }
   }
 
+  // wire up its buttons
   function bind(p, steps) {
     const st = S();
     const slider = p.querySelector('#mtlSlider');
