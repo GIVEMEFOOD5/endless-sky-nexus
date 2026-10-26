@@ -1,24 +1,6 @@
 'use strict';
 
-// ─── DataViewer.js ─────────────────────────────────────────────────────────
-//
-// Top-level orchestrator: tab switching, card rendering, modal display,
-// and utility helpers.
-//
-// Data loading is fully delegated to dataLoader.js via window.DataLoader.
-//
-// Dependencies (loaded before this file):
-//   dataLoader.js          — DataLoader, window.allData, window.attrDefs
-//   generalPluginStuff.js  — PluginManager
-//   generalFilterStuff.js  — filterItems (search, category and government filters), _filterGeneration
-//   CheckBoxFilter.js      — getSelectedCategories, savedCategoryFilterState
-//   GovernmentsFilter.js   — getSelectedGovernments, itemMatchesGovernmentFilter
-//   Sorter.js              — applySorters, setSorterItems
-//   AttributeDisplay.js    — window.AttributeDisplay
-//   LocationDisplay.js     — window.LocationDisplay
-//   ImageGrabber.js        — window.fetchSprite
-//   ComputedStats.js       — initComputedStats
-// ─────────────────────────────────────────────────────────────────────────────
+// The Data Viewer page: tabs, cards, the item pop-up.
 
 let currentPlugin   = null;
 let currentTab      = 'ships';
@@ -26,10 +8,10 @@ let filteredData    = [];
 let currentModalTab = 'attributes';
 let attrDefs        = null;
 
-// ── Card → item reference (avoids JSON round-trips) ──────────────────────────
+// card element → its item (no JSON round trips)
 const _cardItemMap = new WeakMap();
 
-// ─── Data loading — delegated to DataLoader ───────────────────────────────────
+// start loading (DataLoader does the work). Called on page load
 
 function loadData() {
     const loadingEl = document.getElementById('loadingIndicator');
@@ -85,13 +67,13 @@ function loadData() {
     });
 }
 
-// ─── Plugin selection ─────────────────────────────────────────────────────────
+// switch to one plugin
 
 async function selectPlugin(outputName) {
     await window.PluginManager.setActivePlugins([outputName]);
 }
 
-// ─── Hook called by PluginManager after active plugins change ─────────────────
+// redraw after the selected plugins change. Called by: generalPluginStuff._renderMergedCards
 
 window._renderCardsFromManager = async function (resetTab = false) {
     currentPlugin = window.PluginManager.getPrimaryPlugin();
@@ -107,10 +89,10 @@ window._renderCardsFromManager = async function (resetTab = false) {
     await renderCards();
 };
 
-// ─── Tab switching ────────────────────────────────────────────────────────────
+// Ships / Variants / Outfits tabs. Called by: the tab buttons
 
 function switchTab(tab) {
-    // Ships and Variants share one search; moving to or from Outfits starts fresh
+    // ships and variants share a search; outfits start fresh
     const shipLike = t => t === 'ships' || t === 'variants';
     if (currentTab !== tab && !(shipLike(currentTab) && shipLike(tab))) {
         const searchBar = document.getElementById('searchInput');
@@ -126,7 +108,7 @@ function switchTab(tab) {
     renderCards();
 }
 
-// ─── Card rendering ───────────────────────────────────────────────────────────
+// draw the cards for the current tab. Called by: _renderCardsFromManager, switchTab
 
 async function renderCards() {
     const items = window.PluginManager
@@ -140,7 +122,7 @@ async function renderCards() {
     if (typeof filterItems               === 'function') await filterItems();
 }
 
-// ─── Stats ────────────────────────────────────────────────────────────────────
+// the counts above the cards
 
 function updateStats() {
     if (!window.PluginManager) return;
@@ -164,7 +146,7 @@ function updateStats() {
     `;
 }
 
-// ─── Card placeholder ─────────────────────────────────────────────────────────
+// one card (sprite loads later). Called by: generalFilterStuff._runFilter
 
 function createCardPlaceholder(item) {
     item._compareTab = currentTab;
@@ -183,8 +165,7 @@ function createCardPlaceholder(item) {
     const content = document.createElement('div');
     content.className = 'card-content';
  
-    // ── Title block ──────────────────────────────────────────────────────────
-    // If a "display name" exists, show it large and the internal name smaller.
+    // display name big, internal name small
     const dn = item['display name'] || item.displayName || item.attributes?.['display name'];
     const displayName = dn && dn !== item.name ? dn : null;
     const internalName = item.name || 'Unknown';
@@ -200,7 +181,6 @@ function createCardPlaceholder(item) {
         subtitle.textContent = internalName;
         content.appendChild(subtitle);
     }
-    // ── End title block ──────────────────────────────────────────────────────
  
     const details = document.createElement('div');
     details.className = 'card-details';
@@ -264,10 +244,11 @@ function createCardPlaceholder(item) {
     return card;
 }
 
-// ─── Lazy sprite loader ───────────────────────────────────────────────────────
+// ── sprites load when a card scrolls into view ──
 
 let _lazyObserver = null;
 
+// watch cards and load sprites when visible. Called by: generalFilterStuff._runFilter
 function initLazySprites(generation) {
     if (_lazyObserver) {
         _lazyObserver.disconnect();
@@ -289,6 +270,7 @@ function initLazySprites(generation) {
         .forEach(c => _lazyObserver.observe(c));
 }
 
+// load one card's sprite
 async function _loadSpriteForCard(card, generation) {
     if (generation !== window._filterGeneration) return;
 
@@ -326,12 +308,13 @@ async function _loadSpriteForCard(card, generation) {
     }
 }
 
-// ─── Modal ────────────────────────────────────────────────────────────────────
+// ── item pop-up ──
 
 function hasString(val) {
     return typeof val === 'string' && val.trim().length > 0;
 }
 
+// which pop-up tabs this item has. Called by: showDetails
 function getAvailableTabs(item) {
     const tabs = [{ id: 'attributes', label: 'Attributes' }];
     if (item.locations && Object.keys(item.locations).length > 0)
@@ -355,6 +338,7 @@ function getAvailableTabs(item) {
     return tabs;
 }
 
+// open the pop-up for an item. Called by: card clicks
 async function showDetails(item) {
     const modal      = document.getElementById('detailModal');
     const modalTitle = document.getElementById('modalTitle');
@@ -429,6 +413,7 @@ async function showDetails(item) {
     modalCompareBtn.id        = 'modalCompareBtn';
     modalCompareBtn.className = 'btn-compare';
     modalCompareBtn.style.cssText = 'margin-right:12px;';
+    // compare button state in the pop-up. Called by: showDetails
     const _updateModalBtn = () => {
         const inList = window.CompareManager?.isInList(item);
         modalCompareBtn.textContent = inList ? '✓ In Compare' : '+ Compare';
@@ -448,6 +433,7 @@ async function showDetails(item) {
     await switchModalTab(currentModalTab);
 }
 
+// switch pop-up tab. Called by: showDetails, the tab buttons
 async function switchModalTab(tabId) {
     currentModalTab = tabId;
 
@@ -501,6 +487,7 @@ async function switchModalTab(tabId) {
     if (element) tabContent.appendChild(element);
 }
 
+// thumbnail / sprite tab. Called by: switchModalTab
 async function renderImageTab(spritePath, altText, spriteParams) {
     if (!spritePath) return null;
     const element = await window.fetchSprite(spritePath, spriteParams || {});
@@ -516,6 +503,7 @@ async function renderImageTab(spritePath, altText, spriteParams) {
     return wrap;
 }
 
+// attributes tab (AttributeDisplay does the work). Called by: switchModalTab
 function renderAttributesTab(item, pluginIdOverride) {
     const pluginId = pluginIdOverride || item._pluginId || currentPlugin;
 
@@ -523,7 +511,7 @@ function renderAttributesTab(item, pluginIdOverride) {
         return window.AttributeDisplay.renderAttributesTabEnhanced(item, attrDefs, currentTab, pluginId);
     }
 
-    // ── Fallback plain renderer ───────────────────────────────────────────────
+    // plain list if the attribute definitions aren't loaded
     let html = '';
 
     if (currentTab === 'ships' || currentTab === 'variants') {
@@ -579,7 +567,7 @@ function renderAttributesTab(item, pluginIdOverride) {
     return html;
 }
 
-// ─── Modal close ──────────────────────────────────────────────────────────────
+// close the pop-up. Called by: the × button, Escape, clicking outside
 
 function closeModal() {
     if (typeof clearSpriteCache === 'function') clearSpriteCache();
@@ -590,24 +578,26 @@ function closeModal() {
     if (modalBody) delete modalBody._item;
 }
 
-// ─── Utilities ────────────────────────────────────────────────────────────────
+// ── small helpers ──
 
 function formatNumber(num) {
     if (num == null) return 'N/A';
     return num.toLocaleString();
 }
 
+// value for the plain fallback list. Called by: renderAttributesTab
 function formatValue(value) {
     return typeof value === 'number' ? formatNumber(value) : value;
 }
 
+// show an error message. Called by: loadData, saveManager.handleFile
 function showError(message) {
     const el = document.getElementById('errorContainer');
     if (el) el.innerHTML = `<div class="error">${message}</div>`;
 }
 
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
+// ── start ──
 
 document.addEventListener('DOMContentLoaded', () => {
     if (window.AttributeDisplay) window.AttributeDisplay.initTooltips();
@@ -631,7 +621,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadData();
 });
 
-// ─── Global exports ───────────────────────────────────────────────────────────
+// ── globals used by the HTML and other files ──
 
 window.loadData              = loadData;
 window.switchTab             = switchTab;

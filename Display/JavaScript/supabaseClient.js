@@ -1,20 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  supabaseClient.js  —  Endless Sky Ship Builder
-//
-//  Shared Supabase client + a generic pagination helper, used by
-//  dataLoader.js, mapDataLoader.js, and missionLoader.js instead of
-//  each fetching raw.githubusercontent.com JSON files directly.
-//
-//  Requires the Supabase UMD script to already be loaded on the page
-//  (see index HTML files — added as a <script> tag right before this
-//  one), which exposes the global `window.supabase.createClient`.
-//
-//  The key below is the public "anon"-equivalent key — safe to ship
-//  in frontend code. Real access control is enforced by Row-Level
-//  Security policies on the database, not by keeping this secret.
-// ═══════════════════════════════════════════════════════════
+// The shared Supabase client, a paging helper, and the ready-made data files. Loaded on every data page.
 
 (function () {
 
@@ -23,24 +9,10 @@ const SUPABASE_ANON_KEY = 'sb_publishable_6i_1psbc5BaaAyC6wdAkDQ_7L96Rq2s';
 
 window.supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-/**
- * Fetches every row from a table, walking through pages automatically —
- * Supabase/PostgREST caps a single request at 1000 rows by default, and
- * ships/outfits/systems/etc. all exceed that, so a single .select() would
- * silently come back truncated without this.
- *
- * @param {string} table
- * @param {object} [opts]
- * @param {string} [opts.select]   column list, defaults to '*'
- * @param {function} [opts.filters] receives the query builder, returns it
- *        with .eq()/.in()/etc. applied — e.g. filters: q => q.eq('plugin_id', id)
- */
+// every row of a table, page by page. Called by: dataLoader, mapDataLoader, missionLoader, afPool and other loaders
 async function fetchAllRows(table, opts = {}) {
     const { select = '*', filters, orderBy, pageSize = 1000, concurrency = 6, onFirstPage } = opts;
-    // The first page also asks how many rows there are in total; every other
-    // page is then fetched AT THE SAME TIME (a few at once) instead of one
-    // after another — with ~150 ms per round trip, 20 pages went from ~3 s to
-    // ~0.5 s.
+    // first page also gets the total, then the rest are fetched side by side
     const build = (from, withCount) => {
         let query = window.supabaseClient.from(table).select(select, withCount ? { count: 'exact' } : undefined);
         if (orderBy) query = query.order(orderBy, { ascending: true });
@@ -48,8 +20,7 @@ async function fetchAllRows(table, opts = {}) {
         if (filters) query = filters(query);
         return query;
     };
-    // A timeout is usually transient (a slow moment on shared compute), not
-    // a real failure — retry a couple of times before giving up.
+    // timeouts are usually a slow moment — retry twice
     const run = async (from, withCount) => {
         let res;
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -88,7 +59,7 @@ async function fetchAllRows(table, opts = {}) {
     return rows;
 }
 
-/** Groups an array of rows into a Map keyed by one of their own fields. */
+// rows → Map by one field. Called by: mapDataLoader
 function groupBy(rows, key) {
     const map = new Map();
     for (const row of rows) {
@@ -98,14 +69,11 @@ function groupBy(rows, key) {
     return map;
 }
 
-// ── Ready-made data files (build/makeBundles.mjs, made when Cloudflare deploys) ──
-// One plain file per plugin and kind ('catalog', 'map', 'missions'), served
-// from Cloudflare's network next to the pages. Used only if they belong to the
-// current data version; otherwise (or if anything fails) the caller loads from
-// Supabase as before.
+// ── ready-made data files (made by build/makeBundles.mjs at deploy) — used only if they match the live data version ──
 const Bundles = (() => {
     const base = new URL('../bundles/', document.currentScript ? document.currentScript.src : location.href).href;
     let manifestPromise = null;
+    // the files' manifest, once per page (null if missing or out of date). Called by: get
     async function manifest() {
         if (!manifestPromise) manifestPromise = (async () => {
             try {
@@ -123,7 +91,7 @@ const Bundles = (() => {
         })();
         return manifestPromise;
     }
-    /** The data for one plugin and kind, or null (then load it the usual way). */
+    // one plugin's data from the files, or null (then load the usual way). Called by: dataLoader, mapDataLoader, missionLoader
     async function get(kind, outputName) {
         try {
             const m = await manifest();

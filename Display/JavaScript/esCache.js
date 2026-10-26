@@ -1,25 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  esCache.js  —  Endless Sky Ship Builder
-//
-//  A small IndexedDB-backed cache the loader files (dataLoader.js,
-//  mapDataLoader.js, missionLoader.js) check before doing their big
-//  bulk Supabase fetch. The game data only changes once a month (when
-//  the parser runs), so most page loads — and every tab switch, since
-//  each page is a fresh navigation with no shared JS state — can skip
-//  the fetch and reconstruction entirely and just reuse what's already
-//  sitting in the browser.
-//
-//  Freshness check: the parser stamps app_config.dataVersion with a
-//  timestamp every run. This module fetches just that one tiny value
-//  first; if it matches what's cached, the cached bundle is returned
-//  as-is with zero further network requests. If it doesn't match (or
-//  nothing's cached yet), the caller's fetchFreshFn() runs as normal
-//  and its result gets cached under the new version for next time.
-//
-//  Requires supabaseClient.js to already be loaded on the page.
-// ═══════════════════════════════════════════════════════════
+// A small browser cache (IndexedDB) for loaded data, thrown away when the parser publishes new data.
 
 (function () {
 
@@ -30,6 +11,7 @@ const STORE_NAME  = 'kv';
 let _dbPromise = null;
 let _remoteVersionPromise = null;
 
+// open the database. Called by: _getRaw, _setRaw, clearCache
 function _openDB() {
     if (_dbPromise) return _dbPromise;
     _dbPromise = new Promise((resolve, reject) => {
@@ -46,6 +28,7 @@ function _openDB() {
     return _dbPromise;
 }
 
+// read one entry. Called by: loadWithCache
 async function _getRaw(key) {
     try {
         const db = await _openDB();
@@ -61,6 +44,7 @@ async function _getRaw(key) {
     }
 }
 
+// write one entry. Called by: loadWithCache
 async function _setRaw(key, value) {
     try {
         const db = await _openDB();
@@ -76,9 +60,7 @@ async function _setRaw(key, value) {
     }
 }
 
-/** Fetches app_config.dataVersion, once per page load — every loader
- * asking "has anything changed?" shares this single request instead of
- * each firing its own. */
+// the live data version, asked once per page. Called by: loadWithCache, Bundles.manifest
 async function getRemoteDataVersion() {
     if (_remoteVersionPromise) return _remoteVersionPromise;
     _remoteVersionPromise = (async () => {
@@ -94,12 +76,7 @@ async function getRemoteDataVersion() {
     return _remoteVersionPromise;
 }
 
-/**
- * @param {string} bundleKey     unique cache key for this piece of data
- *                                (e.g. 'shipBuilderData', 'mapData:endless-sky')
- * @param {function} fetchFreshFn  async () => data — only called on a cache miss
- * @returns whatever fetchFreshFn would have returned, from cache if possible
- */
+// cached copy if it's still current, else fetch fresh and save it. Called by: dataLoader, mapDataLoader, missionLoader
 async function loadWithCache(bundleKey, fetchFreshFn) {
     const remoteVersion = await getRemoteDataVersion();
     if (remoteVersion) {
@@ -115,7 +92,7 @@ async function loadWithCache(bundleKey, fetchFreshFn) {
     return fresh;
 }
 
-/** Escape hatch for a "force refresh" button, if you ever want one. */
+// wipe the cache. Called by: shipBuilderStats
 async function clearCache() {
     try {
         const db = await _openDB();

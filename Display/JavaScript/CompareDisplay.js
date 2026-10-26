@@ -1,50 +1,16 @@
 'use strict';
 
-// ─── CompareDisplay.js ────────────────────────────────────────────────────────
-//
-// Renders the compare bar and panel. PURE DOM/UI layer — every number shown
-// here (raw attributes, derived stats, weapon DPS, outfit/weapon detail
-// blocks, efficiency ratios, computed stats, and the "lower is better"
-// colour-direction hint) is computed and classified by window.ItemStats
-// (see ItemStats.js). This file's job is: call ItemStats, apply the fleet
-// quantity multiplier, and build the columns/table/group-builder DOM.
-// It contains no formulas, no attribute-name lists, and no section-
-// classification or "which stat is worse" logic of its own.
-//
-// Quantity multiplier:
-//   Each item has a ×N spinner in its column/table header. Any row ItemStats
-//   flags with scalesWithQty=true is multiplied by that quantity before
-//   display (fleet totals: mass, DPS, cost, heat capacity, ...). Rows
-//   flagged scalesWithQty=false stay as-is (per-shot weapon constants,
-//   durations, percentages, ratios — properties that don't sum across a
-//   fleet). This flag is decided once, in ItemStats, not here.
-//
-// Base vs With-Outfits display:
-//   For ships, each section first shows base-only values (ship attrs alone).
-//   If any values differ once outfits are included, a "(with outfits)"
-//   sub-section appears immediately after showing only the changed/new rows.
-//
-// Section grouping is delegated entirely to window.AttributeSections (via
-// ItemStats), so this panel groups attributes identically to
-// AttributeDisplay.js and shipBuilderStats.js.
-//
-// Load order: attributeSections.js, ItemStats.js, THEN this file.
-// ─────────────────────────────────────────────────────────────────────────────
+// The compare bar and panel. ItemStats works out every number; this file just lays them out.
 
 window.CompareDisplay = (() => {
 
     let _panelOpen = false;
     let _viewMode  = 'columns';
     let _quantities = {}; // qKey(item) → integer ≥ 1
-    // Per-member qtys inside a group: groupId + '|' + memberIndex → integer ≥ 1
+    // group member → how many ("groupId|index")
     let _groupMemberQtys = {};
 
-    // Canonical section order is delegated to the shared AttributeSections
-    // module so every panel groups attributes identically. Kept as a local
-    // *copy* (not a live reference) because this file pushes ad-hoc
-    // per-item section names onto it at render time (e.g. "Outfit: Some
-    // Name", "Weapon: Some Gun") — those must stay local to this render
-    // pass, not leak into the shared canonical order used by other files.
+    // own copy: "Outfit: X" / "Weapon: X" sections get added to it while drawing
     const SECTION_ORDER = window.AttributeSections.SECTION_ORDER.slice();
 
     const _attrDefs = () => window.attrDefs || null;
@@ -53,7 +19,7 @@ window.CompareDisplay = (() => {
         return window.ItemStats.fmtNum(v);
     }
 
-    // ── Quantity helpers ──────────────────────────────────────────────────────
+    // quantity per item
 
     function _qKey(item) {
         return (item.name || '') + '|' + (item._compareTab || '');
@@ -68,7 +34,7 @@ window.CompareDisplay = (() => {
         _renderPanelContent();
     }
 
-    // ── Group member qty helpers ─────────────────────────────────────────────
+    // quantity per group member
 
     function _gmKey(groupId, idx) { return groupId + '|' + idx; }
 
@@ -81,39 +47,24 @@ window.CompareDisplay = (() => {
         _renderPanelContent();
     }
 
-    // ── Detail-section test (per-outfit / per-weapon breakdown blocks) ───────
-    // These are per-item detail blocks, not colour-compared across items.
+    // "Outfit: X" / "Weapon: X" blocks aren't colour-compared
 
     function _isDetailSection(section) {
         return section.startsWith('Outfit: ') || section.startsWith('Weapon: ');
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  DATA LAYER — everything below this point that touches a number reads
-    //  it from window.ItemStats. No calculation happens in this file.
-    // ─────────────────────────────────────────────────────────────────────────
 
-    // Convert one ItemStats row into the {key,label,value,unit,lowerBetter}
-    // shape the DOM renderers below expect, applying the fleet-quantity
-    // multiplier when the row is flagged as a summable fleet total.
+    // one ItemStats row → what the panel shows (times the quantity if it adds up). Called by: CompareDisplay._buildAttrMap
     function _toDisplayRow(row, qty) {
         const scaled = (typeof row.raw === 'number' && row.scalesWithQty)
             ? _fmt(row.raw * qty)
             : row.value;
-        // Appends the raw pre-scale/pre-multiplier number after the
-        // qty-scaled value when the enhanced-details toggle is on — see
-        // ItemStats.formatRowDisplay. The raw figure itself is never
-        // multiplied by fleet quantity (it's the single-unit stored value).
+        // raw value added after it when enhanced details is on
         const display = window.ItemStats.formatRowDisplay(row, { baseValue: scaled });
         return { key: row.key, label: row.label, value: display, unit: row.unit || '', lowerBetter: !!row.lowerBetter };
     }
 
-    // Build the full attribute map for a single item (ship/variant/outfit).
-    // qty: fleet-quantity multiplier applied to summable rows.
-    // includeOutfits: for ships, whether outfit contributions are folded in
-    //   (false = base ship only). Outfits always include their own weapon
-    //   DPS/computed stats regardless of this flag.
-    // Returns: { sectionName: [{key,label,value,unit,lowerBetter}, ...] }
+    // every row for one item, grouped by section. Called by: CompareDisplay._buildGroupAttrMap, _renderColumns, _renderTable
     function _buildAttrMap(item, qty, includeOutfits = true) {
         qty = (typeof qty === 'number' && qty >= 1) ? qty : 1;
         const sections = {};
@@ -133,12 +84,7 @@ window.CompareDisplay = (() => {
             const stats = window.ItemStats.getOutfitStats(item, _attrDefs(), item._pluginId);
             for (const row of stats.rows) addRow(row.section, _toDisplayRow(row, qty));
 
-            // Raw weapon sub-object fields (velocity, lifetime, reload,
-            // homing, ...) as a flat list — not the full submunition chain,
-            // that's AttributeDisplay's job on the outfit detail page.
-            // scalesWithQty is already false for these via attrDefs'
-            // isWeaponDataKey flag (see ItemStats.scalesWithQtyFor), so no
-            // special-casing is needed here.
+            // the weapon's own fields (speed, range, reload …)
             if (item.weapon && typeof item.weapon === 'object') {
                 const weapSkip = new Set(['sprite', 'spriteData', 'sound', 'hit effect', 'fire effect',
                     'die effect', 'submunition', 'submunitions', 'stream', 'cluster',
@@ -153,12 +99,7 @@ window.CompareDisplay = (() => {
         return sections;
     }
 
-    // Build the combined attribute map for a group (multiple items treated
-    // as one fleet column). Non-detail rows are summed across members (each
-    // scaled by its own per-member qty via _buildAttrMap); detail sections
-    // (Outfit: X / Weapon: X) are rebuilt once per distinct outfit at
-    // count=1,qty=1 and only the Count row is replaced with the real total
-    // installed across every member.
+    // one column for a whole group: members' stats added up. Called by: CompareDisplay._renderColumns, _renderTable
     function _buildGroupAttrMap(group, includeOutfits = true) {
         const isShipGroup = window.CompareManager.getGroupType() === 'ship';
 
@@ -167,7 +108,7 @@ window.CompareDisplay = (() => {
             qty:  _getGroupMemberQty(group._groupId, i),
         }));
 
-        // ── Combined top-level stats ──────────────────────────────────────────
+        // add up every member's stats
         const combined = {};
 
         for (const { item, qty } of resolvedMembers) {
@@ -195,6 +136,7 @@ window.CompareDisplay = (() => {
         }
 
         const sections = {};
+        // back into sections
         for (const [key, entry] of Object.entries(combined)) {
             const s = entry.section;
             if (!sections[s]) sections[s] = [];
@@ -207,10 +149,7 @@ window.CompareDisplay = (() => {
             });
         }
 
-        // ── Outfit / Weapon detail sections ───────────────────────────────────
-        // Built once per distinct outfit name (count=1, qty=1 — fully
-        // unscaled), then only the Count row is replaced with the real
-        // summed count (install count × member ship qty, across all members).
+        // one block per outfit, built once
         if (includeOutfits) {
             const outfitIdx = window.ItemStats.buildOutfitIndex();
             const detailSections = {}; // sectionKey → { rows, countSum }
@@ -248,10 +187,12 @@ window.CompareDisplay = (() => {
                         if (!SECTION_ORDER.includes(sectionKey)) SECTION_ORDER.push(sectionKey);
                     }
 
+                    // fitted × member quantity, across every member
                     detailSections[sectionKey].countSum += installCount * qty;
                 }
             }
 
+            // show the real count
             for (const [sectionKey, { rows, countSum }] of Object.entries(detailSections)) {
                 sections[sectionKey] = rows.map(row =>
                     (row.key === '_od_count' || row.key === '_wd_count')
@@ -264,9 +205,7 @@ window.CompareDisplay = (() => {
         return sections;
     }
 
-    // ── Diff two section maps ─────────────────────────────────────────────────
-    // Returns a map of section → rows that differ (changed value or new key).
-    // Only used for ships — outfits have no sub-outfit layering.
+    // rows that change or appear once outfits are added (ships only). Called by: CompareDisplay._renderColumns, _renderTable
 
     function _diffSectionMaps(baseMap, outfitMap) {
         const diff = {};
@@ -286,12 +225,9 @@ window.CompareDisplay = (() => {
         return diff;
     }
 
-    // ── Colouring engine ──────────────────────────────────────────────────────
-    // Direction ("is a smaller number better?") is decided entirely by
-    // ItemStats and travels on each row as `lowerBetter` — this file just
-    // compares the numbers.
+    // ── colouring: best and worst value per row ("lower is better" comes from ItemStats) ──
 
-    // Parse a display string like "1,234.5 dmg/s" → 1234.5, or null if not numeric.
+    // "1,234.5 dmg/s" → 1234.5 (null if not a number). Called by: CompareDisplay._buildGroupAttrMap, _getRawFromMaps
     function _parseDisplayNum(str) {
         if (typeof str !== 'string' || str === '—' || str === '') return null;
         const cleaned = str.replace(/,/g, '').trim().split(/\s+/)[0];
@@ -300,12 +236,7 @@ window.CompareDisplay = (() => {
         return isNaN(n) ? null : n;
     }
 
-    // Given an array of numeric values (some may be null = missing), return
-    // an array of colour classes.
-    //   • Missing (null) → '' always
-    //   • All present values the same → all 'compare-val--best'
-    //   • Otherwise: best group → 'compare-val--best', worst → 'compare-val--worst'
-    //   • lowerBetter inverts which end is "best"
+    // best/worst class for each value (null = missing, left plain). Called by: CompareDisplay._buildColourMap
     function _colourClasses(nums, lowerBetter) {
         const present = nums.filter(n => n !== null);
         if (present.length < 1) return nums.map(() => '');
@@ -322,7 +253,7 @@ window.CompareDisplay = (() => {
         });
     }
 
-    // Helper: get the raw numeric value for a key from a map array entry.
+    // one item's number for a key. Called by: CompareDisplay._buildColourMap
     function _getRawFromMaps(maps, itemIdx, key) {
         for (const rows of Object.values(maps[itemIdx])) {
             const r = rows.find(r => r.key === key);
@@ -331,13 +262,7 @@ window.CompareDisplay = (() => {
         return null;
     }
 
-    // Build a colour-class lookup for all rows across all items.
-    //   colourMap[key]          → [class_item0, class_item1, ...]   (base rows)
-    //   colourMap['wo::' + key] → [class_item0, class_item1, ...]   (with-outfits rows)
-    //
-    // With-outfits rule: if ANY item changed a key in the wo layer, ALL items
-    // contribute their wo value (falling back to base if unchanged) for that
-    // comparison. Items that don't have the value at all stay uncoloured.
+    // colours for every row of every item ('wo::key' = the with-outfits rows). Called by: CompareDisplay._renderColumns, _renderTable
     function _buildColourMap(baseMaps, outfitMaps, diffMaps, itemCount) {
         const allBaseKeys = new Map(); // key → lowerBetter
         for (const map of baseMaps)
@@ -372,7 +297,7 @@ window.CompareDisplay = (() => {
         return colourMap;
     }
 
-    // ── DOM bootstrap ─────────────────────────────────────────────────────────
+    // set up the bar and panel. Called on page load (bottom of this file)
 
     function init() {
         _injectBar();
@@ -381,16 +306,13 @@ window.CompareDisplay = (() => {
             _refreshBar();
             if (_panelOpen) _renderPanelContent();
         });
-        // The enhanced-details toggle lives on a different page; if the
-        // compare panel happens to be open when it's flipped (e.g. changed
-        // in another tab), refresh so raw values appear/disappear without
-        // needing a reload.
+        // enhanced details can be switched in another tab
         window.addEventListener('enhancedDetailsChanged', () => {
             if (_panelOpen) _renderPanelContent();
         });
     }
 
-    // ── Bottom bar ────────────────────────────────────────────────────────────
+    // the bar along the bottom. Called by: CompareDisplay.init
 
     function _injectBar() {
         const bar = document.createElement('div');
@@ -415,6 +337,7 @@ window.CompareDisplay = (() => {
         _refreshBar();
     }
 
+    // redraw the bar's item chips. Called by: CompareDisplay.init, _injectBar, togglePanel
     function _refreshBar() {
         const items     = window.CompareManager.getItems();
         const count     = items.length;
@@ -467,7 +390,7 @@ window.CompareDisplay = (() => {
         createGroupBtn.onclick = () => _openGroupBuilder(null);
     }
 
-    // ── Panel ─────────────────────────────────────────────────────────────────
+    // the panel. Called by: CompareDisplay.init
 
     function _injectPanel() {
         const panel = document.createElement('div');
@@ -491,6 +414,7 @@ window.CompareDisplay = (() => {
         document.body.appendChild(panel);
     }
 
+    // redraw the panel. Called by: quantity changes, togglePanel, setViewMode
     function _renderPanelContent() {
         const body  = document.getElementById('comparePanelBody');
         const items = window.CompareManager.getItems();
@@ -506,11 +430,7 @@ window.CompareDisplay = (() => {
     }
 
 
-    // ── Quantity control widget ───────────────────────────────────────────────
-
-    // Creates the numeric <input> used inside a qty spinner, so quantity can be
-    // typed directly as well as changed via the +/- buttons. getVal/setVal read
-    // and write the underlying quantity value.
+    // typed quantity box in a spinner. Called by: CompareDisplay._makeQtyControl, _makeGroupMemberQtyControl, _renderColumns, _renderTable
     function _makeQtyInput(getVal, setVal) {
         const input = document.createElement('input');
         input.type      = 'number';
@@ -528,13 +448,13 @@ window.CompareDisplay = (() => {
         input.addEventListener('keydown', e => {
             if (e.key === 'Enter') input.blur();
         });
-        // Prevent clicks/typing in the input from bubbling to row/column
-        // click handlers elsewhere in the UI.
+        // don't let clicks in the box reach the column
         input.addEventListener('click', e => e.stopPropagation());
 
         return input;
     }
 
+    // − / box / + for one item. Called by: CompareDisplay._renderColumns, _renderTable
     function _makeQtyControl(item) {
         const wrap = document.createElement('div');
         wrap.className = 'compare-qty';
@@ -577,10 +497,7 @@ window.CompareDisplay = (() => {
         return wrap;
     }
 
-    // ── Section row renderer (shared by columns view) ─────────────────────────
-
-    // colourMap: output of _buildColourMap. itemIdx: which column this is.
-    // withOutfits: use 'wo::key' colour lookup instead of 'key'.
+    // one section's rows in a column. Called by: CompareDisplay._renderColumns
     function _appendSectionRows(col, rows, colourMap, itemIdx, withOutfits) {
         for (const rowData of rows) {
             const { key, label, value, unit, isDivider } = rowData;
@@ -625,7 +542,7 @@ window.CompareDisplay = (() => {
         }
     }
 
-    // Inline qty spinner for a group member (no panel re-render on every keypress)
+    // − / box / + for a group member. Called by: CompareDisplay._appendSectionRows
     function _makeGroupMemberQtyControl(groupId, memberIdx, currentDisplay) {
         const wrap = document.createElement('div');
         wrap.className = 'compare-qty';
@@ -665,7 +582,7 @@ window.CompareDisplay = (() => {
         return wrap;
     }
 
-    // ── Columns view ──────────────────────────────────────────────────────────
+    // side-by-side columns. Called by: CompareDisplay._renderPanelContent
 
     function _renderColumns(container, items) {
         const isShipGroup = window.CompareManager.getGroupType() === 'ship';
@@ -836,7 +753,7 @@ window.CompareDisplay = (() => {
                     _appendSectionRows(col, diffRows, colourMap, idx, true);
                 }
 
-                // Edge case: section only exists in outfit map (entirely new section from outfits)
+                // a section that only exists once outfits are added
                 if (!baseRows.length && diffRows.length === 0) {
                     const outfitOnlyRows = outfitMaps[idx][section] || [];
                     if (outfitOnlyRows.length) {
@@ -855,7 +772,7 @@ window.CompareDisplay = (() => {
         container.appendChild(grid);
     }
 
-    // ── Table view ────────────────────────────────────────────────────────────
+    // one big table. Called by: CompareDisplay._renderPanelContent
 
     function _renderTable(container, items) {
         const isShipGroup = window.CompareManager.getGroupType() === 'ship';
@@ -875,8 +792,7 @@ window.CompareDisplay = (() => {
 
         const colourMap = _buildColourMap(baseMaps, outfitMaps, diffMaps, items.length);
 
-        // Build the ordered list of row entries, interleaving base sections and
-        // their (with outfits) sub-sections immediately after.
+        // each section's rows, then its "(with outfits)" rows
         const sectionKeyOrder = [];
         const seenSectionKeys = new Set();
 
@@ -1140,10 +1056,7 @@ window.CompareDisplay = (() => {
         container.appendChild(wrap);
     }
 
-    // ── Group builder modal ───────────────────────────────────────────────────
-    //
-    // Used for both Create (existingGroup = null) and Edit (existingGroup = group).
-    // Shows all current singles as checkboxes; lets user name the group.
+    // create or edit a group (null = create). Called by: CompareDisplay.openGroupBuilder, the bar's group buttons
 
     function _openGroupBuilder(existingGroup) {
         // Remove any existing modal
@@ -1242,9 +1155,7 @@ window.CompareDisplay = (() => {
         listTitle.style.cssText = 'font-size:.75rem;opacity:.6;padding-bottom:.2rem;';
         listWrap.appendChild(listTitle);
 
-        // Build the candidate pool
-        // For create: all singles currently in compare list
-        // For edit: all singles in compare list; pre-check those already in the group
+        // everything in the compare list (ticked if already in this group)
         const existingNames = new Set(
             existingGroup ? existingGroup.members.map(m => m.item.name + '|' + (m.item._compareTab || '')) : []
         );
@@ -1395,7 +1306,7 @@ window.CompareDisplay = (() => {
         nameInput.select();
     }
 
-    // ── Sprite thumbnail ──────────────────────────────────────────────────────
+    // sprite thumbnail in a header. Called by: CompareDisplay._renderColumns, _renderTable
 
     function _loadThumb(item, container) {
         container.innerHTML = '<div class="compare-thumb-placeholder"></div>';
@@ -1409,8 +1320,9 @@ window.CompareDisplay = (() => {
         }).catch(() => {});
     }
 
-    // ── Public API ────────────────────────────────────────────────────────────
+    // ── public: window.CompareDisplay ──
 
+    // open/close the panel. Called by: the bar, openPanel, closePanel
     function togglePanel() {
         _panelOpen = !_panelOpen;
         const panel = document.getElementById('comparePanel');

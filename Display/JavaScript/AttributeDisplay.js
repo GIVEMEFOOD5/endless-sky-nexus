@@ -1,41 +1,31 @@
 'use strict';
 
-// ─── AttributeDisplay.js ─────────────────────────────────────────────────────
-//
-// PURE HTML RENDERER. Every number shown here — raw attributes, derived
-// stats, weapon DPS, wear-off times, outfit contributions — is computed and
-// classified by window.ItemStats (see ItemStats.js). This file's only job
-// is to turn ItemStats' row objects into the existing markup/CSS classes
-// (ad-row, ad-section-title, ad-grid, data-tooltip, ...). It contains no
-// formulas, no attribute-name lists, and no section-classification logic.
-//
-// Load order: attributeSections.js, ItemStats.js, THEN this file.
+// Turns ItemStats rows into the attribute tab's HTML (Data Viewer pop-up, builder outfit expander). No calculations here.
 
-// ─── HTML helpers ─────────────────────────────────────────────────────────────
+// a titled section of rows. Called by: renderSectionMap, renderWeaponChainHtml, renderAttributesTabEnhanced
 
 function buildSection(title, rows) {
     if (!rows.length) return '';
     return `${title ? `<h3 class="ad-section-title">${title}</h3>` : ''}<div class="ad-grid">${rows.join('')}</div>`;
 }
 
+// one label/value row. Called by: rowToHtml, renderWeaponChainHtml, renderAttributesTabEnhanced
 function attrRow(label, displayValue, unit, tipAttrs, extra) {
     const badge = unit ? `<span class="ad-unit">${unit}</span>` : '';
     const cls   = extra ? ` ad-row--${extra}` : '';
     return `<div class="ad-row${cls}"${tipAttrs || ''}><div class="ad-label">${label}</div><div class="ad-value">${displayValue}${badge}</div></div>`;
 }
 
+// data-tooltip="…" (empty if no text). Called by: rowToHtml
 function tooltipAttr(text) {
     if (!text) return '';
     return ` data-tooltip="${String(text).replace(/"/g, '&quot;')}"`;
 }
 
-// Render one ItemStats row as an .ad-row. `extra` picks the CSS variant
-// (e.g. 'derived' for computed/derived rows).
+// one row as HTML ('extra' = CSS variant, e.g. 'derived'). Called by: rowsToSections, renderWeaponChainHtml, renderAttributesTabEnhanced
 function rowToHtml(row, extra) {
     const label = row.isComputedOutfit ? `⚡ ${row.label}` : row.label;
-    // Appends the raw pre-scale/pre-multiplier number after the normal
-    // value when the enhanced-details toggle is on and this row actually
-    // has one worth showing — see ItemStats.formatRowDisplay.
+    // raw stored number added after it when enhanced details is on
     const displayValue = window.ItemStats.formatRowDisplay(row);
     // With enhanced details on, the tooltip also says WHY the row is in its
     // section (game code, parser flag, game display table, or name fallback).
@@ -47,8 +37,7 @@ function rowToHtml(row, extra) {
     return attrRow(label, displayValue, row.unit, tooltipAttr(tip), extra);
 }
 
-// Group a flat ItemStats row list into { sectionName: [htmlRow, ...] },
-// using window.AttributeSections to order sections when rendered.
+// rows → { section: [html rows] }. Called by: renderAttributesTabEnhanced
 function rowsToSections(rows, extra) {
     const sections = {};
     for (const row of rows) {
@@ -58,6 +47,7 @@ function rowsToSections(rows, extra) {
     return sections;
 }
 
+// { section: rows } → HTML in section order. Called by: renderAttributesTabEnhanced
 function renderSectionMap(sections) {
     let out = '';
     const keys = window.AttributeSections.orderSections(Object.keys(sections));
@@ -65,7 +55,7 @@ function renderSectionMap(sections) {
     return out;
 }
 
-// ─── Weapon chain HTML (consumes ItemStats.getWeaponChainData) ──────────────
+// weapon → submunitions → ammo, as HTML. Called by: renderAttributesTabEnhanced
 
 function renderWeaponChainHtml(attrDefs, weapon, pluginId) {
     const data = window.ItemStats.getWeaponChainData(attrDefs, weapon, pluginId);
@@ -117,7 +107,7 @@ function renderWeaponChainHtml(attrDefs, weapon, pluginId) {
     return html;
 }
 
-// ─── Effect wear-off section ──────────────────────────────────────────────────
+// wear-off times as their own section
 
 function renderEffectWearOff(attrs) {
     const rows = window.ItemStats.getWearOffRows(attrs);
@@ -126,7 +116,7 @@ function renderEffectWearOff(attrs) {
         rows.map(r => attrRow(r.label, r.value, r.unit, tooltipAttr(r.tooltip))));
 }
 
-// ─── Main renderer ────────────────────────────────────────────────────────────
+// the whole attributes tab for a ship, outfit or effect. Called by: DataViewer.renderAttributesTab, shipBuilderOutfitExpander._populatePanel
 
 function renderAttributesTabEnhanced(item, attrDefs, currentTab, pluginId) {
     attrDefs = attrDefs || {};
@@ -143,27 +133,20 @@ function renderAttributesTabEnhanced(item, attrDefs, currentTab, pluginId) {
         const stats = window.ItemStats.getShipStats(item, attrDefs, pluginId, { includeOutfits: false });
         const withOutfitsStats = window.ItemStats.getShipStats(item, attrDefs, pluginId, { includeOutfits: true });
 
-        // Base sections: raw/hardpoint/heat rows render plainly; everything
-        // else (ship-fn, energy/heat, label-pair, time-to-full, scan, system-
-        // aware, ComputedStats-merged) is "derived" and gets the ⚡ styling.
-        // The same stat can arrive twice (a raw attribute and a computed copy,
-        // e.g. "Drag", "Required crew" / "Required Crew", "Hull DPS"): keep
-        // the first one in each section — raw attributes come first.
+        // base sections: raw rows plain, calculated rows marked
         const seenLabel = new Set();
         const norm = l => String(l).toLowerCase().replace(/[^a-z0-9]/g, '');
-        // Computed rows that landed in a catch-all section ("Special", "Derived
-        // Stats", "Other") go where an attribute of the same name would.
+        // calculated rows stuck in Special / Derived Stats / Other go to their real section
         const home = row => {
             if (!['Special', 'Derived Stats', 'Other'].includes(row.section)) return row;
             const s = window.AttributeSections.classify(attrDefs, String(row.label).toLowerCase());
             return s && s !== 'Other' ? { ...row, section: s } : row;
         };
+        // first time this label (or this formula value) is seen in the section?
         const firstOnly = (row, prefix) => {
             const key = prefix + '|' + norm(row.label);
             if (seenLabel.has(key)) return false;
-            // a computed stat with exactly the same value as one already shown in
-            // its section is the same thing under another name (e.g. "Max Heat" =
-            // "Total Heat Capacity", "Base Max Velocity" = "Max Velocity")
+            // same value in the same section = same stat under another name (only for game formulas)
             const S = window.ItemStats.SOURCE;
             const isComputed = [S.SHIP_FN, S.FN_VARIANT, S.HEAT_DERIVED, S.COMPUTED_STATS].includes(row.source);
             const vkey = prefix + '|v|' + row.section + '|' + row.value + '|' + (row.unit || '');
@@ -239,7 +222,7 @@ function renderAttributesTabEnhanced(item, attrDefs, currentTab, pluginId) {
     return html;
 }
 
-// ─── Tooltip ──────────────────────────────────────────────────────────────────
+// hover tooltips for rows. Called by: the Data Viewer on load
 
 function initTooltips() {
     if (document.getElementById('ad-tooltip')) return;
@@ -280,15 +263,14 @@ function initTooltips() {
     }, { passive: true });
 }
 
+// adds this file's CSS once. Called by: on load
 function injectStyles() { /* Styles live in CSS file */ }
 
 window.AttributeDisplay = {
     renderAttributesTabEnhanced,
     initTooltips,
     injectStyles,
-    // Thin pass-throughs kept for any external callers that used the old
-    // AttributeDisplay-hosted calculation API — all real work now lives in
-    // window.ItemStats; these just forward to it.
+    // old names kept for anything still calling them — they just pass through to ItemStats
     calcDerivedStats:        (...a) => window.ItemStats.calcDerivedStats(...a),
     calcWeaponDerived:       (...a) => window.ItemStats.calcWeaponDerived(...a),
     calcEffectWearOffTimes:  (...a) => window.ItemStats.calcEffectWearOffTimes(...a),

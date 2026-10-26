@@ -1,48 +1,9 @@
 ;(function () {
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  ItemStats.js  —  SINGLE BACKEND DATA LAYER for ship/outfit/effect stats
-//
-//  Every number shown anywhere in the UI — raw attributes, ship-function
-//  derived stats, energy/heat table rows, label/value pairs, time-to-full,
-//  scan range/evasion, system-aware stats, status-effect wear-off, outfit
-//  contributions, weapon DPS chains, per-divisor efficiency ratios, and the
-//  ComputedStats.js _fn_/_derived_/_sys_/_ws_/_mv_ outputs — is computed
-//  and classified HERE, exactly once.
-//
-//  AttributeDisplay.js and CompareDisplay.js do NOT calculate, classify, or
-//  format numbers. They call the orchestrators below (getShipStats /
-//  getOutfitStats / getEffectStats) and turn the returned `rows` into HTML
-//  or DOM. That's the whole contract.
-//
-//  ROW SHAPE
-//  ─────────
-//  Every row pushed anywhere in this file has this shape:
-//    {
-//      key,              // stable, unique dedup key
-//      label,            // display label
-//      raw,              // number|string|null — the UNSCALED (qty=1) value
-//      value,            // fmtNum(raw) at qty=1 — convenience for callers
-//                         //   that don't need to rescale (AttributeDisplay)
-//      unit,             // display unit string ('', 'dmg/s', 's', ...)
-//      section,          // canonical AttributeSections bucket, OR an
-//                         // ad-hoc "Outfit: X" / "Weapon: X" detail section
-//      source,           // where this row came from (see SOURCE_* below)
-//      scalesWithQty,    // whether a fleet-qty multiplier should apply
-//      lowerBetter,      // true|false — colour-engine direction hint
-//      isComputedOutfit, // true if this row only appears once outfits are
-//                         // factored in (drives "(with outfits)" sub-UI)
-//      formula,          // optional formula string, for tooltips
-//      tooltip,          // optional pre-built tooltip string
-//      isDivider,        // true for spacer/header rows in detail blocks
-//    }
-//
-//  DEPENDENCIES: window.AttributeSections (required), window.ComputedStats
-//  and window.WeaponStats (optional — features silently no-op without them).
-// ═══════════════════════════════════════════════════════════════════════════
+// Works out every stat shown for ships, outfits and effects (Data Viewer, Compare, builder). No HTML here.
 
-// ── Source tags ──────────────────────────────────────────────────────────
+// where each row came from
 const SOURCE = {
     RAW:            'raw',            // straight from item.attributes / outfit
     SHIP_FN:        'shipFn',         // a real Ship:: function formula
@@ -65,20 +26,12 @@ const SOURCE = {
     STACKING_NOTE:  'stackingNote',
 };
 
-// ─────────────────────────────────────────────────────────────────────────
-//  BASIC HELPERS
-// ─────────────────────────────────────────────────────────────────────────
+// ── helpers ──
 
-// Anything smaller than this in magnitude is floating-point noise, not a
-// real value — e.g. two outfits contributing +1 and -1 "shield energy"
-// should net to exactly 0, but IEEE754 summation can land on something
-// like -6.66e-12 instead. fmtNum clamps that to a clean "0" for display.
-// This does NOT suppress or hide anything — a row that legitimately
-// computes to 0 (or a genuine negative value) still shows; this only
-// stops floating-point residue from being displayed as garbage scientific
-// notation in its place.
+// anything this small is rounding noise (e.g. +1 and -1 shield energy), treat it as 0
 const ZERO_EPSILON = 1e-9;
 
+// number → "1,234.5" (tiny values as 0). Called by: nearly every row builder, AttributeDisplay, CompareDisplay
 function fmtNum(v) {
     if (v === undefined || v === null) return '—';
     if (typeof v !== 'number') { const n = parseFloat(v); if (isNaN(n)) return String(v); v = n; }
@@ -87,22 +40,24 @@ function fmtNum(v) {
     return parseFloat(v.toPrecision(4)).toString();
 }
 
+// attribute record from the definitions. Called by: most functions here
 function getAttrRecord(attrDefs, key) {
     const attrs = attrDefs?.attributes || {};
     return attrs[key] || attrs[key?.toLowerCase()] || null;
 }
 
+// section for a key. Called by: getRawAttributeRows, getOutfitContributionRows
 function getSection(attrDefs, key) {
     return window.AttributeSections.classify(attrDefs, key);
 }
 
+// how the game stacks this attribute. Called by: getStackingNotes, battleSim.resolveShipStats
 function getStacking(attrDefs, key) {
     const rec = getAttrRecord(attrDefs, key);
     return rec ? { rule: rec.stacking, description: rec.stackingDescription } : null;
 }
 
-// Pretty label for ANY key — raw attribute ("energy capacity") or computed/
-// internal ("_fn_MaxShields", "_derived_energy_foo", "_ws_totalDps", ...).
+// nice label for any key, raw or calculated ("_fn_MaxShields" → "Max Shields"). Called by: most row builders here, AttributeDisplay
 function labelForKey(key) {
     let s = key;
     if (s.startsWith('_fn_'))                  s = s.slice(4);
@@ -126,24 +81,14 @@ function labelForKey(key) {
             .replace(/_/g, ' ').replace(/\s+/g, ' ').replace(/^./, c => c.toUpperCase()).trim();
 }
 
-// Returns the value STRING to display for a row, honouring the enhanced-
-// details toggle. `opts.baseValue`, if given, overrides row.value as the
-// "actual" figure to show — CompareDisplay needs this since its displayed
-// value is row.raw scaled by fleet quantity, not the qty=1 row.value.
-//
-// When enhanced details is ON and the row carries a `rawUnscaled` that
-// actually differs from its scaled/multiplied `raw` (i.e. there's a real
-// displayScale/displayMultiplier step in between worth surfacing), the raw
-// stored number is appended after the normal value. Rows with no such
-// distinction (rawUnscaled missing, non-numeric, or equal to raw) are
-// returned unchanged — nothing to add.
-// Yes/no attributes (marked in the attribute definitions): the game only checks
-// whether they're there, so a total like "Unplunderable 900" means nothing.
+// yes/no attribute? (the game only checks it's there). Called by: formatRowDisplay
 function isFlagAttribute(key) {
     const rec = window.attrDefs?.attributes?.[String(key || '').toLowerCase()];
     return !!(rec && (rec.isBoolean || rec.area === 'Special / Flags'));
 }
 
+// what to show for a row; with enhanced details on, the raw stored number is added after it
+// Called by: AttributeDisplay.rowToHtml, CompareDisplay._toDisplayRow, shipBuilderStats._rowCard
 function formatRowDisplay(row, opts) {
     if (row && isFlagAttribute(row.key) && Number(row.raw) > 0) return 'Yes';
     const base = (opts && opts.baseValue !== undefined) ? opts.baseValue : row?.value;
@@ -154,6 +99,7 @@ function formatRowDisplay(row, opts) {
     return `${base} (raw: ${fmtNum(rawU)})`;
 }
 
+// description / formula / source text for a row's tooltip. Called by: getRawAttributeRows
 function tooltipParts(rec, formulaOverride) {
     if (!rec && !formulaOverride) return '';
     const parts = [];
@@ -166,6 +112,7 @@ function tooltipParts(rec, formulaOverride) {
 }
 
 const _FN_RATE_RE = /rate|per.?second|generation|consumption|dissipation|production|output|input|recharge|repair/i;
+// unit for a game function's result. Called by: getComputedStatRows, _effectiveUnit
 function inferFnUnit(attrDefs, fnName) {
     const rec = attrDefs?.shipFunctions?.[fnName];
     if (rec?.displayUnit) return rec.displayUnit;
@@ -173,36 +120,23 @@ function inferFnUnit(attrDefs, fnName) {
     return '';
 }
 
+// is this a ship (has hull/shields)? Called by: CompareDisplay._buildAttrMap
 function isShipItem(item) {
     return !!(item?.attributes && typeof item.attributes === 'object');
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  ENHANCED DETAILS TOGGLE
-//
-//  A single, site-wide, localStorage-backed on/off flag. When ON, rows that
-//  carry a distinct `rawUnscaled` value (the number as actually stored/
-//  computed, before the display multiplier/scale that turns it into the
-//  friendly on-screen figure) show that raw number alongside the normal
-//  display value — see formatRowDisplay() below, the single place this
-//  flag is actually consumed.
-//
-//  The toggle UI itself lives on whichever page wires it up; this module
-//  only owns the stored value and notifies listeners when it changes —
-//  including changes made on a DIFFERENT already-open tab/page, via the
-//  native 'storage' event (which only fires in tabs other than the one
-//  that made the change, so localStorage.setItem's caller also gets a
-//  same-tab 'enhancedDetailsChanged' dispatch directly).
-// ─────────────────────────────────────────────────────────────────────────
+// ── enhanced details switch (saved in the browser) ──
 
 const ENHANCED_DETAILS_KEY = 'es-enhanced-details';
 
+// is enhanced details on? Called by: formatRowDisplay, AttributeDisplay.rowToHtml
 function isEnhancedDetailsEnabled() {
     try {
         return localStorage.getItem(ENHANCED_DETAILS_KEY) === 'true';
     } catch (_) { return false; }
 }
 
+// switch enhanced details on/off (tells open pages). Called by: toggleEnhancedDetails
 function setEnhancedDetailsEnabled(enabled) {
     enabled = !!enabled;
     try { localStorage.setItem(ENHANCED_DETAILS_KEY, enabled ? 'true' : 'false'); } catch (_) { /* storage unavailable — flag just won't persist */ }
@@ -210,6 +144,7 @@ function setEnhancedDetailsEnabled(enabled) {
     return enabled;
 }
 
+// flip enhanced details. Called by: the toggle on the Data Viewer page
 function toggleEnhancedDetails() {
     return setEnhancedDetailsEnabled(!isEnhancedDetailsEnabled());
 }
@@ -221,10 +156,9 @@ if (typeof window !== 'undefined') {
     });
 }
 
-// ── Outfit index / lookup ───────────────────────────────────────────────
+// ── outfit lookup ──
 
-// Only the selected plugins: an outfit from a plugin you haven't switched on
-// isn't in your game, so it mustn't count towards a ship's stats.
+// name → outfit, selected plugins only. Called by: getShipStats, getOutfitStats, CompareDisplay._buildGroupAttrMap, shipBuilderStats
 function buildOutfitIndex() {
     const allData = (window.DataLoader && typeof window.DataLoader.getActiveData === 'function' ? window.DataLoader.getActiveData() : (window.allData || {}));
     const merged  = {};
@@ -233,6 +167,7 @@ function buildOutfitIndex() {
     return merged;
 }
 
+// find an outfit by name. Called by: computeOutfitContributions, getWeaponChainData
 function lookupOutfit(name, pluginId) {
     const allData = (window.DataLoader && typeof window.DataLoader.getActiveData === 'function' ? window.DataLoader.getActiveData() : (window.allData || {}));
     const order = [pluginId, ...Object.keys(allData).filter(k => k !== pluginId)];
@@ -243,7 +178,7 @@ function lookupOutfit(name, pluginId) {
     return null;
 }
 
-// Normalise outfit map / array into [[name, count], ...]
+// outfit map or list → [[name, count]]. Called by: buildEffectiveAttrs, getHeatDerivedRows, getShipWeaponData, getShipStats, CompareDisplay
 function outfitEntries(src) {
     if (Array.isArray(src))
         return src.map(e => [e.name || '', typeof e.count === 'number' ? e.count : 1]);
@@ -253,7 +188,7 @@ function outfitEntries(src) {
     ]);
 }
 
-// ── Lower-is-better classification (colour engine data, not UI) ──────────
+// ── is a smaller number better? (for Compare's colours) ──
 
 const _ALWAYS_LOWER_BETTER = new Set([
     'mass', 'drag', 'cost',
@@ -265,6 +200,7 @@ const _COST_PREFIX_RE = /^(firing |thrusting |turning |afterburner |reverse thru
 const _COST_SUFFIX_RE = / (energy|heat|fuel|shields|hull)$/;
 const _RESISTANCE_COST_RE = /^(burn|corrosion|discharge|disruption|ion|scramble|slowing|leak) resistance (energy|fuel|heat)$/;
 
+// is a smaller number better for this key? Called by: row builders
 function isLowerBetter(attrDefs, key, label) {
     const rec = getAttrRecord(attrDefs, key);
 
@@ -287,10 +223,7 @@ function isLowerBetter(attrDefs, key, label) {
     return false;
 }
 
-// Pure weapon behaviour keys (reload, velocity, lifetime, ...) don't scale
-// with a fleet-quantity multiplier; ship movement attrs that happen to also
-// appear on weapon data (turn, thrust) DO scale. Distinguished by whether a
-// real Ship:: function reads the key.
+// does this row add up across several ships? weapon timings don't. Called by: getRawAttributeRows
 function scalesWithQtyFor(attrDefs, key) {
     const rec = getAttrRecord(attrDefs, key);
     const isShipMovementAttr = rec?.usedInShipFunctions?.length > 0;
@@ -298,11 +231,9 @@ function scalesWithQtyFor(attrDefs, key) {
     return !isBehaviourKey;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  RAW ATTRIBUTES
-// ─────────────────────────────────────────────────────────────────────────
+// ── raw attributes ──
 
-// attrsObj: flat { key: numberOrString } map (already outfit-merged, or not)
+// one row per attribute in attrsObj. Called by: getShipStats, getOutfitStats, getOutfitDetailRows, getWeaponDetailRows, CompareDisplay, shipBuilderStats
 function getRawAttributeRows(attrDefs, attrsObj, opts) {
     opts = opts || {};
     const skip = opts.skip || new Set();
@@ -330,10 +261,7 @@ function getRawAttributeRows(attrDefs, attrsObj, opts) {
     return rows;
 }
 
-// ── Effective (outfit-merged) attributes ──────────────────────────────────
-// outfitIdx: null/omitted => base-only. Passing an index merges every
-// installed outfit's numeric attributes in (additive; stacking rules for
-// non-additive attrs are surfaced separately via getStackingNotes).
+// ── attributes with outfits added ──
 
 const _META_KEYS = new Set([
     'name','display name','category','series','index','cost','thumbnail','sprite',
@@ -344,6 +272,7 @@ const _META_KEYS = new Set([
     'outfitMap','outfits',
 ]);
 
+// ship attributes with every outfit added. Called by: getShipStats, shipBuilderStats
 function buildEffectiveAttrs(item, outfitIdx) {
     const eff = {};
     const attrs = item.attributes || {};
@@ -367,7 +296,7 @@ function buildEffectiveAttrs(item, outfitIdx) {
     return eff;
 }
 
-// ── Which outfits contribute what to which attribute ─────────────────────
+// which outfits add what to each attribute. Called by: getOutfitContributionRows, AttributeDisplay
 
 function computeOutfitContributions(item, pluginId) {
     const outfitMap = item.outfitMap || item.outfits || {};
@@ -388,9 +317,7 @@ function computeOutfitContributions(item, pluginId) {
     return contributions;
 }
 
-// Rows showing base+outfit EFFECTIVE totals for every attribute outfits
-// touch, each carrying its source breakdown in `tooltip`. Used by
-// AttributeDisplay's single-ship "(with outfits)" panel.
+// totals for attributes the outfits change, with a breakdown in the tooltip. Called by: getShipStats
 function getOutfitContributionRows(attrDefs, item, pluginId) {
     const attrs = item.attributes || {};
     const contributions = computeOutfitContributions(item, pluginId);
@@ -420,9 +347,7 @@ function getOutfitContributionRows(attrDefs, item, pluginId) {
     return rows;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  HARDPOINTS
-// ─────────────────────────────────────────────────────────────────────────
+// guns, turrets, bays … from the ship's hardpoints. Called by: getShipStats
 
 function getHardpointRows(item) {
     const rows = [];
@@ -443,12 +368,11 @@ function getHardpointRows(item) {
     return rows;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  HEAT DERIVED (total heat capacity, max sustainable heat/s)
-// ─────────────────────────────────────────────────────────────────────────
+// ── heat capacity and max sustainable heat ──
 
 const MAX_TEMP = 100;
 
+// total heat capacity and max sustainable heat/s. Called by: getShipStats, shipBuilderStats._shipRows
 function getHeatDerivedRows(item, eff, outfitIdx) {
     const shipMass = parseFloat(item.attributes?.mass ?? item.mass ?? 0) || 0;
     let outfitMassSum = 0;
@@ -480,9 +404,7 @@ function getHeatDerivedRows(item, eff, outfitIdx) {
     return rows;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  SHIP-FUNCTION FORMULA EVALUATION  (display-side thin evaluator)
-// ─────────────────────────────────────────────────────────────────────────
+// game functions already shown elsewhere (so they aren't listed twice). Called by: calcDerivedStats
 
 function _buildKnownDisplayFns(attrDefs) {
     const fns   = attrDefs?.shipFunctions || {};
@@ -498,6 +420,7 @@ function _buildKnownDisplayFns(attrDefs) {
     return known;
 }
 
+// skip game functions that aren't worth showing. Called by: calcDerivedStats
 function shouldSuppressFn(fnName, fnData, knownDisplayFns) {
     const ret     = (fnData.returnType || '').trim();
     const attrs   = fnData.attributesRead || [];
@@ -520,6 +443,7 @@ function shouldSuppressFn(fnName, fnData, knownDisplayFns) {
     return false;
 }
 
+// skip intermediate values that aren't worth showing. Called by: calcDerivedStats
 function shouldSuppressIntermediateVar(varName, formula) {
     if (/PerFrame$/i.test(varName)) return true;
     const bracketCount = (formula.match(/\[/g) || []).length;
@@ -532,6 +456,7 @@ function shouldSuppressIntermediateVar(varName, formula) {
     return false;
 }
 
+// evaluate a game formula with this ship's attributes. Called by: calcDerivedStats
 function evalFormulaDisplay(formulaStr, attrs, fnResolver) {
     if (!formulaStr) return NaN;
     try {
@@ -579,6 +504,7 @@ function evalFormulaDisplay(formulaStr, attrs, fnResolver) {
     } catch (_) { return NaN; }
 }
 
+// works out game functions in the order their formulas need. Called by: calcDerivedStats
 function buildFnResolver(attrDefs, attrs) {
     const fns   = attrDefs?.shipFunctions || {};
     const cache = {};
@@ -622,6 +548,7 @@ function buildFnResolver(attrDefs, attrs) {
     return cache;
 }
 
+// computed key → label. Called by: calcDerivedStats
 function computedKeyToLabel(key) {
     let s = key;
     if (s.startsWith('_fn_'))                  s = s.slice(4);
@@ -635,16 +562,7 @@ function computedKeyToLabel(key) {
             .replace(/^./, c => c.toUpperCase()).trim();
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  DERIVED STATS  (ship functions, energy/heat table, label pairs,
-//  time-to-full, scan range/evasion, system-aware, + ComputedStats merge)
-//
-//  Every row is tagged with `source` so callers can select just the subset
-//  they need — e.g. CompareDisplay only wants the rows tagged LABEL_PAIR /
-//  TIME_TO_FULL / SCAN_RANGE / SCAN_EVASION here, since everything else
-//  this function computes is already available (identically) via
-//  getComputedStatRows() below, reading straight from window.ComputedStats.
-// ─────────────────────────────────────────────────────────────────────────
+// every stat worked out from the game's formulas. Called by: getUniqueDerivedRows, AttributeDisplay
 
 function calcDerivedStats(attrDefs, item, pluginId) {
     const attrs          = item?.attributes || item || {};
@@ -678,12 +596,7 @@ function calcDerivedStats(attrDefs, item, pluginId) {
         });
     }
 
-    // 1b. Game functions with a single on/off setting — e.g. MaxVelocity(bool
-    //     withAfterburner) — shown both ways, labelled from the setting's own
-    //     name ("with afterburner"). Then any other movement function that
-    //     reads everything that setting switches on gets the same "with …"
-    //     version, scaled by how much the setting adds (straight from the game's
-    //     formula): that's how "acceleration with afterburner" is worked out.
+    // functions with one on/off setting (MaxVelocity(withAfterburner)) shown both ways
     const humanise = p => p.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
     for (const [fnName, fnData] of Object.entries(fns)) {
         const pm = String(fnData.params || '').trim().match(/^bool\s+(\w+)$/);
@@ -718,7 +631,7 @@ function calcDerivedStats(attrDefs, item, pluginId) {
         }
     }
 
-    // 1. Ship function formulas
+    // the game's ship functions
     const present = k => { const v = parseFloat(attrs[k]); return isFinite(v) && v !== 0; };
     for (const [fnName, fnData] of Object.entries(fns)) {
         if (shouldSuppressFn(fnName, fnData, knownDisplayFns)) continue;
@@ -807,9 +720,7 @@ function calcDerivedStats(attrDefs, item, pluginId) {
         push(label, displayVal, 1, info.displayUnit ?? '/s', info.formula, false, 'Energy', SOURCE.SYSTEM_AWARE);
     }
 
-    // 8. Merge in window.ComputedStats output (only reachable when pluginId
-    // is supplied — see getComputedStatRows() for the standalone version
-    // that doesn't require a real ship._internalId cache key).
+    // add ComputedStats' results (needs pluginId)
     if (pluginId && typeof window.getComputedStats === 'function') {
         const computed = window.getComputedStats(item, pluginId);
         for (const [statKey, val] of Object.entries(computed)) {
@@ -852,8 +763,7 @@ function calcDerivedStats(attrDefs, item, pluginId) {
     return results;
 }
 
-// Just the rows that ONLY this function computes (nothing else in the app
-// produces label/value pairs, time-to-full, scan range, or scan evasion).
+// only the stats nothing else produces (label pairs, time to full, scan range, functions). Called by: getShipStats, shipBuilderStats._shipRows
 function getUniqueDerivedRows(attrDefs, attrsObj) {
     // game functions too (acceleration, turn rate, max speed …): worked out here in the order
     // their formulas need, so they don't depend on a fixed list elsewhere
@@ -861,9 +771,7 @@ function getUniqueDerivedRows(attrDefs, attrsObj) {
     return calcDerivedStats(attrDefs, { attributes: attrsObj }).filter(r => UNIQUE.has(r.source));
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  STATUS EFFECT WEAR-OFF
-// ─────────────────────────────────────────────────────────────────────────
+// ── status effect wear-off ──
 
 // Fallback only — statusEffectDecay() reads the list the parser extracted
 // from Ship.cpp (attrDefs.weapon.statusEffectDecay) via gameKeys.js.
@@ -877,10 +785,12 @@ const STATUS_EFFECT_DECAY_FALLBACK = [
     { damageKey: 'corrosion damage',   resistKey: 'corrosion resistance',   label: 'Corrosion' },
     { damageKey: 'leak damage',        resistKey: 'leak resistance',        label: 'Leak' },
 ];
+// how fast a status effect wears off. Called by: wear-off and weapon calculations
 function statusEffectDecay() {
     return window.GameKeys ? window.GameKeys.statusEffects(STATUS_EFFECT_DECAY_FALLBACK) : STATUS_EFFECT_DECAY_FALLBACK;
 }
 
+// seconds per unit for ion, scramble, slowing … Called by: getWearOffRows, AttributeDisplay
 function calcEffectWearOffTimes(attrs) {
     const results = [];
     for (const { resistKey, label } of statusEffectDecay()) {
@@ -894,6 +804,7 @@ function calcEffectWearOffTimes(attrs) {
     return results;
 }
 
+// how long one hit's effect lasts. Called by: AttributeDisplay
 function calcWeaponEffectDuration(weapon, targetAttrs) {
     const results = [];
     for (const { damageKey, resistKey, label } of statusEffectDecay()) {
@@ -906,6 +817,7 @@ function calcWeaponEffectDuration(weapon, targetAttrs) {
     return results;
 }
 
+// wear-off rows. Called by: getShipStats
 function getWearOffRows(attrsObj) {
     return calcEffectWearOffTimes(attrsObj).map(w => ({
         key: `_wo_${w.label}`, label: `${w.label} wear-off`,
@@ -915,9 +827,7 @@ function getWearOffRows(attrsObj) {
     }));
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  WEAPON DPS / CHAIN
-// ─────────────────────────────────────────────────────────────────────────
+// DPS and per-shot figures for one weapon. Called by: getWeaponChainData, AttributeDisplay
 
 function calcWeaponDerived(attrDefs, weapon, pluginId, rootReload) {
     if (!weapon) return [];
@@ -934,6 +844,7 @@ function calcWeaponDerived(attrDefs, weapon, pluginId, rootReload) {
     const burstCount  = parseFloat(weapon['burst count']  ?? 1) || 1;
     const burstReload = parseFloat(weapon['burst reload']  ?? reload) || reload;
 
+    // weapon range from velocity × lifetime. Called by: calcWeaponDerived
     function resolveRange(w, inheritedVel, visited, depth) {
         if (depth > 8) return 0;
         const vel      = (parseFloat(w.velocity ?? 0) || 0) > 0 ? parseFloat(w.velocity) : (inheritedVel || 0);
@@ -1007,9 +918,7 @@ function calcWeaponDerived(attrDefs, weapon, pluginId, rootReload) {
     return results;
 }
 
-// Structured (non-HTML) weapon → submunitions → ammo chain data.
-// Returns { sections: [{title, weapon, outfit, multiplier, rows, derivedRows}],
-//           totalDamagePerShot: {key: val}, totalDps: {key: val}|null, rootSps }
+// weapon → submunitions → ammo, as data. Called by: getOutfitWeaponProfile, AttributeDisplay.renderWeaponChainHtml
 function getWeaponChainData(attrDefs, weapon, pluginId) {
     if (!weapon) return null;
     const totalDamage = {}, visited = new Set();
@@ -1018,6 +927,7 @@ function getWeaponChainData(attrDefs, weapon, pluginId) {
     const rootReload = hasRefireRate ? (parseFloat(weapon.reload ?? weapon['burst reload']) || 0) : 0;
     const rootSps = rootReload > 0 ? 60 / rootReload : 0;
 
+    // add up damage through the chain. Called by: getWeaponChainData
     function collectDamage(w, multiplier) {
         const dmg = {};
         for (const [key, val] of Object.entries(w || {})) {
@@ -1030,6 +940,7 @@ function getWeaponChainData(attrDefs, weapon, pluginId) {
         }
         return dmg;
     }
+    // merge damage totals. Called by: getWeaponChainData
     function mergeInto(target, source) { for (const [k, v] of Object.entries(source)) target[k] = (target[k] || 0) + v; }
 
     const queue = [{ weapon, outfit: null, title: 'Weapon Stats', multiplier: 1, depth: 0 }];
@@ -1089,7 +1000,7 @@ function getWeaponChainData(attrDefs, weapon, pluginId) {
     return { sections, totalDamagePerShot: totalDamage, totalDps, rootSps, hasChain: sections.length > 1 };
 }
 
-// ── Fleet-level & per-outfit weapon DPS via WeaponStats ───────────────────
+// fleet DPS and per-weapon DPS (from WeaponStats). Called by: getShipStats, shipBuilderStats
 
 function getShipWeaponData(item, outfitIdx) {
     if (!window.WeaponStats) return null;
@@ -1100,13 +1011,14 @@ function getShipWeaponData(item, outfitIdx) {
     catch (_) { return null; }
 }
 
+// weapon summary for an outfit. Called by: getOutfitStats, CompareDisplay
 function getOutfitWeaponProfile(outfit, outfitIdx) {
     if (!window.WeaponStats || !outfit?.weapon) return null;
     try { return window.WeaponStats.getOutfitWeaponStats(outfit, outfitIdx); }
     catch (_) { return null; }
 }
 
-// Fleet-summary rows (Total/Shield/Hull DPS, per-type DPS, ammo consumption)
+// total / shield / hull DPS and ammo use. Called by: getShipStats
 function getWeaponSummaryRows(wData) {
     if (!wData || !wData.weaponCount) return [];
     const rows = [];
@@ -1133,10 +1045,7 @@ function getWeaponSummaryRows(wData) {
     return rows;
 }
 
-// Per-outfit unscaled (count=1, qty=1) attribute rows for one installed
-// outfit — used to build "Outfit: X" detail blocks. `count`/`qty` are only
-// used to format the Count row's display text; every other value stays
-// per-unit so the caller can rescale for its own display purposes.
+// rows for one installed outfit (its own numbers, count shown separately). Called by: getShipStats, CompareDisplay._buildGroupAttrMap
 function getOutfitDetailRows(attrDefs, outfitName, outfit, count, qty) {
     count = count || 1; qty = qty || 1;
     const skip = new Set([
@@ -1173,8 +1082,7 @@ function getOutfitDetailRows(attrDefs, outfitName, outfit, count, qty) {
     return rows;
 }
 
-// Per-weapon unscaled detail rows — mirrors getOutfitDetailRows but also
-// includes the weapon sub-object's raw stats and per-second DPS/costs.
+// same as getOutfitDetailRows, plus the weapon's own stats and per-second DPS. Called by: getShipStats, CompareDisplay
 function getWeaponDetailRows(attrDefs, outfitName, outfit, profile, count, qty) {
     count = count || 1; qty = qty || 1;
     const w = outfit.weapon || {};
@@ -1226,9 +1134,7 @@ function getWeaponDetailRows(attrDefs, outfitName, outfit, profile, count, qty) 
         if (costVal) {
             const rec = getAttrRecord(attrDefs, costKey);
             const raw = costVal * profile.shotsPerSecond * (rec?.displayMultiplier ?? 1);
-            // rawUnscaled here is the per-shot cost as stored on the weapon
-            // (before the ×shots/s×displayMultiplier that turns it into the
-            // "/s" figure shown) — the most useful "raw" reading for this row.
+            // raw = per-shot cost as stored, before turning it into /s
             rows.push({ key: `_wd_cost_${costKey}`, label: labelForKey(costKey.replace(/^firing /, '')) + '/s', raw, rawUnscaled: costVal, value: fmtNum(raw),
                 unit: rec?.displayUnit ?? '', section, source: SOURCE.WEAPON_DETAIL, scalesWithQty: true, lowerBetter: true });
         }
@@ -1248,22 +1154,11 @@ function getWeaponDetailRows(attrDefs, outfitName, outfit, profile, count, qty) 
     return rows;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  window.ComputedStats OUTPUT  →  classified rows
-// ─────────────────────────────────────────────────────────────────────────
+// ── ComputedStats results → rows ──
 
 const COMPUTED_SKIP = new Set(['_ws_hasAmmoWeapons', '_totalOutfits']);
 
-// Filters a computed-stats map in place down to keys whose driving raw
-// attributes are actually present on THIS item (window.ComputedStats
-// evaluates every formula generically, defaulting missing attrs to 0).
-// Resolves any computed-stat key to the list of raw attribute keys its
-// formula actually references, regardless of which of the (currently 4)
-// underlying sources produced it. This is the ONE place that knowledge
-// lives — filterComputedStats below just asks "does the ship/outfit have
-// any of these?" using effectiveAttrKeys (already the full ship+outfits
-// union, built by buildEffectiveAttrs before this ever runs). Returns []
-// if the key's shape can't be resolved to a formula at all.
+// keep only computed stats whose attributes this item actually has. Called by: filterComputedStats
 function _resolveComputedKeyDependencies(key, attrDefs) {
     const fns     = attrDefs.shipFunctions              || {};
     const intVars = attrDefs.shipDisplay?.intermediateVars || {};
@@ -1276,9 +1171,7 @@ function _resolveComputedKeyDependencies(key, attrDefs) {
     if (key.startsWith('_derived_energy_') || key.startsWith('_derived_heat_')) {
         const isEnergy  = key.startsWith('_derived_energy_');
         const safeLabel = key.slice(isEnergy ? '_derived_energy_'.length : '_derived_heat_'.length);
-        // Same transform ComputedStats.js uses to BUILD this key from the
-        // row's label — matching it here, rather than trying to reverse
-        // it, is what makes this lookup correct instead of guessing.
+        // same key ComputedStats builds from this label
         const row = table.find(r => r.label && r.label.replace(/[^a-zA-Z0-9]/g, '_') === safeLabel);
         if (!row) return [];
         const formula = isEnergy ? row.energyFormula : row.heatFormula;
@@ -1298,6 +1191,7 @@ function _resolveComputedKeyDependencies(key, attrDefs) {
     return []; // not a formula-backed key (_ws_/_total*/_outfitMass) — caller doesn't filter these
 }
 
+// drop computed stats this item doesn't use. Called by: getShipStats, getOutfitStats, getOutfitDetailRows
 function filterComputedStats(computed, effectiveAttrKeys, isShip, attrDefs) {
     if (!computed || !effectiveAttrKeys || !attrDefs) return computed;
 
@@ -1311,12 +1205,7 @@ function filterComputedStats(computed, effectiveAttrKeys, isShip, attrDefs) {
         const matchingRefs = refs.filter(a => effectiveAttrKeys.has(a));
         if (matchingRefs.length === 0) { delete computed[k]; continue; }
 
-        // Ship-function keys only, and only for outfits (isShip === false):
-        // a pure outfit incidentally sharing ONE attribute name with a
-        // ship-aggregate function (Drag, RequiredCrew, InertialMass, ...)
-        // shouldn't make that function "relevant" to the outfit — require
-        // at least 2 matching reads when the function reads more than 1
-        // attribute, same threshold as before.
+        // skip ship-only functions on outfits that just happen to share an attribute
         if (!isShip && k.startsWith('_fn_') && matchingRefs.length < 2 && refs.length > 1) {
             delete computed[k]; continue;
         }
@@ -1324,23 +1213,14 @@ function filterComputedStats(computed, effectiveAttrKeys, isShip, attrDefs) {
     return computed;
 }
 
-// Turns a raw window.ComputedStats output map into classified rows.
-// `sectionOverride`, if given, forces every row into one section (used by
-// the per-outfit/per-weapon detail blocks); otherwise each key routes to
-// its own canonical AttributeSections bucket.
+// ComputedStats map → rows (sectionOverride puts them all in one section). Called by: getOutfitDetailRows, getWeaponDetailRows, getShipStats, getOutfitStats
 function getComputedStatRows(attrDefs, computed, sectionOverride) {
     if (!computed) return [];
     const rows = [];
     for (const [k, v] of Object.entries(computed)) {
         if (COMPUTED_SKIP.has(k)) continue;
         if (v === null || v === undefined) continue;
-        // Only NaN is excluded here — that means "couldn't be computed at
-        // all". A value that computes to exactly 0 (or negative) is kept:
-        // relevance (does this ship/outfit even reference this stat at
-        // all?) is already decided upstream by filterComputedStats(), on
-        // attribute PRESENCE, not on the resulting value — so a stat this
-        // item genuinely has, that happens to net to zero or below from
-        // combined effects, still shows.
+        // only drop NaN (couldn't be worked out); 0 and negatives are real values
         if (typeof v === 'number' && isNaN(v)) continue;
         if (typeof v === 'object') continue;
         const isComputedKey = k.startsWith('_fn_') || k.startsWith('_derived_') || k.startsWith('_sys_') ||
@@ -1369,13 +1249,12 @@ function getComputedStatRows(attrDefs, computed, sectionOverride) {
     return rows;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  PER-DIVISOR EFFICIENCY RATIOS (outfits only)
-// ─────────────────────────────────────────────────────────────────────────
+// ── per-ton / per-space ratios (outfits only) ──
 
 // "per ton of X" divisors: every capacity attribute the parser knows
 // (gameKeys.js — Ship::FinishLoading's can't-be-negative list) plus mass.
 const _PER_DIVISOR_FALLBACK = ['outfit space', 'cargo space', 'weapon capacity', 'engine capacity'];
+// keys an outfit has a ratio for. Called by: pushRatios
 function perDivisorKeys() {
     const caps = window.GameKeys ? window.GameKeys.capacityKeys(_PER_DIVISOR_FALLBACK) : _PER_DIVISOR_FALLBACK;
     return [...caps, 'mass'].map(key => ({ key, label: key.replace(/\b\w/g, c => c.toUpperCase()) }));
@@ -1383,12 +1262,14 @@ function perDivisorKeys() {
 const PER_DIVISOR_EXCLUDE_NONWEAPON = new Set([]);
 const PER_DIVISOR_EXCLUDE_WEAPON    = new Set([]);
 
+// value per ton/space, sign-aware. Called by: pushRatios, generalSorterStuff
 function _signedPerDivisor(numerator, ratio) {
     if (ratio === 0 || isNaN(ratio)) return ratio;
     const mag = Math.abs(ratio);
     return numerator < 0 ? -mag : mag;
 }
 
+// unit for a ratio row. Called by: _isRatioEligible
 function _effectiveUnit(attrDefs, key) {
     if (key.startsWith('_fn_')) {
         const fnDef = attrDefs?.shipFunctions?.[key.slice(4)];
@@ -1401,6 +1282,7 @@ function _effectiveUnit(attrDefs, key) {
     return getAttrRecord(attrDefs, key)?.displayUnit ?? '';
 }
 
+// is this row worth a ratio? Called by: pushRatios
 function _isRatioEligible(attrDefs, key, excludeSet) {
     if (excludeSet.has(key)) return false;
     const rec = getAttrRecord(attrDefs, key);
@@ -1409,9 +1291,10 @@ function _isRatioEligible(attrDefs, key, excludeSet) {
     return unit !== '%' && unit !== '%/s';
 }
 
-// item: a flat outfit object. weaponProfile: getOutfitWeaponProfile() result, or null.
+// cost, mass, space … ratios for an outfit. Called by: getOutfitStats
 function getEfficiencyRatioRows(attrDefs, item, weaponProfile) {
     const rows = [];
+    // add the ratio rows. Called by: getEfficiencyRatioRows
     const pushRatios = (section, numKey, numLabel, numVal, excludeSet) => {
         if (typeof numVal !== 'number' || !numVal || isNaN(numVal)) return;
         if (!_isRatioEligible(attrDefs, numKey, excludeSet)) return;
@@ -1463,9 +1346,7 @@ function getEfficiencyRatioRows(attrDefs, item, weaponProfile) {
     return rows;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  STACKING NOTES
-// ─────────────────────────────────────────────────────────────────────────
+// notes on how this outfit stacks with copies of itself. Called by: getOutfitStats
 
 function getStackingNotes(attrDefs, item) {
     const notes = [];
@@ -1477,12 +1358,9 @@ function getStackingNotes(attrDefs, item) {
     return notes;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  TOP-LEVEL ORCHESTRATORS
-// ─────────────────────────────────────────────────────────────────────────
+// ── the main entry points ──
 
-// Full stat resolution for a ship or variant.
-// opts: { includeOutfits: bool (default true), pluginId }
+// every row for a ship or variant (opts: includeOutfits, pluginId). Called by: AttributeDisplay, CompareDisplay, shipBuilder
 function getShipStats(item, attrDefs, pluginId, opts) {
     opts = opts || {};
     const includeOutfits = opts.includeOutfits !== false;
@@ -1534,15 +1412,7 @@ function getShipStats(item, attrDefs, pluginId, opts) {
     };
 }
 
-// One pass shared by everything that shows ship stats:
-//  • a computed row that landed in a catch-all section ("Special", "Derived
-//    Stats", "Other") goes where an attribute of the same name would;
-//  • the same stat arriving twice (raw + computed copy, "Required crew" /
-//    "Required Crew", "Hull DPS" twice) is shown once — the first wins, and raw
-//    attributes come first;
-//  • a computed row with exactly the same value as another computed row in its
-//    section is the same thing under another name ("Max Heat" = "Total Heat
-//    Capacity").
+// move stray computed rows to their section and drop duplicates. Called by: getShipStats, shipBuilderStats._shipRows
 function tidyRows(attrDefs, rows) {
     const norm = l => String(l).toLowerCase().replace(/[^a-z0-9]/g, '');
     const seen = new Set(), seenValue = new Set(), out = [];
@@ -1566,7 +1436,7 @@ function tidyRows(attrDefs, rows) {
     return out;
 }
 
-// Full stat resolution for a standalone outfit.
+// every row for an outfit. Called by: AttributeDisplay, CompareDisplay
 function getOutfitStats(item, attrDefs, pluginId) {
     const skip = new Set([
         'name','display name','description','thumbnail','sprite','hardpointSprite',
@@ -1575,15 +1445,7 @@ function getOutfitStats(item, attrDefs, pluginId) {
         'spriteData','_internalId','_pluginId','_hash','governments',
         '_variantPluginId','licenses',
     ]);
-    // Outfits may store their gameplay attributes nested under
-    // item.attributes (same shape as ships) OR flat on the object itself,
-    // same ambiguity handled everywhere else in this file (see
-    // buildEffectiveAttrs, computeOutfitContributions, getOutfitDetailRows).
-    // Reading `item` directly here — the previous behaviour — silently
-    // dropped every attribute whenever the nested shape was used, since
-    // `typeof item.attributes === 'object'` caused getRawAttributeRows to
-    // skip it entirely, leaving only whatever weapon/computed data could
-    // be derived from item's own top-level fields.
+    // outfit attributes can be nested under .attributes or flat — use whichever has them
     const src = (item.attributes && Object.keys(item.attributes).length)
         ? { ...item, ...item.attributes } : item;
     const rows = getRawAttributeRows(attrDefs, src, { skip });
@@ -1623,9 +1485,7 @@ function getOutfitStats(item, attrDefs, pluginId) {
         }
     }
 
-    // Same nested-vs-flat ambiguity as above — use `src` (the flattened
-    // view) so ratios and computed stats see the real gameplay attributes
-    // (mass, outfit space, etc.) regardless of which shape this outfit uses.
+    // use the flattened copy so ratios see the real attributes
     const efficiencyRows = getEfficiencyRatioRows(attrDefs, src, weaponProfile);
 
     if (window.ComputedStats?.isReady()) {
@@ -1644,7 +1504,7 @@ function getOutfitStats(item, attrDefs, pluginId) {
     return { isShip: false, rows, weaponChain, weaponProfile, efficiencyRows, stackingNotes };
 }
 
-// Full stat resolution for an effect item.
+// every row for an effect. Called by: AttributeDisplay
 function getEffectStats(item, attrDefs) {
     const skip = new Set(['name', 'description', 'sprite', 'spriteData']);
     const rows = getRawAttributeRows(attrDefs, item, { skip });
@@ -1666,9 +1526,7 @@ function getEffectStats(item, attrDefs) {
     return { isShip: false, rows, doseRows };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  PUBLIC EXPORT
-// ─────────────────────────────────────────────────────────────────────────
+// ── window.ItemStats ──
 
 window.ItemStats = {
     SOURCE,

@@ -1,34 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════
-//  dataLoader.js  —  Endless Sky Ship Builder / Data Viewer
-//
-//  Loads all plugin data from GitHub, manages active plugin
-//  selection, and synthesises a "Local Builds" pseudo-plugin
-//  from localStorage saved ships.
-//
-//  Public API on window.DataLoader:
-//    .load()                      → Promise — start/await loading
-//    .onReady(fn)                 → register ready callback
-//    .isReady()                   → boolean
-//    .getPlugins()                → all loaded plugins
-//    .getActivePlugins()          → ordered active outputNames
-//    .setActivePlugins(arr)       → set active set, fires 'pluginsChanged'
-//    .initDefaultPlugins()        → activate default (endless-sky) + local
-//    .getAllShips()               → ships from active plugins + local builds
-//    .getAllOutfits()             → outfits from active plugins
-//    .getAllEffects()             → effects from active plugins
-//    .getAttrKeys()              → sorted attribute keys from attrDefs
-//    .getAttrDef(key)            → single attribute definition
-//    .getAttrHint(key)           → "unit · stacking" string
-//    .refreshLocalBuilds()       → re-read localStorage fleet + fire pluginsChanged
-//    ._refreshLocalOnly()        → re-read localStorage fleet silently (no event)
-//
-//  Custom events fired on document:
-//    'dataLoaded'      — all remote data fetched
-//    'dataLoadError'   — fetch failed
-//    'pluginsChanged'  — active plugin selection changed
-// ═══════════════════════════════════════════════════════════
+// Loads ships, outfits, effects and attribute definitions for the selected plugins, plus Local Builds and other pilots' shared ships. Used by most pages.
 
 (function () {
 
@@ -38,7 +10,7 @@ const LOCAL_KEY  = 'es_ship_builder_v4';
 const LOCAL_PLUGIN_ID = '__local_builds__';
 const DEFAULT_PLUGIN  = 'official-game/endless-sky';
 
-// ── Internal state ─────────────────────────────────────────
+// ── state ──
 let _ready          = false;
 let _loading        = false;
 let _callbacks      = [];
@@ -47,14 +19,7 @@ let _activePlugins  = [];
 window.allData  = window.allData  || {};
 window.attrDefs = window.attrDefs || null;
 
-// ── Attribute value coercion ───────────────────────────────
-//
-// shipBuilder.js stores ALL attribute values as strings in localStorage
-// (e.g. shields: "400", not shields: 400). battleSim.js and other consumers
-// expect numbers. This helper converts a flat attributes object so every
-// value that looks like a plain number becomes one, while genuine string
-// values (e.g. category: "Light Warship") stay as strings.
-// Nested objects (licenses, weapon) are left untouched.
+// builder designs store numbers as text ("400") — turn them back into numbers
 
 function _coerceAttrs(attrs) {
     if (!attrs || typeof attrs !== 'object') return {};
@@ -74,14 +39,7 @@ function _coerceAttrs(attrs) {
     return out;
 }
 
-// ── Parse outfit map from raw localStorage ship data ───────
-//
-// sbSave() always writes outfits as a plain object (map):
-//   { "Hyperdrive": { count: 1, pluginId: "..." }, ... }
-// sbLoad() converts this back to an array for shipBuilder's UI.
-// _buildLocalPlugin reads directly from localStorage, so it always
-// sees the map format. This helper normalises both formats into a
-// consistent { name → { count, pluginId } } map object.
+// saved outfit map { name: {count} } → { name: count }
 
 function _normaliseOutfitMap(outfits) {
     if (!outfits) return {};
@@ -117,20 +75,9 @@ function _normaliseOutfitMap(outfits) {
     return {};
 }
 
-// ── Local builds pseudo-plugin ─────────────────────────────
-//
-// FIX: The local plugin now carries an `outfits` index populated from
-// the outfit maps of all active remote plugins. This means
-// ComputedStats.getOutfitIndex(LOCAL_PLUGIN_ID) can find outfit
-// attribute data when accumulating stats for local ships.
-// Without this, every outfit lookup returned undefined and all
-// computed stats were zero.
+// ── Local Builds: your own designs as a plugin ──
 
-// Shared by both Local Builds and Public Builds — a saved ship (whether
-// from localStorage or a saved_ships.build_data row) is stored as this
-// same raw flat object; both callers normalize it identically so a ship
-// looks and behaves the same whether it's yours or someone else's public
-// build.
+// saved design (local or shared) → the same shape as a game ship. Called by: _buildLocalPlugin, _fetchPublicBuildPlugins, normaliseDesign
 function _normaliseSavedShip(s, extra) {
     const rawAttrs = Object.assign({}, s.attributes || {});
     if (s.mass != null && s.mass !== '') rawAttrs.mass = s.mass;
@@ -179,6 +126,7 @@ function _normaliseSavedShip(s, extra) {
     }, extra);
 }
 
+// Local Builds plugin from your fleet. Called by: _refreshLocalPlugin, getPlugins
 function _buildLocalPlugin() {
     let fleet = [];
     try {
@@ -188,10 +136,7 @@ function _buildLocalPlugin() {
 
     const ships = fleet.map(s => _normaliseSavedShip(s, { _isLocalBuild: true, _localId: s.id }));
 
-    // Local Builds owns only your ship designs. (It used to copy in every
-    // outfit from every loaded plugin — including ones you'd switched off —
-    // which doubled outfit counts and leaked unselected plugins into
-    // searches. Outfit lookups now search the selected plugins directly.)
+    // designs only — no outfits copied in (that used to double the outfit count)
     return {
         sourceName:  'Local Builds',
         displayName: 'Local Builds',
@@ -204,16 +149,10 @@ function _buildLocalPlugin() {
     };
 }
 
-// ── Public builds pseudo-plugins ───────────────────────────────
-//
-// Each user who has at least one public ship becomes their OWN pseudo-
-// plugin, named after their username — not one shared "Public Builds"
-// bucket. This means the existing plugin picker (generalPluginStuff.js)
-// handles them as real, individually-selectable plugins with zero
-// changes: it already groups by sourceName and labels a single-plugin
-// group by that name directly, so sourceName = username is all it takes.
+// ── other pilots' public ships: one plugin per pilot ──
 const PUBLIC_PLUGIN_PREFIX = 'public:';
 
+// one plugin per pilot with public ships. Called by: _doLoad, ensurePluginLoaded
 async function _fetchPublicBuildPlugins() {
     const buckets = {};
     try {
@@ -256,11 +195,12 @@ async function _fetchPublicBuildPlugins() {
     return buckets;
 }
 
+// rebuild Local Builds. Called by: refreshLocalBuilds, _refreshLocalOnly, _doLoad
 function _refreshLocalPlugin() {
     window.allData[LOCAL_PLUGIN_ID] = _buildLocalPlugin();
 }
 
-// ── Helpers ─────────────────────────────────────────────────
+// selected plugins' data, Local Builds included. Called by: getActiveData, getActivePluginIds, getAllShips, getAllOutfits, getAllEffects
 function _activeData() {
     const result = {};
     for (const id of _activePlugins) {
@@ -273,11 +213,12 @@ function _activeData() {
     return result;
 }
 
+// fire a page event. Called by: plugin changes and load steps
 function _fireEvent(name, detail = {}) {
     document.dispatchEvent(new CustomEvent(name, { detail, bubbles: true }));
 }
 
-// ── Public API ──────────────────────────────────────────────
+// ── window.DataLoader ──
 window.DataLoader = {
 
     load() {
@@ -286,10 +227,7 @@ window.DataLoader = {
         return _doLoad();
     },
 
-    // Safety net: call this before switching to / displaying a plugin that
-    // might not have loaded yet (Phase A only loads what was already
-    // active, Phase B fills the rest in the background and may not have
-    // reached this one). Resolves instantly if it's already loaded.
+    // load a plugin now if it isn't yet (e.g. just switched on). Called by: pages before showing a plugin
     ensurePluginLoaded(outputName) { return ensurePluginLoaded(outputName); },
 
     onReady(fn) {
@@ -300,7 +238,7 @@ window.DataLoader = {
 
     isReady() { return _ready; },
 
-    // ── Plugin management ──────────────────────────────────
+    // ── plugin list and selection ──
     getPlugins() {
         const local = _buildLocalPlugin();
         const remote = Object.entries(window.allData)
@@ -333,14 +271,11 @@ window.DataLoader = {
     },
 
     getActivePlugins() { return [..._activePlugins]; },
-    /** A ship-builder design as a ship object other pages can use (e.g. the battle simulator). */
+    // a builder design as a ship other pages can use. Called by: battleSim
     normaliseDesign(design) { return _normaliseSavedShip(design, { _isLocalBuild: true }); },
-    /** { outputName: pluginData } for the selected plugins only (Local Builds included when on). */
+    // { plugin: data } for the selected plugins. Called by: ItemStats, AfStats, ComputedStats and most data readers
     getActiveData() { return _activeData(); },
-    /**
-     * Every id a selected plugin goes by: its output name plus the plugin_id
-     * ("Source/folder") used in internal ids and in location lists.
-     */
+    // every id a selected plugin goes by (output name and plugin_id). Called by: anything filtering by plugin
     getActivePluginIds() {
         const ids = new Set();
         for (const [name, p] of Object.entries(_activeData())) {
@@ -354,9 +289,7 @@ window.DataLoader = {
 
     async setActivePlugins(arr) {
         const withLocal = arr.includes(LOCAL_PLUGIN_ID) ? arr : [LOCAL_PLUGIN_ID, ...arr];
-        // Same safety net as generalPluginStuff.js's setActivePlugins —
-        // this is a separate call path (saveManager.js calls it directly),
-        // so it needs its own copy of the "load it if it's missing" check.
+        // same safety net as generalPluginStuff.setActivePlugins (saveManager calls this directly)
         await Promise.all(
             withLocal
                 .filter(id => id !== LOCAL_PLUGIN_ID)
@@ -373,9 +306,7 @@ window.DataLoader = {
     },
 
     async initDefaultPlugins() {
-        // Account preference takes priority when logged in; falls through
-        // to localStorage if signed out or nothing saved yet, so anonymous
-        // use still works exactly as before.
+        // account preference first, then this browser's
         let saved = null;
         if (window.EsAuth) {
             try { saved = await window.EsAuth.getActivePluginsPreference(); } catch (_) { /* fall through */ }
@@ -394,13 +325,7 @@ window.DataLoader = {
                 return;
             }
         }
-        // FIX: DEFAULT_PLUGIN is written in plugin_id format
-        // ("official-game/endless-sky"), but window.allData is keyed by
-        // output_name ("endless-sky") — those never matched, so this
-        // silently fell through to "whichever plugin happens to be
-        // first" instead of actually picking the base game. Match on
-        // sourceName instead, which is reliably "official-game" for the
-        // base game regardless of its output folder name.
+        // the default plugin is stored as a plugin_id but allData uses output names — match either
         const baseGameEntry = Object.values(window.allData).find(p =>
             p && p.outputName && (p.sourceName === 'official-game' || p.outputName === DEFAULT_PLUGIN)
         );
@@ -415,7 +340,7 @@ window.DataLoader = {
         _fireEvent('pluginsChanged', { active: [..._activePlugins] });
     },
 
-    // ── Data accessors (active plugins only) ──────────────
+    // ── data accessors (selected plugins only) ──
     getAllShips() {
         const ships = [];
         for (const [id, plugin] of Object.entries(_activeData())) {
@@ -451,19 +376,18 @@ window.DataLoader = {
         return effects;
     },
 
-    // Fire pluginsChanged so all listeners (generalPluginStuff, shipBuilder) refresh
+    // redraw everything after Local Builds changes. Called by: generalPluginStuff, shipBuilder.saveShip
     refreshLocalBuilds() {
         _refreshLocalPlugin();
         _fireEvent('pluginsChanged', { active: [..._activePlugins] });
     },
 
-    // Silent refresh — updates window.allData[LOCAL_PLUGIN_ID] WITHOUT firing
-    // pluginsChanged. Used by generalPluginStuff.js to avoid infinite event loops.
+    // update Local Builds quietly (no event, avoids loops). Called by: generalPluginStuff
     _refreshLocalOnly() {
         _refreshLocalPlugin();
     },
 
-    // ── Attribute helpers ──────────────────────────────────
+    // ── attribute helpers ──
     getAttrKeys() {
         if (!window.attrDefs || !window.attrDefs.attributes) return [];
         return Object.keys(window.attrDefs.attributes).sort();
@@ -492,30 +416,18 @@ window.DataLoader = {
     DEFAULT_PLUGIN,
 };
 
-// ── Persistence for active plugin selection ─────────────────
+// ── remembering the selected plugins ──
 const _ACTIVE_KEY = 'es_sb_active_plugins';
+// save the selected plugins in this browser. Called by: setActivePlugins, initDefaultPlugins
 function _saveActivePlugins() {
     try { localStorage.setItem(_ACTIVE_KEY, JSON.stringify(_activePlugins)); } catch(_) {}
 }
+// read the selected plugins from this browser. Called by: initDefaultPlugins, _doLoad
 function _loadActivePlugins() {
     try { return JSON.parse(localStorage.getItem(_ACTIVE_KEY)); } catch(_) { return null; }
 }
 
-// ── Remote data loader ───────────────────────────────────────
-//
-// Two phases:
-//   Phase A — fetch only the plugins the user actually has active
-//   (read from the same localStorage key initDefaultPlugins() uses),
-//   reconstruct them, and let the page render. This is what the user
-//   sees load.
-//   Phase B — everything else loads afterward, in the background,
-//   without blocking anything already on screen. Each plugin's bundle
-//   is cached independently (not as one giant blob), so if the user
-//   navigates to another page before Phase B finishes — which kills
-//   this background work entirely, since a page navigation is a fresh
-//   JS context — the next page just resumes from whatever's already
-//   cached and fetches only what it's still missing. No plugin is ever
-//   blocked waiting on a background process it can't see.
+// ── loading from Supabase: selected plugins first (A), the rest later in the background (B) ──
 
 function reconstructShip(row, outfitsByOwnerId) {
     const h  = row.hardpoints || {};
@@ -540,16 +452,16 @@ function reconstructShip(row, outfitsByOwnerId) {
         _internalId: row.internal_id,
     };
 }
+// database row → variant
 function reconstructVariant(row, outfitsByOwnerId) {
     const v = reconstructShip(row, outfitsByOwnerId);
     v.baseShip = row.base_ship_name;
     v._variantPluginId = row.variant_plugin_id;
     return v;
 }
+// database row → outfit
 function reconstructOutfit(row) {
-    // Note: outfits use non-underscore "pluginId"/"internalId" — matches
-    // the original JSON output's naming, kept as-is so nothing downstream
-    // that reads o.pluginId (vs. a ship's s._pluginId) silently breaks.
+    // outfits use pluginId/internalId (no underscore) — other code reads those names
     return {
         ...(row.attributes || {}),
         name: row.name, category: row.category, cost: row.cost, mass: row.mass,
@@ -557,6 +469,7 @@ function reconstructOutfit(row) {
         pluginId: row.plugin_id, internalId: row.internal_id,
     };
 }
+// database row → effect
 function reconstructEffect(row) {
     return {
         name: row.name, sprite: row.sprite, sound: row.sound,
@@ -569,17 +482,9 @@ function reconstructEffect(row) {
     };
 }
 
-/**
- * Fetches and reconstructs ONE plugin's ships/variants/outfits/effects.
- * A ship can equip an outfit defined by a *different* plugin (that's the
- * whole reason ship_outfits is a separate table) — so this doesn't just
- * filter outfits by this plugin's own id, it also resolves whichever
- * outfits this plugin's ships/variants actually reference, wherever
- * they're defined, via one small extra by-id lookup.
- */
-// One request for a plugin's whole catalog, or null if the database function
-// isn't installed yet (then the caller fetches table by table, as before).
+// one plugin's ships, variants, outfits and effects (plus outfits it borrows from other plugins)
 let _rpcCatalogMissing = false;
+// one plugin's catalog in one request (null if the function isn't installed). Called by: _fetchPluginBundleFresh
 async function _rpcCatalog(pluginId) {
     if (_rpcCatalogMissing) return null;
     try {
@@ -592,6 +497,7 @@ async function _rpcCatalog(pluginId) {
     } catch (_) { return null; }
 }
 
+// fetch one plugin from Supabase. Called by: _loadPluginBundle
 async function _fetchPluginBundleFresh(outputName, pluginRow) {
     const { fetchAllRows } = window.SupabaseHelpers;
     if (!pluginRow) {
@@ -599,9 +505,7 @@ async function _fetchPluginBundleFresh(outputName, pluginRow) {
     }
     const byPlugin = q => q.eq('plugin_id', pluginRow.plugin_id);
 
-    // Fast path: the whole catalog in ONE request (supabase/performance.sql,
-    // get_plugin_catalog). If that function isn't installed, fall back to
-    // fetching table by table below.
+    // fast path: ready-made file or get_plugin_catalog in one request, else table by table
     let shipRows, variantRows, ownOutfitRows, effectRows, shipOutfitRows, variantOutfitRows, crossPluginOutfitRows;
     const rpc = (window.Bundles && await window.Bundles.get('catalog', outputName)) || await _rpcCatalog(pluginRow.plugin_id);
     if (rpc) {
@@ -632,6 +536,7 @@ async function _fetchPluginBundleFresh(outputName, pluginRow) {
     }
 
     const outfitById = new Map([...ownOutfitRows, ...crossPluginOutfitRows].map(o => [o.id, o]));
+    // junction rows → outfit maps per ship/variant
     function buildOutfitMaps(junctionRows, ownerKey) {
         const byOwner = new Map();
         for (const row of junctionRows) {
@@ -656,6 +561,7 @@ async function _fetchPluginBundleFresh(outputName, pluginRow) {
     };
 }
 
+// one plugin, from the browser cache or Supabase. Called by: _doLoad, _backgroundFillRemainingPlugins, ensurePluginLoaded
 async function _loadPluginBundle(outputName, pluginRow) {
     const build = () => _fetchPluginBundleFresh(outputName, pluginRow);
     return window.EsCache
@@ -663,16 +569,11 @@ async function _loadPluginBundle(outputName, pluginRow) {
         : await build();
 }
 
-/** Phase B — loads whatever Phase A didn't, one plugin at a time, without
- * blocking. Only runs for as long as this page stays open; the per-plugin
- * cache is what carries progress forward if the user navigates away. */
+// Phase B: the other plugins, one at a time, only while idle. Called by: _doLoad
 async function _backgroundFillRemainingPlugins(pluginRows, alreadyLoaded) {
     const remaining = pluginRows.filter(p => !alreadyLoaded.has(p.output_name));
     if (!remaining.length) return;
-    // This is only a head start for switching plugins later (a plugin you
-    // switch on is loaded on demand anyway), so it must never slow the page
-    // down: skip it on slow or data-saving connections, wait until the page
-    // has settled, and only work while the browser is idle.
+    // only a head start — skipped on slow/data-saving connections, waits for idle
     const conn = navigator.connection || {};
     if (conn.saveData || /(^|-)2g|3g/.test(conn.effectiveType || '')) {
         console.log('[DataLoader] Background: skipped (slow or data-saving connection) — plugins load when you switch them on.');
@@ -695,13 +596,11 @@ async function _backgroundFillRemainingPlugins(pluginRows, alreadyLoaded) {
     _fireEvent('allPluginsLoaded', {});
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  ATTRIBUTE TABLES → window.attrDefs
-//  Inverse of attrDefsToRows() in attributeSync.js — keep the two in step.
-// ─────────────────────────────────────────────────────────────────────────
+// ── attribute tables → window.attrDefs ──
 
 const _DB_TO_LEVEL = { required: 'required', recommended: 'recommended', engine_derived: 'engineDerived' };
 
+// attribute tables → the attrDefs object. Called by: _loadAttrDefsFromTables
 function rebuildAttrDefsFromTables({ definitions, flags, badges, navFns, tooltips, calculations }) {
     const tooltipMap = {};
     for (const t of tooltips || []) tooltipMap[t.key] = t.tooltip;
@@ -753,6 +652,7 @@ function rebuildAttrDefsFromTables({ definitions, flags, badges, navFns, tooltip
     return out;
 }
 
+// attribute definitions from the attribute_* tables (null if empty). Called by: _doLoad
 async function _loadAttrDefsFromTables() {
     const { fetchAllRows } = window.SupabaseHelpers;
     const [definitions, flags, badges, navFns, tooltips, calculations] = await Promise.all([
@@ -769,6 +669,7 @@ async function _loadAttrDefsFromTables() {
 
 window.rebuildAttrDefsFromTables = rebuildAttrDefsFromTables;
 
+// the whole load. Called by: load, onReady
 async function _doLoad() {
     _loading = true;
     _fireEvent('dataLoadStart');
@@ -777,10 +678,7 @@ async function _doLoad() {
     _refreshLocalPlugin();
 
     try {
-        // 1 + 2 together — attribute definitions and the plugin list don't
-        // depend on each other, so ask for both at once. Attribute
-        // definitions only change when the parser runs, so they're cached in
-        // the browser (EsCache, checked against the data version).
+        // definitions and plugin list together (definitions cached in the browser)
         const { fetchAllRows } = window.SupabaseHelpers;
         const pluginRowsPromise = fetchAllRows('plugins', { orderBy: 'source_priority' });
         const loadAttrDefs = async () => {
@@ -802,21 +700,11 @@ async function _doLoad() {
         window.attrDefs = window.EsCache ? await window.EsCache.loadWithCache('attrDefs', loadAttrDefs) : await loadAttrDefs();
         if (window.attrDefs?.attributes) console.log(`[DataLoader] attrDefs ready (${Object.keys(window.attrDefs.attributes).length} attributes)`);
 
-        // 2 — The plugin list itself is small (~110 rows, no heavy JSON
-        // columns) — always cheap enough to fetch in full up front, so we
-        // know what exists and can decide what Phase A actually needs.
+        // the plugin list is small — always fetch it in full
         const pluginRows = await pluginRowsPromise;
         if (!pluginRows.length) throw new Error('No plugins found in Supabase');
 
-        // The picker (generalPluginStuff.js) reads plugin names from
-        // window.allData's keys, and only shows what's actually there —
-        // so without this, it'd only show whatever Phase A/B happened to
-        // have loaded so far, not every plugin that exists. A placeholder
-        // with empty arrays is enough for it to show up as selectable;
-        // Phase A/B/ensurePluginLoaded below replace it with real data
-        // the moment that plugin actually loads (they just assign over
-        // window.allData[outputName] wholesale, so this is never stale
-        // once real data arrives).
+        // placeholders so the picker lists every plugin, loaded or not
         for (const p of pluginRows) {
             if (!window.allData[p.output_name]) {
                 window.allData[p.output_name] = {
@@ -827,12 +715,7 @@ async function _doLoad() {
             }
         }
 
-        // 3 — Phase A: whichever plugins are already active — preferring
-        // the logged-in user's account preference over localStorage, so
-        // it follows them across devices — or a sensible default if
-        // nothing's saved anywhere yet. This is the ONLY thing standing
-        // between page load and the page being usable — everything else
-        // happens after.
+        // Phase A: the selected plugins (account preference first)
         let saved = null;
         if (window.EsAuth) {
             try { saved = await window.EsAuth.getActivePluginsPreference(); } catch (_) { /* fall through */ }
@@ -877,10 +760,7 @@ async function _doLoad() {
 
         _fireEvent('dataLoaded', { allData: window.allData, attrDefs: window.attrDefs });
 
-        // 4 — Phase B: fill in everything else in the background. Not
-        // awaited — the page is already usable at this point, this just
-        // keeps going quietly so switching to a plugin that wasn't in
-        // Phase A is instant (or close to it) if it finishes in time.
+        // Phase B in the background (not awaited)
         _backgroundFillRemainingPlugins(pluginRows, phaseANames).catch(err =>
             console.warn('[DataLoader] Background fill errored:', err)
         );
@@ -895,23 +775,13 @@ async function _doLoad() {
     }
 }
 
-/**
- * Safety net for code that needs a SPECIFIC plugin's data right now —
- * e.g. the user switches to a plugin that wasn't in Phase A and whose
- * background load (this page's or a previous page's) hasn't reached it
- * yet. Loads it directly in the foreground rather than waiting on
- * whatever background progress may or may not exist.
- */
+// load one specific plugin right now. Called by: generalPluginStuff and pages switching plugin
 async function ensurePluginLoaded(outputName) {
     if (outputName === LOCAL_PLUGIN_ID) return window.allData[LOCAL_PLUGIN_ID];
     if (window.allData[outputName]?.ships || window.allData[outputName]?.outfits) {
         return window.allData[outputName]; // already loaded, nothing to do
     }
-    // Public-build pseudo-plugins have no row in the plugins table (they're
-    // synthetic, built from saved_ships) — querying for one would find
-    // nothing and silently produce an empty bundle. These are normally
-    // already loaded eagerly during Phase A; this only matters if one
-    // became public after this page's load already ran.
+    // pilots' public ships aren't in the plugins table — load them separately
     if (outputName.startsWith(PUBLIC_PLUGIN_PREFIX)) {
         const buckets = await _fetchPublicBuildPlugins();
         Object.assign(window.allData, buckets);
@@ -929,29 +799,24 @@ async function ensurePluginLoaded(outputName) {
 
 })();
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  ShipNames — one way to show and search ship names everywhere.
-//  A ship with a "display name" (what the game shows, e.g. "Modified
-//  Carrier") is shown by that name, with its internal name ("Carrier
-//  (Alpha)") smaller and dimmer beside it. Searches match either.
-// ═══════════════════════════════════════════════════════════════════════════
+// ── ShipNames: show ships by display name, internal name dimmed ──
 (function () {
     const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const display = s => (s && (s.displayName || (s.attributes && s.attributes['display name']) || s['display name'])) || null;
     const ShipNames = {
-        /** The main name to show. */
+        // name to show. Called by: everywhere ships are listed
         label(s) { if (!s) return ''; const d = display(s); return d && d !== s.name ? d : (s.name || ''); },
-        /** The internal name when it differs from the label (else ''). */
+        // internal name if it differs, else ''
         internal(s) { if (!s) return ''; const d = display(s); return d && d !== s.name ? (s.name || '') : ''; },
-        /** "Display  internal" — for search haystacks. */
+        // "display internal" for searching
         text(s) { return `${ShipNames.label(s)} ${ShipNames.internal(s)}`.trim(); },
-        /** Does the ship match a search (name or display name)? */
+        // does the ship match a search (either name)?
         matches(s, q) {
             q = String(q || '').trim().toLowerCase();
             if (!q) return true;
             return ShipNames.text(s).toLowerCase().includes(q);
         },
-        /** HTML: display name, then the internal name small and dim. `wrap` escapes/highlights the main part. */
+        // display name with the internal name small and dim
         html(s, wrap) {
             const main = ShipNames.label(s), sub = ShipNames.internal(s);
             return `${wrap ? wrap(main) : esc(main)}${sub ? ` <span class="ship-realname" title="Internal name">${esc(sub)}</span>` : ''}`;
@@ -959,10 +824,9 @@ async function ensurePluginLoaded(outputName) {
     };
     window.ShipNames = ShipNames;
 
-    // OutfitNames — the same for outfits ("Tiny VLS" shows as "Vertical Launch
-    // Array (9)"). Works on an outfit object, or on just its internal name
-    // (looked up in the selected plugins).
+    // ── OutfitNames: the same for outfits (object or just a name) ──
     let idxKey = '', idx = new Map();
+    // outfit by internal name, selected plugins (cached)
     function outfitByName(name) {
         const data = (window.DataLoader && window.DataLoader.getActiveData) ? window.DataLoader.getActiveData() : (window.allData || {});
         const key = Object.keys(data).map(k => k + ':' + ((data[k].outfits || []).length)).join('|');

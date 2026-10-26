@@ -1,59 +1,6 @@
 'use strict';
 
-// ─── AttributeSections.js ─────────────────────────────────────────────
-//
-// SINGLE SOURCE OF TRUTH for grouping attribute keys into display sections.
-// Used by CompareDisplay.js, AttributeDisplay.js, and shipBuilderStats.js so
-// a given attribute always lands in the same bucket everywhere it's shown.
-//
-// DESIGN GOAL: minimise invented keyword lists. attrDefs.json (produced by
-// attributeParser.js) already encodes most of what we need as real signals
-// pulled straight from the Endless Sky C++ source, not guesses:
-//
-//   • rec.usedInNavFunctions   — this key is read by a ShipJumpNavigation::
-//                                 method (Calibrate, JumpFuel, etc). If it's
-//                                 populated at all, the key is Jump-domain,
-//                                 full stop — no pattern matching needed.
-//   • rec.isStatusResistance / isStatusResistanceCost
-//                                 — set directly from weapon.statusEffectDecay
-//                                 descriptors (resistKey / costKeys).
-//   • rec.isProtection / isStatusProtection
-//                                 — set directly from weapon.damageTypeDetails
-//                                 protectionKey + Outfit.cpp MINIMUM_OVERRIDES.
-//   • rec.isWeaponStat          — set from OutfitInfoDisplay's VALUE_NAMES /
-//                                 PERCENT_NAMES / OTHER_NAMES tables.
-//   • shipDisplay.capacityDisplay
-//                                 — the exact 5 capacity keys ShipInfoDisplay
-//                                 itself groups together (outfit/weapon/engine
-//                                 space, gun ports, turret mounts).
-//   • rec.usedInShipFunctions   — the real Ship:: method(s) that read the key.
-//                                 A method's own name already encodes its
-//                                 subsystem (MaxShields, CloakingSpeed,
-//                                 IdleHeat, TurnRate, RequiredCrew, Scan...),
-//                                 so we pattern-match the FUNCTION NAME, not
-//                                 attribute names — much higher precision,
-//                                 and it's one dictionary shared with steps
-//                                 below instead of three separate lists.
-//
-// NEW IN v3 — rec.area (attribute-area-classification.md):
-//   attributeParser.js now also computes a coarser, independent ~10-bucket
-//   classification (rec.area / rec.areaBadges) via deriveFrontendArea(),
-//   folding in evidence this file doesn't have access to on its own —
-//   notably data/ category co-occurrence (the strongest signal available:
-//   what an attribute is actually FOR in shipped content) and an Economy
-//   bucket (income/maintenance/operating-cost keys, via
-//   usedInOtherSystems containing "PlayerInfo::MaintenanceAndReturns").
-//
-//   classify() below keeps ALL of its existing fine-grained logic exactly
-//   as before — it already produces a BETTER-differentiated answer than
-//   rec.area's coarse buckets for anything it already recognises (e.g. it
-//   splits "Power, Heat & Life Support" into separate Shields & Hull /
-//   Energy / Heat sections, which rec.area deliberately does not). rec.area
-//   is consulted ONLY as a last-resort fallback, immediately before the
-//   final 'Other' catch-all, and ONLY for the two buckets this file had
-//   literally zero coverage for previously — Economy and Special/Flags —
-//   both of which used to silently land in 'Other'. See AREA_FALLBACK below.
-// ─────────────────────────────────────────────────────────────────────────
+// Decides which section (Shields & Hull, Engines …) every attribute goes in. Used by the Data Viewer, Compare and the builder.
 
 window.AttributeSections = (() => {
 
@@ -67,13 +14,7 @@ window.AttributeSections = (() => {
         'Licenses', 'Other',
     ];
 
-    // ── The one shared domain dictionary ──────────────────────────────────
-    // Reused against: (a) usedInShipFunctions entries, (b) the attribute's
-    // own key, (c) its tooltip text. Order = priority when multiple tokens
-    // could match (checked top to bottom, first hit wins). Heat is checked
-    // BEFORE Energy so compound keys like "heat generation"/"heat
-    // dissipation" land in Heat rather than being grabbed by Energy's
-    // "generation" token.
+    // words that point to a section — used on names, tooltips and function names
     const DOMAIN_WORDS = [
         ['Cloaking',       /cloak/i],
         ['Shields & Hull', /shield|hull/i],
@@ -87,6 +28,7 @@ window.AttributeSections = (() => {
     ];
 
 
+    // first section whose words appear in the text. Called by: explain, matchDomainWord, classifyComputedKey
     function _matchDomain(text) {
         if (!text) return null;
         for (const [section, re] of DOMAIN_WORDS) if (re.test(text)) return section;
@@ -94,41 +36,23 @@ window.AttributeSections = (() => {
     }
 
 
-    // Ship/outfit identity & economy fields with no dedicated engine
-    // subsystem of their own — everything else that doesn't match falls
-    // through to 'Other' rather than being force-fit here.
+    // cost, mass, category … that belong to no engine system
     const GENERAL_RE = /\b(mass|cost|category|series|index)\b/i;
 
-    // rec.area → this file's canonical section, for the last-resort
-    // fallback (see v3 note above). Only areas this file has NO existing
-    // equivalent-or-better bucket for are mapped — every other area value
-    // (Weapons, Movement & Engines, Scanners & Detection, Defense /
-    // Protection, Status Effects, Power/Heat/Life Support, General Outfit/
-    // Ship Stats, Custom / Modder-Defined) is deliberately left unmapped
-    // here: classify()'s own logic above already produces an equal-or-finer
-    // answer for those before this fallback is ever reached, so mapping
-    // them too would just risk silently overriding a more precise result
-    // in some edge case rather than only filling real gaps.
+    // the parser's rough area → our section, used only as a last resort
     const AREA_FALLBACK = {
         'Economy':          'Economy',
         'Special / Flags':  'Special',
     };
 
+    // the attribute's record in the definitions. Called by: explain, getFrontendArea
     function _getAttrRecord(attrDefs, key) {
         const attrs = attrDefs?.attributes || {};
         return attrs[key] || attrs[key?.toLowerCase()] || null;
     }
 
-    /**
-     * Classify a single attribute key into its canonical display section.
-     * @param {object} attrDefs - parsed attrDefs.json (window.attrDefs)
-     * @param {string} key - attribute key, e.g. "shield generation"
-     * @param {object} [overrides] - optional { key: sectionName } escape hatch
-     *   for the rare attribute nothing else can resolve. Keep this short —
-     *   it's a pressure release, not the primary mechanism.
-     */
-    // Lists the parser read out of the game's own source, cached per attrDefs.
     let _structCache = { defs: null };
+    // lists read from the game's code: motion physics, energy/heat table, capacity list (cached). Called by: explain
     function _structure(attrDefs) {
         if (_structCache.defs === attrDefs) return _structCache;
         const refs = text => [...String(text || '').matchAll(/\[([^\]]+)\]/g)].map(m => m[1]);
@@ -148,20 +72,8 @@ window.AttributeSections = (() => {
         return _structCache;
     }
 
-    /**
-     * Which section an attribute belongs in, and WHY — evidence from the game
-     * first, the attribute's name only as a fallback:
-     *
-     *   1. the game's motion physics / jump navigation code
-     *   2. the parser's flags (resistance, protection, yes/no, weapon stat)
-     *   3. the game's own display tables — its energy/heat table (the row it
-     *      sits in and its energy/heat column, read with the section vocabulary)
-     *      and its capacity list (likewise, by the game's own label)
-     *   4. fallback: the attribute's name, then its tooltip, then the game
-     *      functions that read it, then the parser's rough area
-     *
-     * → { section, reason }
-     */
+    // which section an attribute goes in, and why: game evidence first, its name only as a fallback.
+    // Called by: classify, AttributeDisplay.rowToHtml
     function explain(attrDefs, key, overrides) {
         if (overrides && overrides[key]) return { section: overrides[key], reason: 'override' };
         const k = String(key || '').toLowerCase();
@@ -221,14 +133,12 @@ window.AttributeSections = (() => {
         return is('Other', 'no information');
     }
 
+    // just the section name. Called by: ItemStats, AttributeDisplay, groupKeys and anything else that sorts attributes
     function classify(attrDefs, key, overrides) {
         return explain(attrDefs, key, overrides).section;
     }
 
-    /**
-     * Group every key of an attrs-like object { key: value } into
-     * { sectionName: [key, key, ...] } using classify().
-     */
+    // { section: [keys] } for an attributes object. Called by: anything grouping a whole ship's attributes
     function groupKeys(attrDefs, attrsObj, overrides) {
         const groups = {};
         for (const key of Object.keys(attrsObj || {})) {
@@ -238,70 +148,32 @@ window.AttributeSections = (() => {
         return groups;
     }
 
-    /** Sort section names per SECTION_ORDER; unknowns appended alphabetically. */
+    // section names in display order (unknown ones last, A–Z). Called by: AttributeDisplay.renderSectionMap, renderAttributesTabEnhanced, shipBuilder.sbAttrGroups, shipBuilderStats._tabEverything
     function orderSections(sectionNames) {
         const known  = SECTION_ORDER.filter(s => sectionNames.includes(s));
         const extras = sectionNames.filter(s => !SECTION_ORDER.includes(s)).sort();
         return [...known, ...extras];
     }
 
-    /**
-     * Convenience for consumers (e.g. shipBuilderStats.js) that want a "tab"
-     * made of several canonical sections merged together, instead of their
-     * own separate keyword-token list. Returns every key in attrsObj whose
-     * classify() result is one of `sectionNames`.
-     */
+    // keys from several sections merged into one list. Called by: shipBuilderStats
     function keysInSections(attrDefs, attrsObj, sectionNames, overrides) {
         const wanted = new Set(sectionNames);
         return Object.keys(attrsObj || {})
             .filter(key => wanted.has(classify(attrDefs, key, overrides)));
     }
 
-    /** Public access to the domain-word matcher, for callers that need to
-     * classify free text (a function name, a display label) rather than a
-     * real attribute key — e.g. AttributeDisplay.js placing a computed stat
-     * next to the raw attributes it's related to. Returns a section name or
-     * null if nothing matched. */
+    // the word matcher, for free text (a function name, a label). Called by: ItemStats.calcDerivedStats
     function matchDomainWord(text) {
         return _matchDomain(text);
     }
 
-    /**
-     * Public access to the raw parser-derived area/badges for a key, for
-     * callers that want the coarser attribute-area-classification.md
-     * taxonomy directly (e.g. a simpler alternate view) rather than this
-     * file's finer-grained sections. Returns { area, areaBadges } — area
-     * may be null if the parser left it unclassified (see attributeParser.js
-     * deriveFrontendArea's notes on rule 9 being intentionally skipped).
-     */
+    // the parser's raw area and badges for a key
     function getFrontendArea(attrDefs, key) {
         const rec = _getAttrRecord(attrDefs, key);
         return { area: rec?.area ?? null, areaBadges: rec?.areaBadges ?? [] };
     }
 
-    /**
-     * Classify a COMPUTED stat key (as produced by ComputedStats.js / the
-     * calcDerivedStats helpers) into the same canonical section its driving
-     * raw attribute(s) belong to — so e.g. the computed "Max Shields" value
-     * lands next to the raw "shields" / "shield generation" attributes
-     * instead of in a separate undifferentiated "Derived Stats" pile.
-     *
-     * Priority:
-     *   1. _fn_<ShipFunctionName>       — classify() each attribute the real
-     *                                      Ship:: function reads; first
-     *                                      non-'Other' result wins. Falls
-     *                                      back to matching the function's
-     *                                      own name (e.g. "MaxShields").
-     *   2. _derived_energy_ / _derived_heat_ — always 'Energy' (that's what
-     *                                      the prefix means).
-     *   3. _derived_<var>               — classify() the attributes referenced
-     *                                      by that intermediate var's formula.
-     *   4. _sys_*                       — system-aware formulas (solar
-     *                                      collection, ramscoop) → 'Energy'.
-     *   5. _ws_* / _ammo_* / *dps*      — 'Weapon DPS'.
-     *   6. _outfitMass / _totalOutfitCost / _totalOutfits → 'General'.
-     *   7. Fallback: domain-word match on the key text, else 'Derived Stats'.
-     */
+    // section for a calculated stat (_fn_…, _ws_… keys), going by the attributes behind it. Called by: ItemStats.calcDerivedStats, getComputedStatRows
     function classifyComputedKey(attrDefs, key) {
         if (!key) return 'Derived Stats';
 
