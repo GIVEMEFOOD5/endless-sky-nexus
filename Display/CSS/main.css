@@ -4707,3 +4707,7 @@ body select:not([multiple]):not([size]) { background-color: var(--c-surface-2); 
 .home-tool:hover, .home-tool:focus-visible { border-color: var(--c-accent); outline: none; }
 .home-tool__icon { font-size: 1.6rem; line-height: 1.2; }
 .home-tool__text { display: block; font-size: 0.86rem; color: var(--c-text-dim); margin-top: 3px; line-height: 1.45; }
+
+/* "Built by GIVEMEFOOD5 …" line at the bottom of every page */
+.site-credit { text-align: center; font-size: 0.8rem; color: var(--c-text-dim); padding: 18px 16px calc(18px + env(safe-area-inset-bottom, 0px)); }
+.home-credit { font-size: 0.9rem; margin-top: 6px; }

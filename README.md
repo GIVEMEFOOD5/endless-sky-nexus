@@ -1,5 +1,7 @@
 # Endless Sky Nexus
 
+> Set up and built by **GIVEMEFOOD5**, with some assistance from AI assistants.
+
 Free fan-made tools for the space game [Endless Sky](https://endless-sky.github.io/):
 ship & outfit database, ship builder with auto-fit, battle simulator, galaxy map,
 mission browser and save editor — for the base game and community plugins.
