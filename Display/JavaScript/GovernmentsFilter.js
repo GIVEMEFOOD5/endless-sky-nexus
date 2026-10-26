@@ -2,12 +2,11 @@ let governmentFilterExpanded = false;
 let lastGovernmentData = [];
 let savedGovernmentFilterState = {};
 
+// governments for an item
 function getGovernmentsForItem(item) {
     if (!item) return [];
     const governments = new Set();
-    // The parser stores who flies / sells an item as a "Governments" list in its
-    // locations ({ pluginId: { Governments: [...] } }) — read that, for the
-    // selected plugins only.
+    // who flies / sells an item comes from its locations ("Governments" list)
     const locs = item.locations || (item.attributes && item.attributes.locations);
     if (typeof item.governments !== 'object' && locs && typeof locs === 'object') {
         const ids = window.DataLoader && window.DataLoader.getActivePluginIds ? window.DataLoader.getActivePluginIds() : null;
@@ -42,10 +41,12 @@ function getGovernmentsForItem(item) {
     return [...governments];
 }
 
+// clean a government name
 function normalizeGovernmentName(name) {
     return name.replace(/\s*\(.*?\)\s*$/, '').trim();
 }
 
+// every government on the items
 function extractGovernments(data) {
     const governments = new Set();
 
@@ -62,6 +63,7 @@ function extractGovernments(data) {
     return Array.from(governments).sort();
 }
 
+// government tick boxes
 function populateGovernmentFilters(data) {
     lastGovernmentData = data;
 
@@ -109,6 +111,7 @@ function populateGovernmentFilters(data) {
     });
 }
 
+// ticked governments
 function getSelectedGovernments() {
     const checkboxes = document.querySelectorAll('#governmentFilterOptions input[type="checkbox"]');
 
@@ -123,6 +126,7 @@ function getSelectedGovernments() {
     return selected;
 }
 
+// does an item match?
 function itemMatchesGovernmentFilter(item, selected) {
     if (selected.length === 0) return true;
     // the same governments the filter lists for this item (selected plugins only)
@@ -130,12 +134,14 @@ function itemMatchesGovernmentFilter(item, selected) {
     return selected.some(g => govs.has(normalizeGovernmentName(String(g).trim())));
 }
 
+// untick all
 function clearGovernmentFilters() {
     savedGovernmentFilterState = {};
     const checkboxes = document.querySelectorAll('#governmentFilterOptions input[type="checkbox"]');
     checkboxes.forEach(cb => { cb.checked = false; });
 }
 
+// show/hide the government filter
 function governmentFilterDisplay() {
     const filterOptions = document.getElementById('governmentFilterOptions');
     const filterTitle = document.getElementById('governmentFilterTitle');

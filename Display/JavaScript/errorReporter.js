@@ -1,18 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  errorReporter.js — tells you when something breaks in a visitor's browser
-//
-//  Loaded first on every page. Catches uncaught errors, failed promises and
-//  console.error() calls, and adds a row to Supabase's `client_errors` table
-//  (supabase/client_errors.sql — anyone may add, only admins may read).
-//
-//  Careful by design:
-//    • at most 5 reports per page visit, and each different message only once
-//    • ignores browser-extension errors, other sites' scripts and known noise
-//    • nothing personal: page, error, stack, browser type, site version
-//    • off on localhost/codespaces and in automated tests
-// ═══════════════════════════════════════════════════════════════════════════
+// Sends errors from visitors' browsers to Supabase (client_errors) — a few per visit, no personal data, off locally and in tests.
 
 (function () {
   const MAX_PER_VISIT = 5;
@@ -30,8 +18,10 @@
   let sent = 0, flushing = false;
 
   const page = (location.pathname.split('/').pop() || 'index.html').slice(0, 200);
+  // shorten text
   const clip = (s, n) => (s == null ? null : String(s).slice(0, n));
 
+  // queue one error
   function report(kind, message, extra = {}) {
     if (!enabled || sent + queue.length >= MAX_PER_VISIT) return;
     message = clip(message || 'Unknown error', 2000);
@@ -49,7 +39,7 @@
     flush();
   }
 
-  // Wait for the Supabase client (it loads later on the page), then send.
+  // wait for the Supabase client, then send
   async function flush(tries = 0) {
     if (flushing || !queue.length) return;
     const sb = window.supabaseClient;

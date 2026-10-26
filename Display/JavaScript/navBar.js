@@ -1,22 +1,21 @@
-/* ═══════════════════════════════════════════════════════════════
-   navBar.js  —  Endless Sky Data Viewer  |  Top Navigation Logic
-   ═══════════════════════════════════════════════════════════════ */
+// The navigation bar on every page: dropdowns, mobile drawer, active link, login and account widget.
 
 (function () {
   'use strict';
 
-  /* ── Helpers ────────────────────────────────────────────────── */
+  // ── helpers ──
   function isDrawerOpen () {
     return document.querySelector('.es-nav__drawer') &&
            document.querySelector('.es-nav__drawer').classList.contains('nav-drawer-open');
   }
 
-  /* ── 1. Desktop dropdowns ───────────────────────────────────── */
+  // ── desktop dropdowns ──
   function closeAllDropdowns () {
     document.querySelectorAll('.es-nav__dropdown.open')
       .forEach(el => el.classList.remove('open'));
   }
 
+  // keep a dropdown on screen
   function positionDropdown (dd) {
     const toggle = dd.querySelector('.es-nav__dropdown-toggle');
     const menu   = dd.querySelector('.es-nav__dropdown-menu');
@@ -57,7 +56,7 @@
     }
   });
 
-  /* ── 2. Mobile hamburger ────────────────────────────────────── */
+  // ── mobile menu button ──
   const hamburger = document.querySelector('.es-nav__hamburger');
   if (hamburger) {
     hamburger.addEventListener('click', function (e) {
@@ -81,7 +80,7 @@
     });
   }
 
-  /* ── 3. Mobile drawer — flat list (no nested dropdowns) ─────── */
+  // ── mobile drawer (flat list) ──
   function buildDrawer () {
     const drawer = document.querySelector('.es-nav__drawer');
     if (!drawer) return;
@@ -125,7 +124,7 @@
     drawer.appendChild(frag);
   }
 
-  /* ── 4. Active link highlighting ────────────────────────────── */
+  // ── highlight the current page ──
   function markActive () {
     const page = location.pathname.split('/').pop().replace(/\.html$/i, '').toLowerCase();
 
@@ -151,21 +150,18 @@
     });
   }
 
-  /* ── Init ───────────────────────────────────────────────────── */
+  // ── start ──
   buildDrawer();
   markActive();
 
-  /* ── Account widget ─────────────────────────────────────────────
-     Waits for window.EsAuth to exist rather than assuming exact script
-     order between pages — auth.js/supabaseClient.js are expected to
-     load early on every page, but this degrades gracefully (just
-     doesn't show the widget) if they're missing rather than erroring. */
+  // ── account widget ──
   function waitForAuth(retriesLeft) {
     if (window.EsAuth) { initAccountWidget(); return; }
     if (retriesLeft <= 0) return; // no auth.js on this page — nothing to do
     setTimeout(function () { waitForAuth(retriesLeft - 1); }, 100);
   }
 
+  // set up the account widget
   function initAccountWidget() {
     var mount    = document.getElementById('es-nav-account');
     var overlay  = document.getElementById('es-nav-auth-overlay');
@@ -175,6 +171,7 @@
     var signupForm = document.getElementById('es-nav-signup-form');
     if (!mount || !overlay || !signinForm || !signupForm) return;
 
+    // open the login / sign-up window
     function openModal(mode) {
       setMode(mode || 'signin');
       overlay.classList.add('active');
@@ -184,6 +181,7 @@
     // Lets other files (e.g. shipBuilder.js's "save to account" flow)
     // trigger the login modal directly rather than duplicating it.
     window.openAuthModal = openModal;
+    // close it
     function closeModal() {
       overlay.classList.remove('active');
       signinForm.reset();
@@ -192,6 +190,7 @@
       setFieldError('signup', '');
       setUsernameHint('', '');
     }
+    // login or sign-up mode
     function setMode(mode) {
       tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.tab === mode); });
       signinForm.style.display = mode === 'signin' ? 'block' : 'none';
@@ -212,6 +211,7 @@
       if (e.key === 'Escape' && overlay.classList.contains('active')) closeModal();
     });
 
+    // error under a field
     function setFieldError(form, message, isSuccess) {
       var box = document.getElementById('es-nav-' + form + '-error');
       if (!box) return;
@@ -219,6 +219,7 @@
       box.innerHTML = '<div class="' + (isSuccess ? 'auth-form-success' : 'auth-form-error') + '">' + message + '</div>';
     }
 
+    // username hint
     function setUsernameHint(text, kind) {
       var hint = document.getElementById('es-nav-signup-username-hint');
       if (!hint) return;
@@ -226,6 +227,7 @@
       hint.className = 'auth-field-hint' + (kind ? ' auth-field-hint--' + kind : '');
     }
 
+    // button busy state
     function setLoading(form, loading, defaultLabel) {
       var btn = form.querySelector('button[type="submit"]');
       if (!btn) return;
@@ -252,12 +254,7 @@
       }, 350);
     });
 
-    // Mobile: the top-bar widget hides at ≤600px (see main.css) since
-    // there's no room for it alongside the brand and hamburger. This is
-    // its replacement inside the drawer instead — appended now rather
-    // than in the static HTML, so it lands AFTER the flattened nav
-    // links (buildDrawer() already ran before initAccountWidget() is
-    // reached, so appending here puts it at the bottom, not the top).
+    // on phones the top-bar widget hides; the drawer has its own
     var drawer = document.querySelector('.es-nav__drawer');
     var drawerMount = null;
     if (drawer) {
@@ -267,6 +264,7 @@
       drawer.appendChild(drawerMount);
     }
 
+    // logged-out widget
     function renderSignedOut() {
       mount.innerHTML = '<button type="button" class="es-nav__link" id="es-nav-login-btn">👤 Log in</button>';
       document.getElementById('es-nav-login-btn').addEventListener('click', function () { openModal('signin'); });
@@ -281,10 +279,9 @@
       scheduleNavOverflowCheck();
     }
 
+    // logged-in widget
     function renderSignedIn(user, profile) {
-      // Text label again ("Log out"), but still no username shown in the
-      // top bar itself — that stays in the drawer only, where there's
-      // room for it.
+      // "Log out" text, no username in the top bar
       mount.innerHTML = '<button type="button" class="es-nav__link" id="es-nav-account-btn">👤 Log out</button>';
       document.getElementById('es-nav-account-btn').addEventListener('click', promptLogoutConfirm);
 
@@ -298,8 +295,7 @@
       scheduleNavOverflowCheck();
     }
 
-    // Shared by both the top-bar and drawer logout buttons — one accidental
-    // tap shouldn't sign someone out with no way back.
+    // "really log out?" (top bar and drawer)
     function promptLogoutConfirm() {
       closeDrawerIfOpen();
       var overlay = document.getElementById('es-nav-logout-confirm-overlay');
@@ -319,14 +315,13 @@
         if (e.target === logoutOverlay) logoutOverlay.classList.remove('active');
       });
     }
+    // log out and close the drawer
     function overlay_signOutAndClose() {
       window.EsAuth.signOut();
       if (logoutOverlay) logoutOverlay.classList.remove('active');
     }
 
-    // Closing the drawer before opening the auth modal avoids having
-    // both open at once on a small screen, which would stack two
-    // full-screen-ish overlays on top of each other.
+    // close the drawer before opening the login window
     function closeDrawerIfOpen() {
       var d = document.querySelector('.es-nav__drawer');
       var nav = document.querySelector('.es-nav');
@@ -339,9 +334,7 @@
       updateProfileLinks(user, profile || window.EsAuth.getCurrentProfile());
     });
 
-    // "My Profile" (top bar menu and the mobile drawer's copy of it): the
-    // signed-in pilot's own public profile, or the account page if they
-    // haven't picked a username yet. Hidden when signed out.
+    // "My Profile" links point at your profile
     function updateProfileLinks(user, profile) {
       document.querySelectorAll('[data-page="Profile"]').forEach(function (a) {
         if (!user) { a.style.display = 'none'; return; }
@@ -352,8 +345,9 @@
       });
     }
 
-    // ── Forgot password / new password / choose username ──────────────
+    // ── forgot password / new password / choose username ──
     function byId(id) { return document.getElementById(id); }
+    // show one of the account boxes
     function showBox(id, message, ok) {
       var box = byId(id); if (!box) return;
       box.innerHTML = message ? '<div class="' + (ok ? 'auth-form-success' : 'auth-form-error') + '">' + message + '</div>' : '';
@@ -388,6 +382,7 @@
 
     var newPassOverlay = byId('es-nav-newpass-overlay');
     var newPassForm = byId('es-nav-newpass-form');
+    // "set a new password" box
     function openNewPassword() {
       if (!newPassOverlay) return;
       showBox('es-nav-newpass-error', '');
@@ -416,6 +411,7 @@
     var unameOverlay = byId('es-nav-username-overlay');
     var unameForm = byId('es-nav-username-form');
     var unameInput = byId('es-nav-username-input');
+    // ask for a username if missing
     function maybeAskUsername() {
       if (!unameOverlay) return;
       var user = window.EsAuth.getCurrentUser();
@@ -495,9 +491,7 @@
           setTimeout(closeModal, 900);
         })
         .catch(function (err) {
-          // isProfileError: the account itself was created fine, only the
-          // username failed to save — worth saying so rather than
-          // implying signup as a whole failed.
+          // account made, only the username failed
           setFieldError('signup', err.message || 'Could not create an account — try again.');
         })
         .finally(function () { setLoading(signupForm, false, 'Create account'); });
@@ -506,22 +500,18 @@
 
   waitForAuth(30); // ~3 seconds total before giving up
 
-  /* ── Content-aware collapse ─────────────────────────────────────
-     Instead of a fixed pixel breakpoint, actually measure whether the
-     bar's content fits. Checked on load, on resize, and whenever the
-     account button's content changes (login/logout changes its width,
-     which can tip the balance either way). */
+  // ── collapse the bar when it doesn't fit ──
   var navOverflowCheckTimer = null;
+  // does the bar fit?
   function checkNavOverflow() {
     var nav = document.querySelector('.es-nav');
     if (!nav) return;
-    // Measure with everything shown first — checking while already
-    // collapsed would always report "fits", since there'd be nothing
-    // left to overflow.
+    // measure with everything shown first
     nav.classList.remove('es-nav--collapsed');
     var overflowing = nav.scrollWidth > nav.clientWidth + 1; // +1: rounding tolerance
     if (overflowing) nav.classList.add('es-nav--collapsed');
   }
+  // check it soon
   function scheduleNavOverflowCheck() {
     clearTimeout(navOverflowCheckTimer);
     navOverflowCheckTimer = setTimeout(checkNavOverflow, 50);

@@ -1,20 +1,11 @@
 'use strict';
 
-// ─── generalFilterStuff.js ────────────────────────────────────────────────────
-//
-// Owns:
-//   • filterDisplay()   — top-level show/hide of the entire filter section
-//   • getFilterData()   — caches the current item list for repopulation
-//   • filterItems()     — core filter+sort+render loop (debounced)
-//
-// Delegates category/government state to CheckBoxFilter.js &
-// GovernmentsFilter.js which are loaded before this file.
-// ─────────────────────────────────────────────────────────────────────────────
+// The Data Viewer's search, filters, sort and card drawing.
 
 let filtersExpanded = true;
 let lastFilterItems = [];
 
-// ── filterDisplay ─────────────────────────────────────────────────────────────
+// show/hide the filter box
 
 function filterDisplay() {
     const govSection      = document.getElementById('governmentFilterSection');
@@ -52,16 +43,13 @@ function filterDisplay() {
     }
 }
 
-// ── getFilterData ─────────────────────────────────────────────────────────────
+// items for the current tab
 
 function getFilterData(data) {
     lastFilterItems = data;
 }
 
-// ── filterItems (debounced) ───────────────────────────────────────────────────
-//
-// Uses a generation counter so stale async renders are aborted.
-// A 60 ms debounce on the search path avoids re-rendering on every keystroke.
+// run the filter shortly after typing stops
 
 // Shared with Plugin_Script._loadSpriteForCard — must be on window so both
 // modules read the same value regardless of load order.
@@ -70,11 +58,13 @@ if (typeof window._filterGeneration === 'undefined') window._filterGeneration = 
 let _filterDebounceTimer = null;
 const FILTER_DEBOUNCE_MS = 60;
 
+// filter soon. Called by: search, filters, sorters
 function filterItems() {
     clearTimeout(_filterDebounceTimer);
     _filterDebounceTimer = setTimeout(_runFilter, FILTER_DEBOUNCE_MS);
 }
 
+// filter, sort and draw now
 async function _runFilter() {
     const myGeneration = ++window._filterGeneration;
 
@@ -85,7 +75,7 @@ async function _runFilter() {
     const container          = document.getElementById('cardsContainer');
     if (!container) return;
 
-    // ── Filter ────────────────────────────────────────────────────────────────
+    // filter
     const hasSearch = searchTerm.length > 0;
     const hasCat    = selectedCategories.length > 0;
     const hasGov    = selectedGovts.length > 0;
@@ -106,13 +96,13 @@ async function _runFilter() {
         return true;
     });
 
-    // ── Sort ──────────────────────────────────────────────────────────────────
+    // sort
     const display = typeof applySorters === 'function' ? applySorters(filtered) : filtered;
     if (typeof setSorterItems === 'function') setSorterItems(display);
 
     if (myGeneration !== window._filterGeneration) return;
 
-    // ── Render (chunked to keep frame budget) ─────────────────────────────────
+    // draw cards in chunks
     container.textContent = '';
 
     if (display.length === 0) {
@@ -147,7 +137,7 @@ async function _runFilter() {
     initLazySprites(myGeneration);
 }
 
-// ── Exports ───────────────────────────────────────────────────────────────────
+// ── globals ──
 
 window.filterItems   = filterItems;
 window.filterDisplay = filterDisplay;

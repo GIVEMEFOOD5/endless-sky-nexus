@@ -1,65 +1,4 @@
-/**
- * endless-sky-animator.js
- *
- * Accurate 2D sprite animator matching the Endless Sky rendering pipeline.
- *
- * ─── Blending modes (detected from separator character in filenames) ──────────
- *   -   alpha blending           (default; separator is optional)
- *   +   additive blending        result = src.rgb + dst.rgb
- *   ^ / ~  half-additive blend   halfway between alpha and additive
- *   =   already-premultiplied    pass through, drawn with source-over
- *
- * ─── Premultiplied-alpha pipeline ────────────────────────────────────────────
- * ES uses GL_ONE / GL_ONE_MINUS_SRC_ALPHA (premultiplied source-over):
- *   result = src.rgb + (1 - src.a) * dst.rgb
- *
- * At image load time ES bakes the blend mode into the alpha channel:
- *   ALPHA:         premultiply normally; alpha unchanged
- *   ADDITIVE:      set alpha = 0  -> result = src.rgb + dst.rgb  (pure add)
- *   HALF_ADDITIVE: set alpha = alpha/2  -> halfway between alpha and additive
- *
- * ─── Frame tweening ───────────────────────────────────────────────────────────
- * Frame position is a float.  pos=4.28 -> draw frame[4] at (1-0.28) weight,
- * then frame[5] at 0.28 weight, both using the same blend equation.
- *
- * ─── Loop / rewind / no-repeat ───────────────────────────────────────────────
- * LOOP (default):  wraps pos back to 0 after last frame; tweens last->first.
- * REWIND:          reverses direction at last frame; tweens continuously.
- * NO REPEAT:       stops at last frame (or frame 0 after rewind if both set).
- *
- * ─── API ──────────────────────────────────────────────────────────────────────
- * Called by your existing app.js / renderImageTab:
- *
- *   const anim = new EndlessSkyAnimator(canvasElement);
- *
- *   // From findImageVariations() result (recommended)
- *   await anim.loadVariations(variationsArray, spriteParams);
- *
- *   // From pre-built image elements
- *   await anim.loadFrames(imageElements, spriteParams);
- *
- *   anim.play();
- *   anim.pause();
- *   anim.stop();     // pause + reset to start frame
- *   anim.dispose();  // revoke object URLs, close bitmaps
- *
- *   // spriteParams object (all optional):
- *   {
- *     frameRate:    2,       // fps (default: 2, same as ES default)
- *     frameTime:    null,    // game ticks (1/60 s); overrides frameRate
- *     delay:        0,       // ticks to pause between loops
- *     startFrame:   0,       // integer start frame index
- *     randomStart:  false,   // start at a random frame
- *     noRepeat:     false,   // stay on last frame after one play-through
- *     rewind:       false,   // ping-pong: forward then backward
- *     scale:        1.0,     // uniform scale factor
- *   }
- *
- *   // Events dispatched on the canvas element:
- *   //   CustomEvent('es:ready', { detail: { frameCount, blend } })
- *   //   CustomEvent('es:done')     - noRepeat animation finished
- *   //   CustomEvent('es:error', { detail: message })
- */
+// Plays Endless Sky sprites on a canvas the way the game does (frame rate, blend modes, ping-pong …).
 
 'use strict';
 
@@ -82,9 +21,7 @@ const _SEP_BLEND = {
 
 
 class EndlessSkyAnimator {
-  /**
-   * @param {HTMLCanvasElement} canvas
-   */
+  // draws onto this canvas
   constructor(canvas) {
     this._canvas = canvas;
     this._ctx    = canvas.getContext('2d');
@@ -115,14 +52,7 @@ class EndlessSkyAnimator {
 
   // Public: load 
 
-  /**
-   * Load from the array returned by window.findImageVariations().
-   * Automatically detects blend mode from the separator character.
-   *
-   * @param {Array<{blob:Blob, variation:string, path:string, url:string}>} variations
-   * @param {Object} [params]  sprite animation params (see file header)
-   * @returns {Promise<void>}
-   */
+  // load frames from findImageVariations (blend mode from the file names)
   async loadVariations(variations, params) {
     params = params || {};
     if (!variations || !variations.length) {
@@ -146,21 +76,14 @@ class EndlessSkyAnimator {
     await this._prepareFrames(images, blend, params);
   }
 
-  /**
-   * Load from pre-existing HTMLImageElement / ImageBitmap array.
-   *
-   * @param {Array<HTMLImageElement|ImageBitmap>} images  ordered frame array
-   * @param {Object} [params]
-   * @param {string} [params.blendMode]  ES_BLEND constant; default 'alpha'
-   * @returns {Promise<void>}
-   */
+  // load ready-made images
   async loadFrames(images, params) {
     params = params || {};
     const blend = params.blendMode || ES_BLEND.ALPHA;
     await this._prepareFrames(images, blend, params);
   }
 
-  // Public: control 
+  // play / pause / stop
 
   play() {
     if (!this._frames.length || this._playing) return;
@@ -191,7 +114,7 @@ class EndlessSkyAnimator {
     this._revokeUrls();
   }
 
-  // Private
+  // get frames ready to draw
 
   async _prepareFrames(images, blend, params) {
     // Close previous bitmaps
@@ -338,10 +261,7 @@ class EndlessSkyAnimator {
     const dy  = (this._canvas.height - sh) / 2;
 
     ctx.globalAlpha = weight;
-    // ADDITIVE: src + dst (canvas 'lighter' == glBlendFunc(ONE, ONE))
-    // HALF_ADDITIVE: alpha already halved in pixel data; source-over gives
-    //   result = src.rgb + (1 - src.a/2) * dst.rgb
-    // ALPHA / PREMULTIPLIED: standard source-over (premultiplied pipeline)
+    // how each blend mode adds onto the background
     ctx.globalCompositeOperation =
       this._blend === ES_BLEND.ADDITIVE ? 'lighter' : 'source-over';
 
@@ -378,27 +298,7 @@ class EndlessSkyAnimator {
 }
 
 
-//  _bakeFrame
-/**
- * Bake blend mode into pixel data, matching the ES image loader:
- *
- *   ALPHA:         createImageBitmap as-is; browser handles premultiplication.
- *                  Drawn with 'source-over' (premultiplied pipeline).
- *
- *   ADDITIVE:      createImageBitmap as-is; drawn with 'lighter' composite op.
- *                  'lighter' = ONE + ONE = src.rgb + dst.rgb (pure additive).
- *
- *   HALF_ADDITIVE: halve the alpha channel in pixel data.
- *                  Drawn with 'source-over':
- *                    result = src.rgb + (1 - src.a/2) * dst.rgb
- *                  halfway between alpha and additive.
- *
- *   PREMULTIPLIED: createImageBitmap as-is; drawn with 'source-over'.
- *
- * @param {HTMLImageElement|ImageBitmap} img
- * @param {string} blend  ES_BLEND constant
- * @returns {Promise<ImageBitmap|null>}
- */
+// bake the blend mode into the pixels (as the game's loader does)
 async function _bakeFrame(img, blend) {
   try {
     const w = img.naturalWidth || img.width;
@@ -432,7 +332,7 @@ async function _bakeFrame(img, blend) {
 }
 
 
-// Helpers
+// blend mode from the file names
 
 function _blendFromVariations(variations) {
   for (let i = 0; i < variations.length; i++) {
@@ -442,6 +342,7 @@ function _blendFromVariations(variations) {
   return ES_BLEND.ALPHA;
 }
 
+// frames in order
 function _sortVariations(variations) {
   return variations.slice().sort(function(a, b) {
     const na = parseInt(a.variation.replace(/\D/g, ''), 10);
@@ -453,6 +354,7 @@ function _sortVariations(variations) {
   });
 }
 
+// load images
 function _loadImages(urls) {
   return Promise.all(
     urls.map(function(src) {

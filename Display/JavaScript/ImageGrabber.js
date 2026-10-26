@@ -1,41 +1,9 @@
 (function () {
 'use strict';
 
-/**
- * ImageGrabber.js — multi-plugin edition
- *
- * Builds a separate image index per plugin folder. When fetchSprite() is called
- * it searches the current plugin's index first, then falls back to all other
- * loaded indexes so variants can find base-game sprites.
- *
- * Requires Animator.js (EndlessSkyAnimator) to be loaded first.
- *
- * Public API
- * ──────────
- *   initImageIndex(outputName?)
- *     Builds (or retrieves cached) index for the given plugin folder.
- *     If no outputName given, initialises all known plugins from allData.
- *     → Promise<void>
- *
- *   setCurrentPlugin(outputName)
- *     Tells the grabber which plugin is active. Called by selectPlugin() in main.js.
- *     → void
- *
- *   fetchSprite(spritePath, spriteParams?)
- *     Searches the current plugin's index first, then all others as fallback.
- *     → Promise<HTMLCanvasElement | HTMLImageElement | null>
- *
- *   clearSpriteCache()
- *     Stops the active animator and revokes object URLs.
- *     → void
- *
- *   findImageVariations(basePath, outputName?)
- *     Low-level: returns all matching frame entries from the specified index
- *     (or current plugin's index if omitted).
- *     → Array<{path, url, variation}>
- */
+// Finds and loads sprites (ships, outfits, planets, effects) from each plugin's images on GitHub, with animation frames.
 
-// ─── Config ───────────────────────────────────────────────────────────────────
+// ── config ──
 
 const GITHUB_REPO   = 'GIVEMEFOOD5/endless-sky-nexus';
 const GITHUB_BRANCH = 'main';
@@ -52,7 +20,7 @@ const IMG_EXT_RE = /\.(png|jpg|jpeg)$/i;
 // Animation separator chars used in ES filenames
 
 
-// ─── Module state ─────────────────────────────────────────────────────────────
+// ── state ──
 
 // Per-plugin indexes: Map of outputName → { index: Map<baseKey → frames[]>, ready: bool }
 const _pluginIndexes  = {};
@@ -70,7 +38,7 @@ let _active   = null;
 let _fetchGen = 0;
 
 
-// ─── Repo tree (fetched once) ─────────────────────────────────────────────────
+// the repo's file list (fetched once)
 
 async function _fetchRepoTree() {
   if (_repoTree)        return _repoTree;
@@ -97,12 +65,9 @@ async function _fetchRepoTree() {
 }
 
 
-// ─── Per-plugin index builder ─────────────────────────────────────────────────
+// ── per-plugin image index ──
 
-/**
- * Builds the image index for one plugin's images/ folder.
- * e.g. outputName = "official-game" → scans data/official-game/images/
- */
+// index of one plugin's images/ folder
 async function _buildPluginIndex(outputName) {
   if (_pluginIndexes[outputName]?.ready) return;
   if (_pluginIndexing[outputName])       return _pluginIndexing[outputName];
@@ -166,13 +131,9 @@ async function _buildPluginIndex(outputName) {
 }
 
 
-// ─── Public: initImageIndex ───────────────────────────────────────────────────
+// ── public ──
 
-/**
- * Call at startup (or when plugin list changes) to pre-build indexes.
- * If outputName given, builds just that one. Otherwise builds all plugins
- * known from window.allData (set by main.js).
- */
+// build the indexes up front (startup / plugin change)
 async function initImageIndex(outputName) {
   if (outputName) {
     await _buildPluginIndex(outputName);
@@ -191,7 +152,7 @@ async function initImageIndex(outputName) {
 }
 
 
-// ─── Public: setCurrentPlugin ─────────────────────────────────────────────────
+// which plugin to look in first
 
 function setCurrentPlugin(outputName) {
   _currentPlugin = outputName;
@@ -202,10 +163,7 @@ function setCurrentPlugin(outputName) {
 
 // ─── Public: findImageVariations ─────────────────────────────────────────────
 
-/**
- * Searches one plugin's index for all frames matching basePath.
- * Returns [] if not found.
- */
+// every frame of a sprite in one plugin
 function findImageVariations(basePath, outputName) {
   const target = outputName || _currentPlugin;
   if (!target) return [];
@@ -217,9 +175,7 @@ function findImageVariations(basePath, outputName) {
 }
 
 
-/**
- * Internal: search a single index object for basePath.
- */
+// search one index
 function _searchIndex(index, basePath) {
   // Normalise: strip leading slash, extension, trailing separator+number
   let key = basePath.replace(/^\/+/, '');
@@ -245,11 +201,7 @@ function _searchIndex(index, basePath) {
 }
 
 
-/**
- * Searches all loaded plugin indexes in priority order:
- * current plugin first, then all others.
- * Returns { frames, sourcePlugin } or null.
- */
+// search every plugin (current first)
 function _findAcrossPlugins(basePath) {
   // Build search order: current plugin first
   const order = _currentPlugin ? [_currentPlugin] : [];
@@ -268,7 +220,7 @@ function _findAcrossPlugins(basePath) {
 }
 
 
-// ─── Public: clearSpriteCache ─────────────────────────────────────────────────
+// forget loaded sprites
 
 function clearSpriteCache() {
   if (_active) {
@@ -279,8 +231,7 @@ function clearSpriteCache() {
 }
 
 
-// ─── Internal: render frames to canvas/img ────────────────────────────────────
-// Shared by fetchSprite and fetchSpriteExact. Does NOT call EffectGrabber.
+// frames → animated canvas or image
 
 async function _renderFrames(frames, spriteParams, myGen) {
   const blobResults = await Promise.all(frames.map(async frame => {
@@ -327,10 +278,7 @@ async function _renderFrames(frames, spriteParams, myGen) {
 }
 
 
-// ─── Internal: fetchSpriteExact ───────────────────────────────────────────────
-// Looks up spritePath in the image indexes ONLY — no EffectGrabber call.
-// Used by EffectGrabber to avoid the circular call chain:
-//   fetchSprite → fetchEffectByName → fetchSprite (infinite loop)
+// load a sprite exactly as named
 
 async function _fetchSpriteExact(spritePath, spriteParams) {
   spriteParams = spriteParams || {};
@@ -364,8 +312,7 @@ async function _fetchSpriteExact(spritePath, spriteParams) {
 }
 
 
-// ─── Public: fetchSprite ──────────────────────────────────────────────────────
-// Full pipeline: tries EffectGrabber first (for named effects), then image index.
+// load a sprite (image index, then fallbacks). Called by: the Data Viewer, map, builder
 
 async function fetchSprite(spritePath, spriteParams) {
   spriteParams = spriteParams || {};
@@ -392,7 +339,7 @@ async function fetchSprite(spritePath, spriteParams) {
   }
   if (_fetchGen !== myGen) return null;
 
-  // ── Step 1: Image index search ─────────────────────────────────────────────
+  // 1. the image index
   let found = _findAcrossPlugins(spritePath);
 
   if (!found) {
@@ -416,7 +363,7 @@ async function fetchSprite(spritePath, spriteParams) {
 }
 
 
-// ─── fetchEffectSprite (compat wrapper) ───────────────────────────────────────
+// effect sprite (old name)
 
 async function fetchEffectSprite(effectNameOrPath, spriteParams) {
   if (!effectNameOrPath) {
@@ -430,7 +377,7 @@ async function fetchEffectSprite(effectNameOrPath, spriteParams) {
 }
 
 
-// ─── fetchOutfitEffects ───────────────────────────────────────────────────────
+// an outfit's effect sprites
 
 async function fetchOutfitEffects(outfit) {
   if (!outfit) return {};
@@ -454,7 +401,7 @@ async function fetchOutfitEffects(outfit) {
 }
 
 
-// ─── Globals ──────────────────────────────────────────────────────────────────
+// ── globals ──
 
 window.initImageIndex      = initImageIndex;
 window.setCurrentPlugin    = setCurrentPlugin;

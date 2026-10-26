@@ -1,26 +1,11 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  uiKit.js — small reusable UI pieces
-//
-//    UiKit.match(query, text)        → score (0 = no match) — word-start and
-//                                      in-order letter matching, so "hvy las"
-//                                      finds "Heavy Laser"
-//    UiKit.highlight(text, query)    → HTML with the matched letters marked
-//    UiKit.combobox(input, opts)     → type-ahead dropdown under an input
-//        opts.source(query) → Promise<[{ value, label, sub?, data? }]>
-//        opts.onPick(item)            opts.minChars (default 1)
-//      Keyboard: ↑ ↓ to move, Enter to pick, Esc to close.
-//    UiKit.pager({ page, pages, total, from, to, id }) → HTML
-//    UiKit.paginate(items, page, size) → { slice, page, pages, from, to }
-//    UiKit.undoToast(message, onUndo, ms) → "Undo" toast
-// ═══════════════════════════════════════════════════════════════════════════
+// Shared UI bits: fuzzy matching, type-ahead box, pagination, undo message.
 
 (function () {
   const h = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-  // strict: every query word must appear as written (for filtering lists);
-  // otherwise letters may also skip within a word (for type-ahead ranking).
+  // does text match a search? (strict: every word as typed)
   function match(query, text, { strict = false } = {}) {
     const q = String(query || '').toLowerCase().trim(), t = String(text || '').toLowerCase();
     if (!q) return 1;
@@ -46,7 +31,7 @@
     }
     return Math.max(1, score);
   }
-  // letters of w appear in order from position i within the same word
+  // letters in order within one word
   function fuzzyStart(t, i, w) {
     let j = 0;
     for (let k = i; k < t.length && j < w.length; k++) {
@@ -56,6 +41,7 @@
     return j === w.length && t[i] === w[0];
   }
 
+  // highlight the matched part
   function highlight(text, query) {
     const t = String(text ?? ''), q = String(query || '').trim();
     if (!q) return h(t);
@@ -64,8 +50,9 @@
     return h(t.slice(0, at)) + '<mark>' + h(t.slice(at, at + q.length)) + '</mark>' + h(t.slice(at + q.length));
   }
 
-  // ── combobox ─────────────────────────────────────────────────────────────
+  // ── type-ahead box ──
   let styled = false;
+  // add the CSS once
   function addStyles() {
     if (styled) return; styled = true;
     const css = document.createElement('style');
@@ -86,6 +73,7 @@
     document.head.appendChild(css);
   }
 
+  // turn an input into a type-ahead. Called by: nameSearch, afUI, saveEditor
   function combobox(input, { source, onPick, minChars = 1, placeholderEmpty = 'No matches' } = {}) {
     addStyles();
     if (input._ukCombo) return input._ukCombo;
@@ -139,13 +127,14 @@
     return (input._ukCombo = { close, refresh });
   }
 
-  // ── pagination ───────────────────────────────────────────────────────────
+  // ── pages ──
   function paginate(items, page, size) {
     const pages = Math.max(1, Math.ceil(items.length / size));
     const p = Math.min(Math.max(1, page || 1), pages);
     const from = (p - 1) * size;
     return { slice: items.slice(from, from + size), page: p, pages, from: items.length ? from + 1 : 0, to: Math.min(items.length, from + size), total: items.length };
   }
+  // page buttons
   function pager({ page, pages, total, from, to, id }) {
     addStyles();
     if (pages <= 1) return total ? `<div class="uk-pager">${total} shown</div>` : '';
@@ -159,8 +148,9 @@
       <span style="margin-left:6px;">${from}–${to} of ${total}</span></nav>`;
   }
 
-  // ── undo toast ───────────────────────────────────────────────────────────
+  // ── undo message ──
   let toastEl = null, toastTimer = null;
+  // "Undone — Undo" message
   function undoToast(message, onUndo, ms = 8000) {
     addStyles();
     clearTimeout(toastTimer);

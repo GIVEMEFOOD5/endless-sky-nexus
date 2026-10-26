@@ -1,17 +1,12 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  reportDialog.js — "Report" dialog for shared ships and users.
-//  window.EsReport.open({ type: 'ship'|'user', id, label })
-//  Writes a row to `reports` (user_management.sql); admins see it on the
-//  account page. Reporting needs a login so reports can't be spammed
-//  anonymously.
-// ═══════════════════════════════════════════════════════════════════════════
+// The "Report" window for flagging a shared ship or profile.
 
 (function () {
   const h = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   let current = null;
 
+  // add the window once
   function ensure() {
     let m = document.getElementById('es-report-modal');
     if (m) return m;
@@ -29,6 +24,7 @@
     return m;
   }
 
+  // open it
   function open(target) {
     current = target;
     const m = ensure();
@@ -53,6 +49,7 @@
     m.classList.add('active');
   }
 
+  // send the report
   async function send() {
     const reason = document.getElementById('es-report-reason').value.trim();
     const err = document.getElementById('es-report-error');

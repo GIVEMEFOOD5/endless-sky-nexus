@@ -1,31 +1,10 @@
 'use strict';
 
-// ─── TooltipBinder.js ─────────────────────────────────────────────────────────
-//
-// Bridges window.attrDefs.tooltips (produced by attributeParser.js) into the
-// existing data-tooltip / initTooltips() system already in the frontend.
-//
-// Key problem solved:
-//   Display labels like "Hull DPS" must NOT fall back to the bare key "hull"
-//   (which is the hull-strength stat), they should resolve to
-//   "hull damage / second" from the tooltips file, or return null.
-//   The lookup tries increasingly specific keys before any suffix stripping,
-//   and never strips a suffix if it would land on a known bare stat name.
-//
-// Usage:
-//   const tip = window.TooltipBinder.get(attrKey);
-//   if (tip) row.dataset.tooltip = tip;
-//
-//   — or —
-//   window.TooltipBinder.stamp(row, attrKey);   // null-safe one-liner
-// ─────────────────────────────────────────────────────────────────────────────
+// Puts the game's attribute descriptions on stat rows as hover tooltips.
 
 window.TooltipBinder = (() => {
 
-    // ── Known bare stat names that must NOT be used as fallbacks ─────────────
-    // If stripping a suffix would land on one of these, we stop rather than
-    // returning the wrong tooltip (e.g. "Hull DPS" must not get the "hull"
-    // strength description).
+    // bare stat names that mustn't be used as fallbacks
     const BARE_STAT_NAMES = new Set([
         'hull', 'shields', 'mass', 'drag', 'thrust', 'turn', 'cost',
         'bunks', 'cargo space', 'fuel capacity', 'energy capacity',
@@ -33,7 +12,7 @@ window.TooltipBinder = (() => {
         'heat', 'energy', 'fuel', 'armor', 'cloak',
     ]);
 
-    // ── Key normalisation ─────────────────────────────────────────────────────
+    // key → comparable form
 
     function _norm(raw) {
         return String(raw ?? '')
@@ -43,13 +22,12 @@ window.TooltipBinder = (() => {
             .trim();
     }
 
+    // descriptions (from the definitions)
     function _tips() {
         return window.attrDefs?.tooltips ?? {};
     }
 
-    // ── Core lookup ───────────────────────────────────────────────────────────
-    // Tries keys from most-specific to least-specific.
-    // Never lets a DPS/damage label fall through to a bare stat name.
+    // description for a key (with fallbacks)
 
     function _lookup(raw) {
         const tips = _tips();
@@ -62,10 +40,7 @@ window.TooltipBinder = (() => {
         //    already match a tooltip key, e.g. "hull repair rate", "shields")
         if (key in tips) return tips[key] || null;
 
-        // 2. DPS-type labels: "Hull DPS", "Shield DPS", "Ion DPS", etc.
-        //    Try '<base> damage / second', '<base> damage / shot', '<base> / second'
-        //    in that order.  Do NOT fall through to bare base — that would give
-        //    the hull-strength tooltip for "Hull DPS".
+        // "Hull DPS" → "hull damage / second" …
         const dpsMatch = key.match(/^(.+?)\s+dps$/i);
         if (dpsMatch) {
             const base = dpsMatch[1].trim();
@@ -114,9 +89,7 @@ window.TooltipBinder = (() => {
             }
         }
 
-        // 6. Attribute keys ending in " damage" that have no tooltip of their own:
-        //    try the bare name (e.g. "ion damage" → "ion") — but only for
-        //    damage keys, not for stat names.
+        // "… damage" without its own text → the plain stat
         if (key.endsWith(' damage') && !BARE_STAT_NAMES.has(key)) {
             const bare = key.replace(/ damage$/, '');
             if (bare in tips && !BARE_STAT_NAMES.has(bare)) return tips[bare] || null;
@@ -125,18 +98,14 @@ window.TooltipBinder = (() => {
         return null;
     }
 
-    // ── Public API ────────────────────────────────────────────────────────────
+    // ── public ──
 
-    /** get(key) → string | null */
+    // description for a key (or null)
     function get(key) {
         return _lookup(key) ?? null;
     }
 
-    /**
-     * stamp(element, key?)
-     * Sets element.dataset.tooltip if a tip is found.
-     * Marks auto-set tooltips so they can be replaced on re-bind.
-     */
+    // add the tooltip to an element
     function stamp(element, key) {
         if (!element) return;
         const tip = _lookup(key ?? element.dataset.tooltipKey ?? element.textContent);
@@ -150,7 +119,7 @@ window.TooltipBinder = (() => {
         }
     }
 
-    // ── bindRows ──────────────────────────────────────────────────────────────
+    // ── rows ──
 
     const ROW_SELECTOR = [
         '.ad-row',
@@ -159,6 +128,7 @@ window.TooltipBinder = (() => {
         '[data-tooltip-key]',
     ].join(', ');
 
+    // key for a row
     function _keyFromRow(el) {
         if (el.dataset.tooltipKey) return el.dataset.tooltipKey;
         const label = el.querySelector('.ad-label, .compare-col__key');
@@ -167,6 +137,7 @@ window.TooltipBinder = (() => {
         return el.textContent;
     }
 
+    // add tooltips to every row
     function bindRows(root) {
         const tips = _tips();
         if (!tips || !Object.keys(tips).length) return;
@@ -177,7 +148,7 @@ window.TooltipBinder = (() => {
         });
     }
 
-    // ── Auto-init ─────────────────────────────────────────────────────────────
+    // start on page load
 
     function _autoInit() {
         bindRows();

@@ -1,37 +1,23 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  nameSearch.js — one type-ahead for every "type a name" box
-//
-//  Start typing and a list appears under the box with matches from the
-//  plugins you've selected (☰ Select Plugins). Each match shows what it is
-//  and which plugin it comes from. Kinds:
-//    outfits      — every outfit
-//    ships        — ships and variants (display name first, internal name dimmed)
-//    licenses     — licences: from "… License" outfits and from what ships and
-//                   outfits require (type "republic" → Republic …)
-//    commodities  — trade goods (the game's standard ones plus any the
-//                   selected plugins' systems trade)
-//
-//    NameSearch.attach(input, kind, { onPick(name, item), keepText })
-//    NameSearch.search(kind, query) → [{ value, label, sub }]
-//
-//  Needs uiKit.js (UiKit.combobox). Reads DataLoader's selected plugins.
-// ═══════════════════════════════════════════════════════════════════════════
+// Type-ahead name boxes for outfits, ships, licences and commodities (selected plugins, with the plugin shown).
 
 (function () {
   const STANDARD_COMMODITIES = ['Food', 'Clothing', 'Metal', 'Plastic', 'Equipment', 'Medical', 'Industrial',
     'Electronics', 'Heavy Metals', 'Luxury Goods'];
 
+  // selected plugins' data
   function active() {
     const DL = window.DataLoader;
     return DL && typeof DL.getActiveData === 'function' ? DL.getActiveData() : (window.allData || {});
   }
+  // plugin display name
   const pluginName = (id, p) => (p && p.displayName) || id;
   const attrs = o => (o && (o.attributes || o)) || {};
 
   // Index per kind, rebuilt when the selected plugins change.
   let cacheKey = '', cache = {};
+  // every name of a kind (cached)
   function index(kind) {
     const data = active();
     const key = Object.keys(data).join('|');
@@ -95,6 +81,7 @@
     } catch (_) { /* offline: the standard list still works */ }
   })();
 
+  // matches for a search
   function search(kind, q) {
     const U = window.UiKit;
     const items = index(kind), out = [];
@@ -106,10 +93,7 @@
     return out.sort((a, b) => b[0] - a[0]).slice(0, 50).map(x => x[1]);
   }
 
-  /**
-   * Turn a text box into a type-ahead. By default picking a match puts its
-   * name in the box (ready for the Add button); pass onPick to act at once.
-   */
+  // turn a text box into a type-ahead (picking puts the name in the box)
   function attach(input, kind, { onPick, keepText = true } = {}) {
     if (!input || !window.UiKit) return;
     input.removeAttribute('list');

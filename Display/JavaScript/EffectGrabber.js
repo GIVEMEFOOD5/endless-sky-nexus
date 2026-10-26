@@ -1,27 +1,7 @@
 (function () {
 'use strict';
 
-/**
- * EffectGrabber.js — multi-plugin edition
- *
- * Loads effects.json from each plugin folder on demand, keyed by outputName.
- * When resolving an effect name, searches the current plugin first then falls
- * back to all others — same pattern as ImageGrabber.
- *
- * Requires ImageGrabber.js to be loaded first.
- *
- * Public API
- * ──────────
- *   setCurrentPlugin(outputName)
- *     Tells EffectGrabber which plugin is active. Mirrors ImageGrabber's call
- *     so both stay in sync. Called automatically by main.js selectPlugin().
- *     → void
- *
- *   fetchEffectByName(effectName, spriteParams?)
- *     Searches all loaded plugin effect maps for effectName, current plugin
- *     first. Returns the rendered sprite element, or null if not found.
- *     → Promise<HTMLCanvasElement | HTMLImageElement | null>
- */
+// Looks up effects (explosions, flares …) from each plugin's effects data and loads their sprites.
 
 // Per-plugin effect maps: outputName → { map: { name → effect }, ready: bool }
 const _pluginEffects  = {};
@@ -31,7 +11,7 @@ const LOCAL_PLUGIN_ID = '__local_builds__';
 let _currentPlugin = null;
 
 
-// ─── Per-plugin loader ────────────────────────────────────────────────────────
+// one plugin's effects
 
 async function _loadPluginEffects(outputName) {
     if (_pluginEffects[outputName]?.ready) return;
@@ -89,7 +69,7 @@ async function _loadPluginEffects(outputName) {
 }
 
 
-// ─── Public: setCurrentPlugin ─────────────────────────────────────────────────
+// which plugin to look in first
 
 function setEffectPlugin(outputName) {
     _currentPlugin = outputName;
@@ -97,7 +77,7 @@ function setEffectPlugin(outputName) {
 }
 
 
-// ─── Internal: search across plugins ─────────────────────────────────────────
+// find an effect across plugins
 
 function _findEffect(effectName) {
     // Search order: current plugin first, then all others
@@ -117,7 +97,7 @@ function _findEffect(effectName) {
 }
 
 
-// ─── Public: fetchEffectByName ────────────────────────────────────────────────
+// an effect's sprite by name
 
 async function fetchEffectByName(effectName, spriteParams) {
     if (!effectName) {
@@ -156,9 +136,7 @@ async function fetchEffectByName(effectName, spriteParams) {
         ? spriteParams
         : (effect.spriteData || {});
 
-    // Call fetchSpriteExact (not fetchSprite) to avoid the circular call chain:
-    //   fetchSprite → fetchEffectByName → fetchSprite → infinite loop
-    // fetchSpriteExact goes straight to the image index, skipping EffectGrabber.
+    // fetchSpriteExact here (fetchSprite would loop back to us)
     if (typeof window.fetchSpriteExact !== 'function') {
         console.error('EffectGrabber: fetchSpriteExact not available — is ImageGrabber loaded?');
         return null;
@@ -167,7 +145,7 @@ async function fetchEffectByName(effectName, spriteParams) {
 }
 
 
-// ─── Globals ──────────────────────────────────────────────────────────────────
+// ── globals ──
 
 window.fetchEffectByName = fetchEffectByName;
 window.setEffectPlugin   = setEffectPlugin;

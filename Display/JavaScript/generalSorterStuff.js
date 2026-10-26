@@ -1,72 +1,8 @@
-// Sorter.js
-//
-// Builds sortable field lists by scanning ONLY the items currently on screen.
-// No attribute names are hardcoded anywhere. Every field offered in the picker
-// was found on at least one currently-visible item.
-//
-// ── Data layout (from the actual JSON files) ────────────────────────────────
-//
-//   ships / variants
-//     Numeric stats live under  item.attributes.*
-//     Outfit list lives at      item.outfits  (key→ {count, pluginId})
-//     Plugin identity lives at  item._pluginId  (always set in source JSON)
-//     Stable cache key at       item._internalId
-//
-//   outfits
-//     Numeric stats live at     item.*  (top-level — NO .attributes sub-object)
-//     Weapon sub-stats live at  item.weapon.*  (present on ~40% of outfits)
-//
-//   effects / other
-//     Numeric stats live at     item.*  (top-level)
-//
-// ── Computed fields (ships / variants only) ──────────────────────────────────
-//
-//   ComputedStats.getComputedStats(ship, pluginId) accumulates installed
-//   outfits and runs the ship-function formulas from attributeDefinitions.json.
-//   Results are keyed  _fn_*, _derived_*, _sys_*  and exposed via
-//   getComputedSorterFields() which returns  { id, key, label, isComputed:true }.
-//
-//   getFieldValue() resolves these by calling getComputedStats with the item's
-//   own _pluginId so multi-plugin setups work correctly.
-//
-// ── Accumulated attribute fields (ships / variants only) ─────────────────────
-//
-//   accumulateOutfits() in ComputedStats.js produces a flat numeric map of all
-//   base attributes + outfit contributions stacked together. Any key that is
-//   numeric in that result (and not a _fn_/_derived_/_sys_ computed key) is
-//   offered as an "Accumulated (with outfits)" field.  These are discovered by
-//   calling getComputedStats() on each visible ship and scanning the result —
-//   so the list is always driven entirely by what is on screen.
-//
-// ── Per-divisor efficiency fields (outfits tab only) ──────────────────────────
-//
-//   For each numeric top-level outfit attribute discovered by the normal raw
-//   outfit scan, a derived "per X" field is offered for each divisor in
-//   PER_DIVISOR_KEYS (outfit space, cargo space, weapon capacity, engine
-//   capacity, mass) — e.g. "Mass per Outfit Space", "Fuel Capacity per Cargo
-//   Space". For weapon-bearing outfits, the same divisors also generate
-//   "<damage type> DPS per X" and "Total DPS per X" fields, sourced from the
-//   exact same WeaponStats._calcWeaponProfile / getOutfitWeaponStats calls
-//   the plain DPS fields already use — only the division is new, no new
-//   damage math. This re-uses the exact same keys discovered during the raw
-//   scan, so it stays fully dynamic: no attribute names are hardcoded beyond
-//   the divisor list itself, and any new numeric outfit attribute that
-//   appears in the data automatically gets matching per-divisor fields.
-//   Items without a usable divisor value (e.g. licenses lacking 'mass') just
-//   resolve to no value for those fields, the same way any other missing
-//   stat does.
-//
-// ── Field cache ──────────────────────────────────────────────────────────────
-//
-//   The field list for each tab is cached keyed by tab name.
-//   setSorterItems() deletes the current tab's cache entry so the next
-//   getFieldsForTab() call re-scans from the fresh item set.
+// The Data Viewer sorters: which fields you can sort by (from the items on screen), their values and averages.
 
 'use strict';
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
+// ── state ──
 
 let activeSorters       = [];
 let sorterCurrentTab    = 'ships';
@@ -76,9 +12,7 @@ let _sorterAttrDefs     = null;
 let _sorterPluginId     = null; // fallback when item has no own _pluginId
 let _cachedOutfitIndex  = null;
 
-// ---------------------------------------------------------------------------
-// Skip sets — structural / metadata keys that are never sortable.
-// ---------------------------------------------------------------------------
+// ── keys never offered ──
 
 const SKIP_TOP_LEVEL = new Set([
     'name', 'description', 'category', 'thumbnail', 'sprite',
@@ -101,36 +35,20 @@ const SKIP_WEAPON = new Set([
 // Prefixes that mark keys produced by ComputedStats derived/fn/sys resolution.
 const COMPUTED_PREFIXES = ['_fn_', '_derived_', '_sys_'];
 
+// computed key?
 function isComputedKey(key) {
     return COMPUTED_PREFIXES.some(p => key.startsWith(p));
 }
 
-// Keys used as divisors for "per X" efficiency fields. Each is just a normal
-// top-level numeric outfit attribute (or, for mass, present on virtually
-// every outfit) — discovered the same way as every other raw outfit field by
-// the scan below. Listing them here only tells the per-divisor pass which
-// already-discovered fields to divide by; it does not add anything that
-// wasn't already going to be scanned. label is the short name used in the
-// generated group header and field labels (e.g. "Mass per Engine Capacity").
-// Fallback only — _sorterPerDivisorKeys() uses the capacity attributes the parser
-// extracted (gameKeys.js) plus mass.
+// keys used for "per ton / per space" fields
 const _SORTER_PER_DIVISOR_FALLBACK = ['outfit space', 'cargo space', 'weapon capacity', 'engine capacity'];
+// divisor keys
 function _sorterPerDivisorKeys() {
     const caps = window.GameKeys ? window.GameKeys.capacityKeys(_SORTER_PER_DIVISOR_FALLBACK) : _SORTER_PER_DIVISOR_FALLBACK;
     return [...caps, 'mass'].map(key => ({ key, label: key.replace(/\b\w/g, c => c.toUpperCase()) }));
 }
 
-// ---------------------------------------------------------------------------
-// Attribute display multiplier helper
-//
-// attributeDefinitions.json stores raw per-frame values. The displayMultiplier
-// converts them to the human-readable unit shown in-game and in AttributeDisplay:
-//   ×60    → /s   (shield generation, energy generation, cooling, etc.)
-//   ×3600  → /s²  (thrust, reverse thrust, afterburner thrust)
-//   ×6000  → %/s  (resistances, status effects, turn, etc.)
-//   ×100   → %    (multipliers, protections)
-//   ×0.016 → s    (delay attributes)
-// ---------------------------------------------------------------------------
+// an attribute's display multiplier
 
 function _getDisplayMultiplier(key) {
     if (!_sorterAttrDefs) return 1;
@@ -140,23 +58,7 @@ function _getDisplayMultiplier(key) {
         : 1;
 }
 
-// ---------------------------------------------------------------------------
-// Outfit index cache
-//
-// IMPORTANT: this index is shared by BOTH tabs (ships' WeaponStats firing-cost
-// lookups, and outfits' weapon DPS/range resolution) so that submunition
-// references resolve against the SAME merged outfit set everywhere. It is
-// intentionally built to mirror ComputedStats._getOutfitIndex()'s priority
-// order as closely as possible from outside that module (current plugin
-// first, since ComputedStats._getOutfitIndex is private and not exported):
-// the active plugin's own outfits win any name collision, then everything
-// else is merged in on a first-seen basis. This cannot be byte-for-byte
-// identical to ComputedStats' internal _pluginOrder-based merge (that field
-// is private), but it removes the previous behavior where the outfits tab
-// used a totally separate, differently-ordered merge (or window._outfitIndex)
-// than the ships tab — which could pick a different same-named submunition
-// outfit between tabs in multi-plugin setups with name collisions.
-// ---------------------------------------------------------------------------
+// outfit index for the selected plugins
 
 function _getOutfitIndex() {
     if (_cachedOutfitIndex) return _cachedOutfitIndex;
@@ -184,32 +86,25 @@ function _getOutfitIndex() {
     return _cachedOutfitIndex;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// field key → safe id
 
 function keyToId(key) {
     return key.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_\-]/g, '_');
 }
 
+// "energy capacity" → "Energy Capacity"
 function toTitleCase(str) {
     return str.replace(/\b\w/g, c => c.toUpperCase());
 }
 
-// Normalizes the sign of a per-divisor ratio so it reflects the sign of the
-// underlying attribute, not an artifact of dividing by a negative divisor
-// (e.g. 'cargo space' is negative on outfits that expand cargo capacity).
-// Positive numerator → positive result. Negative numerator → negative
-// result. Zero stays zero. This only touches the sign, never the magnitude.
+// "per X" ratio with the right sign
 function _signedPerDivisor(numerator, ratio) {
     if (ratio === 0 || isNaN(ratio)) return ratio;
     const mag = Math.abs(ratio);
     return numerator < 0 ? -mag : mag;
 }
 
-// ---------------------------------------------------------------------------
-// Dynamic field scanner
-// ---------------------------------------------------------------------------
+// every sortable field the items on screen have. Called by: buildFieldsForTab
 
 function scanFieldsFromItems(tab, items) {
     const isShipLike = tab === 'ships' || tab === 'variants';
@@ -232,7 +127,7 @@ function scanFieldsFromItems(tab, items) {
     for (const item of (items || [])) {
 
         if (isShipLike) {
-            // ── Raw base attributes (item.attributes.*) ───────────────────────
+            // raw attributes
             const attrs = item.attributes;
             if (attrs && typeof attrs === 'object') {
                 for (const [key, val] of Object.entries(attrs)) {
@@ -253,7 +148,7 @@ function scanFieldsFromItems(tab, items) {
                 }
             }
 
-            // ── Accumulated attributes (via getComputedStats) ─────────────────
+            // attributes with outfits added (ComputedStats)
             if (typeof getComputedStats === 'function') {
                 const pluginId = item._pluginId || _sorterPluginId;
                 if (pluginId) {
@@ -279,13 +174,7 @@ function scanFieldsFromItems(tab, items) {
                             });
                         }
 
-                        // ── Explicit per-second weapon DPS fields from WeaponStats ──
-                        // Always offered once ANY weapon-bearing outfit contributes to
-                        // this ship's stats — not gated on a literal `_ws_dps_*` key
-                        // being present on THIS particular item, so submunition-only
-                        // launchers (whose own _ws_dps_* breakdown keys are still
-                        // produced by WeaponStats, since it walks the submunition tree)
-                        // are never silently excluded from the picker.
+                        // weapon DPS fields (once any item has a weapon)
                         const WS_FIELDS = [
                             { wsKey: '_ws_totalDps',         label: 'Total DPS (with outfits)'         },
                             { wsKey: '_ws_shieldDps',        label: 'Shield DPS (with outfits)'        },
@@ -294,11 +183,7 @@ function scanFieldsFromItems(tab, items) {
                             { wsKey: '_ws_weaponCount',      label: 'Weapon Types (with outfits)'      },
                             { wsKey: '_ws_totalWeaponMounts',label: 'Total Weapon Mounts'              },
                         ];
-                        // Also add any _ws_dps_* breakdown keys dynamically. These are
-                        // produced by WeaponStats.resolveWeaponStats() from
-                        // dpsByType, which is itself summed from each outfit's
-                        // _calcWeaponProfile().dpsBreakdown — i.e. already walks
-                        // submunitions correctly, no change needed here to pick that up.
+                        // per-damage-type DPS keys
                         for (const key of Object.keys(computed)) {
                             if (!key.startsWith('_ws_dps_')) continue;
                             const dmgType = key.slice('_ws_dps_'.length).replace(/_/g, ' ');
@@ -309,9 +194,7 @@ function scanFieldsFromItems(tab, items) {
                         }
 
                         for (const { wsKey, label } of WS_FIELDS) {
-                            // _ws_shieldHullDps is synthesized on read (see getFieldValue),
-                            // not present on `computed` itself, so don't gate its field
-                            // entry on computed[wsKey] existing.
+                            // shield + hull DPS is worked out when read
                             const isSynthetic = wsKey === '_ws_shieldHullDps';
                             if (!isSynthetic && computed[wsKey] == null) continue;
                             const id = 'ship_ws_' + keyToId(wsKey);
@@ -330,10 +213,7 @@ function scanFieldsFromItems(tab, items) {
                             });
                         }
 
-                        // ── Firing costs per second from WeaponStats ──────────────
-                        // _derived_energy_firing and _derived_heat_firing are zero in
-                        // attrDefs because the JSON formula is hardcoded 0.
-                        // Get real values from WeaponStats weapon profiles instead.
+                        // firing costs per second
                         if (window.WeaponStats) {
                             const outfitMap = item.outfitMap || item.outfits || {};
                             const outfitIdx = _getOutfitIndex();
@@ -377,7 +257,7 @@ function scanFieldsFromItems(tab, items) {
             }
 
         } else if (isOutfits) {
-            // ── Top-level numeric outfit fields ──────────────────────────────
+            // numeric outfit fields
             for (const [key, val] of Object.entries(item)) {
                 if (SKIP_TOP_LEVEL.has(key)) continue;
                 if (typeof val !== 'number')  continue;
@@ -398,16 +278,7 @@ function scanFieldsFromItems(tab, items) {
                     });
                 }
 
-                // ── Per-divisor efficiency variants ────────────────────────────
-                // Built from the SAME raw key just discovered above — not a
-                // separate hardcoded list, so any numeric outfit attribute
-                // automatically gets a matching "per X" field for each divisor
-                // in PER_DIVISOR_KEYS. A divisor never gets compared against
-                // itself (e.g. no "Mass per Mass"), and a field is only offered
-                // once some currently-visible item actually has a usable
-                // (nonzero numeric) value for that divisor — items lacking one
-                // (e.g. licenses lacking 'outfit space') just won't produce a
-                // value for it at read time either way.
+                // per ton / per space versions
                 for (const { key: divKey, label: divLabel } of _sorterPerDivisorKeys()) {
                     if (key === divKey) continue;
                     const divVal = item[divKey];
@@ -431,14 +302,14 @@ function scanFieldsFromItems(tab, items) {
                 }
             }
 
-            // ── Numeric fields inside item.weapon ────────────────────────────
+            // weapon fields
             if (item.weapon && typeof item.weapon === 'object') {
                 for (const [key, val] of Object.entries(item.weapon)) {
                     if (SKIP_WEAPON.has(key))    continue;
                     if (typeof val !== 'number') continue;
                     if (/^[A-Z]/.test(key))      continue;
 
-                    // ── Per-shot field ───────────────────────────────────────
+                    // per shot
                     const id = 'weapon_' + keyToId(key);
                     if (!weaponSeen.has(id)) {
                         weaponSeen.add(id);
@@ -452,15 +323,7 @@ function scanFieldsFromItems(tab, items) {
                         });
                     }
 
-                    // ── Per-divisor variant of this weapon attribute ──────────
-                    // Covers every numeric weapon attribute, not just damage —
-                    // firing costs (energy/heat/fuel per shot), inaccuracy,
-                    // hit force, blast radius, velocity, lifetime, reload,
-                    // burst count, or any other "*  " key on the weapon block,
-                    // any modded/custom one included, since this loop is
-                    // driven by whatever keys actually exist on the item, not
-                    // a hardcoded list. Sign-normalized the same way as the
-                    // raw outfit-attribute per-divisor fields.
+                    // per ton / per space for weapon fields
                     for (const { key: divKey, label: divLabel } of _sorterPerDivisorKeys()) {
                         const divVal = item[divKey];
                         if (typeof divVal !== 'number' || divVal === 0) continue;
@@ -481,14 +344,7 @@ function scanFieldsFromItems(tab, items) {
                     }
                 }
 
-                // ── Computed weapon summary fields ───────────────────────────
-                // Added unconditionally once item.weapon exists, regardless of
-                // which literal keys that weapon's own JSON happens to carry.
-                // This is what lets pure-launcher outfits (reload + submunition
-                // pointer, no damage keys of their own) still offer Hull/Shield/
-                // Total DPS — those are resolved via WeaponStats._calcWeaponProfile,
-                // which walks the submunition tree regardless of what's on the
-                // launcher's own weapon block.
+                // weapon summary fields
                 if (!weaponSeen.has('weapon_computed_totalDps')) {
                     weaponSeen.add('weapon_computed_totalDps');
                     weaponFields.push({ id: 'weapon_computed_totalDps',  key: 'totalDps',       label: 'Total DPS',        path: null, group: 'weapon', isOutfitComputed: true });
@@ -499,17 +355,7 @@ function scanFieldsFromItems(tab, items) {
                     weaponFields.push({ id: 'weapon_computed_sps',       key: 'shotsPerSecond', label: 'Shots Per Second', path: null, group: 'weapon', isOutfitComputed: true });
                 }
 
-                // ── Per-damage-type DPS fields ────────────────────────────────
-                // Resolved via WeaponStats._calcWeaponProfile(...).dpsBreakdown,
-                // which is keyed by every `<x> damage` key found ANYWHERE in the
-                // submunition tree (not just on this outfit's own weapon block).
-                // The damage-type list itself is now discovered dynamically per
-                // item from that same dpsBreakdown, rather than from a fixed
-                // hardcoded list — so a damage type that only appears on a
-                // submunition several levels deep (or a modded/custom damage
-                // type not in any static list) still gets its own DPS field
-                // and per-divisor efficiency fields, exactly like every other
-                // dynamically-discovered field in this file.
+                // DPS per damage type
                 if (window.WeaponStats) {
                     const profileForTypes = window.WeaponStats._calcWeaponProfile(item.weapon, item.name, _getOutfitIndex());
                     const discoveredDmgTypes = profileForTypes
@@ -533,17 +379,7 @@ function scanFieldsFromItems(tab, items) {
                         });
                     }
 
-                    // ── Per-divisor weapon damage & DPS efficiency fields ─────
-                    // Reuses the exact same WeaponStats._calcWeaponProfile(...)
-                    // .dpsBreakdown resolution as the plain DPS fields above —
-                    // Sorter.js still does not walk submunitions itself, it
-                    // only divides an already-resolved DPS value by the
-                    // outfit's own divisor attribute (outfit space, cargo
-                    // space, weapon capacity, engine capacity, or mass).
-                    // Offered per discovered damage type per divisor (so
-                    // submunition-only damage types get these too), only once
-                    // some currently-visible item has both a weapon and a
-                    // usable nonzero value for that divisor.
+                    // damage and DPS per ton / per space
                     for (const { key: divKey, label: divLabel } of _sorterPerDivisorKeys()) {
                         const divVal = item[divKey];
                         if (typeof divVal !== 'number' || divVal === 0) continue;
@@ -566,11 +402,7 @@ function scanFieldsFromItems(tab, items) {
                         }
                     }
                 }
-                // ── Total DPS per divisor ───────────────────────────────────────
-                // Same idea, but against the summed totalDps weapon-computed
-                // field rather than a single damage type — the headline
-                // "how much damage per unit of space/mass does this weapon do"
-                // number, sourced from WeaponStats.getOutfitWeaponStats.
+                // total DPS per ton / per space
                 for (const { key: divKey, label: divLabel } of _sorterPerDivisorKeys()) {
                     const divVal = item[divKey];
                     if (typeof divVal !== 'number' || divVal === 0) continue;
@@ -592,7 +424,7 @@ function scanFieldsFromItems(tab, items) {
             }
 
         } else {
-            // ── Top-level numeric fields for effects / other tabs ────────────
+            // numeric fields on effects and other tabs
             for (const [key, val] of Object.entries(item)) {
                 if (typeof val !== 'number') continue;
                 if (key.startsWith('_'))      continue;
@@ -622,18 +454,14 @@ function scanFieldsFromItems(tab, items) {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Computed fields (ships / variants only)
-// ---------------------------------------------------------------------------
+// computed fields (ComputedStats)
 
 function buildComputedFields() {
     if (typeof getComputedSorterFields !== 'function') return [];
     return getComputedSorterFields().map(f => ({ ...f, useComputed: true }));
 }
 
-// ---------------------------------------------------------------------------
-// Hardpoint count pseudo-fields (ships / variants only)
-// ---------------------------------------------------------------------------
+// ── hardpoints ──
 
 const HARDPOINT_FIELDS = [
     { id: '_gunCount',            label: 'Gun Ports',            fn: i => (i.guns            || []).length },
@@ -644,9 +472,7 @@ const HARDPOINT_FIELDS = [
     { id: '_steeringEngineCount', label: 'Steering Eng. Points', fn: i => (i.steeringEngines || []).length },
 ];
 
-// ---------------------------------------------------------------------------
-// Master field list for a tab
-// ---------------------------------------------------------------------------
+// fields for a tab (cached)
 
 function buildFieldsForTab(tab, items) {
     const isShipLike = tab === 'ships' || tab === 'variants';
@@ -679,12 +505,11 @@ function buildFieldsForTab(tab, items) {
     return all;
 }
 
-// ---------------------------------------------------------------------------
-// Field cache — per tab, rebuilt when items change
-// ---------------------------------------------------------------------------
+// ── field cache ──
 
 const _fieldCache = {};
 
+// fields for a tab
 function getFieldsForTab(tab) {
     if (!_fieldCache[tab]) {
         _fieldCache[tab] = buildFieldsForTab(tab, _sorterItems);
@@ -692,19 +517,19 @@ function getFieldsForTab(tab) {
     return _fieldCache[tab];
 }
 
+// forget cached fields
 function clearFieldCache() {
     for (const k of Object.keys(_fieldCache)) delete _fieldCache[k];
 }
 
-// ---------------------------------------------------------------------------
-// Public setters
-// ---------------------------------------------------------------------------
+// use these attribute definitions
 
 function setSorterAttrDefs(defs) {
     _sorterAttrDefs = defs;
     clearFieldCache();
 }
 
+// plugin for computed stats
 function setSorterPluginId(pluginId) {
     _sorterPluginId    = pluginId;
     _cachedOutfitIndex = null;
@@ -712,6 +537,7 @@ function setSorterPluginId(pluginId) {
     if (typeof clearComputedCache === 'function') clearComputedCache();
 }
 
+// items on screen. Called by: generalFilterStuff
 function setSorterItems(items) {
     _sorterItems = items || [];
     delete _fieldCache[sorterCurrentTab];
@@ -719,41 +545,11 @@ function setSorterItems(items) {
     if (typeof stampSorterValues === 'function') stampSorterValues();
 }
 
-// ---------------------------------------------------------------------------
-// Value extraction
-//
-// Resolution order:
-//   0a-vi. isOutfitComputedPerDivisor — total weapon DPS divided by a divisor
-//          attribute (outfit space, cargo space, weapon/engine capacity, mass)
-//   0a-v.  isDpsPerDivisor — per-damage-type DPS divided by a divisor attribute
-//   0a-iv. isPerDivisor — raw outfit attribute divided by a divisor attribute
-//   0a-iii. (reserved)
-//   0a-ii. isShieldHullDps / isShieldHullDpsShip — synthesized Shield+Hull DPS
-//   0a-i.  isFiringCost   — WeaponStats firing-cost aggregation
-//   0a.    isOutfitComputed  — WeaponStats profile fields (range, sps, totalDps…)
-//   0b.    isDps             — per-damage-type DPS, via WeaponStats._calcWeaponProfile
-//   1.     field.computed    — hardpoint count lambda
-//   2.     isComputed/useComputed — _fn_/_derived_/_sys_ via getComputedStats
-//   3.     useAccum          — accumulated attr (base + outfits) via getComputedStats
-//   4.     field.path        — raw path walk on the item
-//
-// NOTE: submunition resolution for BOTH tabs now goes exclusively through
-// WeaponStats (_calcWeaponProfile / getShipWeaponStats / resolveWeaponStats)
-// and ComputedStats (getComputedStats). Sorter.js no longer re-implements any
-// submunition-tree walking itself — it only calls into those two modules and
-// reads the fields they already expose. This removes the previous duplicate,
-// buggier walker that used a single shared `visited` Set across sibling
-// branches (which could undercount weapons whose submunition tree reconverges
-// on a shared outfit reached via more than one path).
-// ---------------------------------------------------------------------------
+// a field's value for one item (works out computed fields as needed)
 
 function getFieldValue(item, field) {
 
-    // 0a-iv. Per-divisor raw outfit attribute ratio — OUTFITS tab.
-    // Walks field.path on the raw item to get the numerator (same walk as
-    // case 4 below), then divides by this item's own divisor attribute value
-    // (outfit space, cargo space, weapon capacity, engine capacity, or mass),
-    // read fresh from the item rather than anything cached at scan time.
+    // per ton / per space outfit attribute
     if (field.isPerDivisor) {
         const divisor = item[field.divisorKey];
         if (typeof divisor !== 'number' || divisor === 0) return undefined;
@@ -768,12 +564,7 @@ function getFieldValue(item, field) {
         return _signedPerDivisor(numerator, numerator / divisor);
     }
 
-    // 0a-v. Per-divisor weapon damage-type DPS — OUTFITS tab.
-    // Sourced from the exact same WeaponStats._calcWeaponProfile(...)
-    // .dpsBreakdown lookup the plain isDps fields use (see case 0b below);
-    // this just divides that already-resolved value by the item's own
-    // divisor attribute. No new damage math — same submunition-tree walk,
-    // same cycle guards, just reused and divided.
+    // per ton / per space damage-type DPS
     if (field.isDpsPerDivisor) {
         if (!item.weapon || !window.WeaponStats) return undefined;
         const divisor = item[field.divisorKey];
@@ -786,10 +577,7 @@ function getFieldValue(item, field) {
         return _signedPerDivisor(val, val / divisor);
     }
 
-    // 0a-vi. Per-divisor total weapon DPS — OUTFITS tab.
-    // Sourced from WeaponStats.getOutfitWeaponStats(...), the exact same call
-    // isOutfitComputed uses for the plain "Total DPS" field — just divided by
-    // the item's own divisor attribute instead of displayed alone.
+    // per ton / per space total DPS
     if (field.isOutfitComputedPerDivisor) {
         if (!item.weapon || !window.WeaponStats) return undefined;
         const divisor = item[field.divisorKey];
@@ -801,9 +589,7 @@ function getFieldValue(item, field) {
         return _signedPerDivisor(val, val / divisor);
     }
 
-    // 0a-ii. Shield + Hull DPS — OUTFITS tab.
-    // Sourced from WeaponStats._calcWeaponProfile(...), the exact same call
-    // isOutfitComputed uses for shieldDps/hullDps individually — just summed.
+    // shield + hull DPS (outfits)
     if (field.isShieldHullDps) {
         if (!item.weapon || !window.WeaponStats) return undefined;
         const profile = window.WeaponStats._calcWeaponProfile(item.weapon, item.name, _getOutfitIndex());
@@ -813,11 +599,7 @@ function getFieldValue(item, field) {
         return (shieldDps || hullDps) ? shieldDps + hullDps : undefined;
     }
 
-    // 0a-ii. Shield + Hull DPS — SHIPS tab.
-    // Sourced from getComputedStats(...)['_ws_shieldDps'] + ['_ws_hullDps'],
-    // which ComputedStats already populates (via WeaponStats.resolveWeaponStats)
-    // by walking every outfit's full submunition tree. No new computation here,
-    // just summing two fields ComputedStats already exposes.
+    // shield + hull DPS (ships)
     if (field.isShieldHullDpsShip) {
         if (typeof getComputedStats !== 'function') return undefined;
         const pluginId = item._pluginId || _sorterPluginId;
@@ -860,11 +642,7 @@ function getFieldValue(item, field) {
         return profile[field.key] ?? undefined;
     }
 
-    // 0b. Weapon DPS per damage type — OUTFITS tab.
-    // Delegates entirely to WeaponStats._calcWeaponProfile(...).dpsBreakdown,
-    // which walks the full submunition tree (cycle-guarded with a per-branch
-    // cloned `visited` Set, depth-capped at 8) exactly the same way the ships
-    // tab's _ws_dps_* fields do. Sorter.js does not walk submunitions itself.
+    // DPS per damage type (outfits)
     if (field.isDps) {
         if (!item.weapon || !window.WeaponStats) return undefined;
         const profile = window.WeaponStats._calcWeaponProfile(item.weapon, item.name, _getOutfitIndex());
@@ -926,6 +704,7 @@ function getFieldValue(item, field) {
     return undefined;
 }
 
+// average as text
 function formatAvgValue(val) {
     if (val == null) return '—';
     if (typeof val === 'number') {
@@ -936,9 +715,7 @@ function formatAvgValue(val) {
     return String(val);
 }
 
-// ---------------------------------------------------------------------------
-// Core sort
-// ---------------------------------------------------------------------------
+// sort the items by the chosen sorters. Called by: generalFilterStuff
 
 function applySorters(items) {
     if (activeSorters.length === 0) return items;
@@ -967,9 +744,7 @@ function applySorters(items) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Average calculation
-// ---------------------------------------------------------------------------
+// average of a field over the items
 
 function computeAverage(sorter) {
     const fields = getFieldsForTab(sorterCurrentTab);
@@ -985,9 +760,7 @@ function computeAverage(sorter) {
     return formatAvgValue(avg);
 }
 
-// ---------------------------------------------------------------------------
-// Render active sorter pills
-// ---------------------------------------------------------------------------
+// the sorter box
 
 async function renderSorterBox() {
     const box = document.getElementById('sorterActiveList');
@@ -1060,13 +833,12 @@ async function renderSorterBox() {
     });
 }
 
+// re-run the filter
 async function _triggerFilterItems() {
     if (typeof filterItems === 'function') await filterItems();
 }
 
-// ---------------------------------------------------------------------------
-// Picker popup
-// ---------------------------------------------------------------------------
+// open the field picker
 
 function openSorterPicker() {
     sorterPickerPending = activeSorters.map(s => s.id);
@@ -1081,11 +853,13 @@ function openSorterPicker() {
     search.focus();
 }
 
+// close the picker
 function closeSorterPicker() {
     const overlay = document.getElementById('sorterPickerOverlay');
     if (overlay) overlay.classList.remove('sorter-overlay-visible');
 }
 
+// apply the picker
 async function confirmSorterPicker() {
     const fields = getFieldsForTab(sorterCurrentTab);
 
@@ -1126,9 +900,7 @@ async function confirmSorterPicker() {
     await _triggerFilterItems();
 }
 
-// ---------------------------------------------------------------------------
-// Stamp sorter values onto cards
-// ---------------------------------------------------------------------------
+// show each card's value for the sorted field
 
 function stampSorterValues() {
     const container = document.getElementById('cardsContainer');
@@ -1168,9 +940,7 @@ function stampSorterValues() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Picker list renderer
-// ---------------------------------------------------------------------------
+// the picker list
 
 function renderPickerList(query) {
     const list = document.getElementById('sorterPickerList');
@@ -1275,9 +1045,7 @@ function renderPickerList(query) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tab change
-// ---------------------------------------------------------------------------
+// tab changed: reset the fields
 
 function onSorterTabChange(tab) {
     sorterCurrentTab = tab;
@@ -1286,9 +1054,7 @@ function onSorterTabChange(tab) {
     renderSorterBox();
 }
 
-// ---------------------------------------------------------------------------
-// Global exports
-// ---------------------------------------------------------------------------
+// ── globals ──
 
 window.applySorters        = applySorters;
 window.setSorterItems      = setSorterItems;

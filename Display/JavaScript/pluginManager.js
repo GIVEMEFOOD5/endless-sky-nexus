@@ -1,40 +1,15 @@
-/* ═══════════════════════════════════════════════════════════════
-   pluginManager.js  —  Endless Sky Plugin Manager
-   Fetches plugins.json on page load, lets the user add / edit /
-   remove entries, then saves back via the Vercel backend.
-
-   Two lists:
-     _plugins  — already committed to plugins.json (Active Plugins)
-     _pending  — added this session, not yet saved (Awaiting Save)
-
-   Also polls parse-status.json to show when the GitHub Action is
-   running, and blocks saves during that window.
-
-   Entries can be one of two types:
-     "git"     — a GitHub repository, cloned by the parser via git
-     "archive" — a .zip/.tar/.tar.gz/.tgz/.tar.bz2 uploaded through
-                 this page straight to Vercel Blob storage, then
-                 committed into rawData/ in the repo. May contain
-                 multiple plugins; the parser detects all of them.
-   ═══════════════════════════════════════════════════════════════ */
+// The Plugin Manager page: add plugins (git repo or uploaded archive), edit or remove them, and watch the parser.
 
 'use strict';
 
-// This project has no build step (plain <script> tags, no bundler), so we
-// can't use a bare "@vercel/blob/client" specifier — browsers can't resolve
-// that without a bundler. esm.sh re-serves npm packages as browser-ready
-// ESM, so this works with zero build tooling. Pin the version so a future
-// @vercel/blob release can't silently change behaviour under you — and
-// keep this in sync with the @vercel/blob version in the Vercel project's
-// package.json. A mismatch between client and server versions here caused
-// a 400 Bad Request on the direct-to-storage upload in earlier testing.
+// no build step, so no secrets here — the Vercel backend holds them
 import { upload } from 'https://esm.sh/@vercel/blob@2.6.1/client';
 
-/* ── Paths ───────────────────────────────────────────────────── */
+// ── paths ──
 const PLUGINS_JSON_PATH = 'https://raw.githubusercontent.com/givemefood5/endless-sky-nexus/main/plugins.json';
 const PARSE_STATUS_PATH = 'https://api.github.com/repos/givemefood5/endless-sky-nexus/contents/parse-status.json';
 
-/* ── Vercel backend endpoints ────────────────────────────────── */
+// ── Vercel backend ──
 const BACKEND_URL        = 'https://vercel-for-endless-sky-ship-builder.vercel.app/api/update-json';
 const BLOB_UPLOAD_URL    = 'https://vercel-for-endless-sky-ship-builder.vercel.app/api/blob-upload';
 const COMMIT_ARCHIVE_URL = 'https://vercel-for-endless-sky-ship-builder.vercel.app/api/commit-archive';
@@ -48,15 +23,13 @@ const UPDATE_SECRET = null;
 const MAX_ARCHIVE_BYTES = 90 * 1024 * 1024; // 90 MB
 const ALLOWED_ARCHIVE_EXTENSIONS = ['.zip', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar'];
 
-/* ── Poll intervals ──────────────────────────────────────────── */
+// ── polling ──
 const POLL_INTERVAL_RUNNING    = 30_000;  // 30 s  — while parse is active
 const POLL_INTERVAL_IDLE       = 120_000; // 2 min — background keep-alive
 const POLL_INTERVAL_AFTER_SAVE = 8_000;  // 8 s   — rapid checks just after a save
 const POLL_AFTER_SAVE_DURATION = 180_000; // 3 min — how long to keep rapid-polling
 
-/* ══════════════════════════════════════════════════════════════
-   Helpers
-   ══════════════════════════════════════════════════════════════ */
+// ── helpers ──
 
 function normaliseRepository(raw) {
     const s = (raw || '').trim();
@@ -74,6 +47,7 @@ function normaliseRepository(raw) {
     return null;
 }
 
+// zip / tar.gz?
 function detectArchiveExtension(filename) {
     const lower = (filename || '').toLowerCase();
     for (const ext of ALLOWED_ARCHIVE_EXTENSIONS) {
@@ -100,14 +74,13 @@ function highlight(str, query) {
     );
 }
 
+// "1.2 MB"
 function formatBytes(bytes) {
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/* ══════════════════════════════════════════════════════════════
-   PluginStore
-   ══════════════════════════════════════════════════════════════ */
+// ── PluginStore: the two lists ──
 class PluginStore {
     constructor() {
         this._plugins   = [];
@@ -162,7 +135,7 @@ class PluginStore {
         return null;
     }
 
-    /* ── Add a git-repository plugin (unchanged behaviour) ───────── */
+    // add a git plugin
     addPlugin(name, repo) {
         const trimName = (name || '').trim();
         if (!trimName) return { ok: false, error: 'Plugin name cannot be empty.' };
@@ -178,11 +151,7 @@ class PluginStore {
         return { ok: true };
     }
 
-    /* ── Add an archive plugin. `archiveUrl` is already a resolved
-       raw.githubusercontent.com URL — the caller (UI) is responsible
-       for actually performing the upload+commit before calling this;
-       this method just registers the resulting entry, same as addPlugin
-       registers a git repo URL. ─────────────────────────────────── */
+    // add an archive plugin (URL already resolved)
     addArchivePlugin(name, archiveUrl) {
         const trimName = (name || '').trim();
         if (!trimName) return { ok: false, error: 'Plugin name cannot be empty.' };
@@ -205,10 +174,7 @@ class PluginStore {
 
         const existing = this._plugins[index];
 
-        // Archive entries keep their uploaded file — only the display
-        // name can be changed here. Re-uploading a replacement archive
-        // is done via "remove, then add" rather than in-place editing,
-        // to keep this edit path simple and unambiguous.
+        // archives keep their file — only the name can change
         if (existing.type === 'archive') {
             const err = this._checkNameAndRepoUnique(trimName, null, { skipListIndex: { items: this._plugins, index } });
             if (err) return { ok: false, error: err };
@@ -305,11 +271,7 @@ class PluginStore {
     }
 }
 
-/* ══════════════════════════════════════════════════════════════
-   ArchiveUploader
-   Handles the two-step upload: browser → Vercel Blob directly,
-   then a small POST to /api/commit-archive to land it in GitHub.
-   ══════════════════════════════════════════════════════════════ */
+// ── ArchiveUploader: upload a ZIP to GitHub via the backend ──
 class ArchiveUploader {
     static async upload(file, pluginName, onProgress) {
         const ext = detectArchiveExtension(file.name);
@@ -365,14 +327,7 @@ class ArchiveUploader {
         }
     }
 
-    /**
-     * Delete the underlying file from rawData/ in GitHub. Used when the
-     * user removes an "archive"-type plugin entry, so the upload doesn't
-     * sit around unreferenced forever. Failures here are logged but don't
-     * block the plugin removal itself — a leftover file in rawData/ is
-     * harmless clutter, not a correctness problem, so we don't want a
-     * network hiccup here to prevent someone from removing a plugin.
-     */
+    // delete the archive file from GitHub
     static async deleteArchive(rawUrl) {
         try {
             const headers = { 'Content-Type': 'application/json' };
@@ -399,9 +354,7 @@ class ArchiveUploader {
     }
 }
 
-/* ══════════════════════════════════════════════════════════════
-   ParseStatusMonitor
-   ══════════════════════════════════════════════════════════════ */
+// ── ParseStatusMonitor: is the parser running? ──
 
 const PARSE_STATUS_API_PATH =
     'https://api.github.com/repos/givemefood5/endless-sky-nexus/contents/parse-status.json';
@@ -575,9 +528,7 @@ async _pollPages() {
     }
 }
 
-/* ══════════════════════════════════════════════════════════════
-   PluginManagerUI
-   ══════════════════════════════════════════════════════════════ */
+// ── PluginManagerUI ──
 class PluginManagerUI {
     constructor(store, monitor) {
         this.store   = store;
@@ -936,9 +887,7 @@ async _handleRemoveSave(removedName, removedPlugin) {
         return;
     }
 
-    // Only delete the underlying rawData/ file AFTER plugins.json has
-    // successfully been saved without this entry — deleting first would
-    // risk leaving a dangling reference if the save step then failed.
+    // only delete the file after plugins.json is saved
     if (removedPlugin?.type === 'archive' && removedPlugin.repository) {
         const delResult = await ArchiveUploader.deleteArchive(removedPlugin.repository);
         if (!delResult.ok) {
@@ -1125,10 +1074,7 @@ async _handleRemoveSave(removedName, removedPlugin) {
                 if (confirm(`Remove "${name}" from the pending list?`)) {
                     if (this._editPending === idx) this._clearInputs();
                     this.store.removePending(idx);
-                    // The pending entry was never saved into plugins.json, but if
-                    // it's an archive, the file itself was already committed to
-                    // rawData/ at upload time — clean that up now so it doesn't
-                    // sit around unreferenced forever.
+                    // a pending archive that was never saved — delete its file too
                     if (removedPlugin?.type === 'archive' && removedPlugin.repository) {
                         ArchiveUploader.deleteArchive(removedPlugin.repository).then(result => {
                             if (!result.ok) {
@@ -1160,9 +1106,7 @@ async _handleRemoveSave(removedName, removedPlugin) {
     }
 }
 
-/* ══════════════════════════════════════════════════════════════
-   Bootstrap — runs after DOM ready
-   ══════════════════════════════════════════════════════════════ */
+// ── start ──
 document.addEventListener('DOMContentLoaded', async () => {
     const store   = new PluginStore();
     const monitor = new ParseStatusMonitor();

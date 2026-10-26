@@ -2,6 +2,7 @@ let categoryFilterExpanded = false;
 let lastCategoryFilter = [];
 let savedCategoryFilterState = {};
 
+// categories on the items
 function extractCategories(data) {
     const categories = new Set();
 
@@ -27,6 +28,7 @@ function extractCategories(data) {
     return Array.from(categories).sort();
 }
 
+// category tick boxes
 function populateCategoryFilters(data) {
     lastCategoryFilter = data;
     const categories = extractCategories(data);
@@ -71,6 +73,7 @@ function populateCategoryFilters(data) {
     });
 }
 
+// ticked categories
 function getSelectedCategories() {
     const checkboxes = document.querySelectorAll('#filterOptions input[type="checkbox"]');
     
@@ -86,6 +89,7 @@ function getSelectedCategories() {
     return selected;
 }
 
+// clear every filter
 function clearFilters() {
     savedCategoryFilterState = {};
     const checkboxes = document.querySelectorAll('#filterOptions input[type="checkbox"]');
@@ -96,6 +100,7 @@ function clearFilters() {
     filterItems();
 }
 
+// show/hide the category filter
 function categoryFilterDisplay() {
     const filterOptions = document.getElementById('filterOptions');
     const filterTitle = document.getElementById('categoryFilterTitle');

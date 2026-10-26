@@ -1,38 +1,8 @@
 'use strict';
 
-// ─── LocationDisplay.js ───────────────────────────────────────────────────────
-//
-// Renders the "Locations" modal tab for ships, variants, and outfits.
-//
-// Expected locations shape (attached by locationResolver.js):
-//
-//   locations: {
-//     "official-game/endless-sky": {
-//       Planets:        ["Earth", "Poisonwood"],
-//       Systems:        ["Sol", "Betelgeuse"],
-//       Missions:       ["Cargo Run 1"],
-//       Outfitters:     ["Ammo"],
-//       Ships:          ["Bulk Freighter"],        // outfits only
-//       ShipyardPlanets:["New Hope"],              // outfits only
-//       "_deprecated/unused": true
-//     }
-//   }
-//
-// Only location blocks whose plugin key matches an entry in the currently
-// active plugin list (from PluginManager) are shown.  If PluginManager is
-// not yet ready the tab shows a "not ready" notice instead of falling back
-// to showing everything — this prevents stale / wrong data appearing.
-//
-// ─── Performance notes ───────────────────────────────────────────────────────
-//  • All rendering is done via DocumentFragment + createElement — no
-//    innerHTML string concatenation in hot paths.
-//  • Plugin blocks are collapsed by default; their list content is only
-//    built when the user expands them (lazy DOM construction).
-//  • The unused-marker check is a single key lookup, not iteration.
-//  • Event delegation is used on the container instead of per-item listeners.
-// ─────────────────────────────────────────────────────────────────────────────
+// The Locations tab in the item window: where to buy it, who flies it, missions — per selected plugin.
 
-// ─── Category display config ──────────────────────────────────────────────────
+// ── categories (icons, labels) ──
 
 const LOCATION_CATEGORIES = [
     { key: 'Planets',         label: 'Planets',           icon: '🌍' },
@@ -45,23 +15,9 @@ const LOCATION_CATEGORIES = [
 
 const CATEGORY_KEY_SET = new Set(LOCATION_CATEGORIES.map(c => c.key));
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ── helpers ──
 
-/**
- * Returns the Set of all location-key strings that correspond to currently
- * active plugins, or null if PluginManager is not available / has no active
- * plugins yet.
- *
- * Location keys in the data are stored as "sourceName/outputName"
- * (e.g. "official-game/endless-sky"), but PluginManager tracks plugins by
- * outputName alone (e.g. "endless-sky").  We therefore build the set to
- * include every form a key might take:
- *   • the raw outputName itself          ("endless-sky")
- *   • "sourceName/outputName"            ("official-game/endless-sky")
- *
- * This is derived by looking up each active outputName in allData where the
- * sourceName is stored.
- */
+// every location key a selected plugin goes by
 function _getActivePluginSet() {
     if (!window.PluginManager?.getActivePlugins) return null;
 
@@ -85,14 +41,12 @@ function _getActivePluginSet() {
     return keys;
 }
 
-/**
- * Friendly display name for a plugin output-name.
- */
+// plugin display name
 function _pluginLabel(outputName) {
     return window.allData?.[outputName]?.displayName || outputName;
 }
 
-/** Build a pill/chip element for a single list value. */
+// one pill
 function _makePill(text) {
     const pill = document.createElement('span');
     pill.className = 'ld-pill';
@@ -100,7 +54,7 @@ function _makePill(text) {
     return pill;
 }
 
-/** Build the category sub-section (icon + label + pills). */
+// one category with its pills
 function _buildCategorySection(cfg, values) {
     const section = document.createElement('div');
     section.className = 'ld-category';
@@ -123,10 +77,7 @@ function _buildCategorySection(cfg, values) {
     return section;
 }
 
-/**
- * Build the content div for one plugin block.
- * Called lazily — only when the user expands the block.
- */
+// a plugin block's contents (built when opened)
 function _buildPluginContent(pluginData) {
     const content = document.createElement('div');
     content.className = 'ld-plugin-content';
@@ -166,17 +117,12 @@ function _buildPluginContent(pluginData) {
     return content;
 }
 
-/**
- * Build a collapsible plugin block.
- * Content is built lazily on first expand.
- * Since we only ever call this for active plugins now, isActive is always
- * true — the parameter is kept for API compatibility.
- */
+// a collapsible plugin block
 function _buildPluginBlock(outputName, pluginData, startExpanded) {
     const block = document.createElement('div');
     block.className = 'ld-plugin-block ld-plugin-active';
 
-    // ── Header (clickable toggle) ─────────────────────────────────────────────
+    // header
     const header = document.createElement('div');
     header.className = 'ld-plugin-header';
     header.setAttribute('role', 'button');
@@ -200,7 +146,7 @@ function _buildPluginBlock(outputName, pluginData, startExpanded) {
     header.appendChild(arrow);
     block.appendChild(header);
 
-    // ── Content (lazy) ────────────────────────────────────────────────────────
+    // contents (built on first open)
     const contentWrapper = document.createElement('div');
     contentWrapper.className = 'ld-plugin-content-wrapper';
     contentWrapper.style.display = startExpanded ? 'block' : 'none';
@@ -208,6 +154,7 @@ function _buildPluginBlock(outputName, pluginData, startExpanded) {
 
     let contentBuilt = false;
 
+    // open
     function expand() {
         if (!contentBuilt) {
             contentWrapper.appendChild(_buildPluginContent(pluginData));
@@ -218,6 +165,7 @@ function _buildPluginBlock(outputName, pluginData, startExpanded) {
         header.setAttribute('aria-expanded', 'true');
     }
 
+    // close
     function collapse() {
         contentWrapper.style.display = 'none';
         arrow.textContent = '▸';
@@ -244,15 +192,9 @@ function _buildPluginBlock(outputName, pluginData, startExpanded) {
     return block;
 }
 
-// ─── Main render function ─────────────────────────────────────────────────────
+// ── main ──
 
-/**
- * Renders the full locations tab into `container`.
- *
- * @param {HTMLElement} container  - The modal tab content element to render into.
- * @param {object}      item       - The ship / variant / outfit data object.
- * @param {string}      pluginId   - The primary/active plugin id.
- */
+// draw the tab. Called by: DataViewer.switchModalTab
 function renderLocationsTab(container, item, pluginId) {
     container.innerHTML = '';
 
@@ -266,9 +208,7 @@ function renderLocationsTab(container, item, pluginId) {
         return;
     }
 
-    // ── Require PluginManager to be ready ─────────────────────────────────────
-    // We deliberately do NOT fall back to showing all plugins — that would show
-    // location data for plugins the user has not activated.
+    // needs the plugin list to be ready
     const activePlugins = _getActivePluginSet();
 
     if (!activePlugins) {
@@ -279,7 +219,7 @@ function renderLocationsTab(container, item, pluginId) {
         return;
     }
 
-    // ── Filter: only keep location entries whose key is an active plugin ──────
+    // only selected plugins
     const activeEntries = Object.entries(locations)
         .filter(([outputName]) => activePlugins.has(outputName));
 
@@ -294,8 +234,7 @@ function renderLocationsTab(container, item, pluginId) {
     // Sort alphabetically by display label
     activeEntries.sort(([a], [b]) => _pluginLabel(a).localeCompare(_pluginLabel(b)));
 
-    // ── Render one block per active plugin that has location data ─────────────
-    // If there is only one entry, start it expanded automatically.
+    // one block per plugin with data
     const autoExpand = activeEntries.length === 1;
 
     const frag = document.createDocumentFragment();
@@ -305,24 +244,8 @@ function renderLocationsTab(container, item, pluginId) {
     container.appendChild(frag);
 }
 
-// ─── Tab registration helper ──────────────────────────────────────────────────
-//
-// Call this from app.js getAvailableTabs() to add the locations tab when
-// location data exists:
-//
-//   if (item.locations && Object.keys(item.locations).length > 0)
-//       tabs.push({ id: 'locations', label: 'Locations' });
-//
-// And in switchModalTab(), handle 'locations':
-//
-//   if (tabId === 'locations') {
-//       const pluginIdForDisplay = item._pluginId || currentPlugin;
-//       window.LocationDisplay.renderLocationsTab(tabContent, item, pluginIdForDisplay);
-//       return;
-//   }
-//
-// ─────────────────────────────────────────────────────────────────────────────
+// ── tab registration ──
 
-// ─── Export ───────────────────────────────────────────────────────────────────
+// ── globals ──
 
 window.LocationDisplay = { renderLocationsTab, injectStyles };

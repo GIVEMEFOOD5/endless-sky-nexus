@@ -1,19 +1,6 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  pluginRefs.js — which plugins a ship-builder design depends on
-//
-//  Used by the parser (to flag shared ships and fleets when a plugin is
-//  removed) and by the site (to show "needs plugin X" on ships). A design
-//  refers to plugins through:
-//    • _sourcePlugin / _sourceShip — the game ship it was started from
-//    • outfits[].pluginId, or the "plugin::name" internalId
-//  Plugins are named either by plugin_id ("Source/folder") or by the folder
-//  (output_name), depending on where the item was picked — both are matched.
-//
-//  missingFor(design, removed) → [{ plugin_id, display_name, repository,
-//    removed_at, uses: [item names] }]
-// ═══════════════════════════════════════════════════════════════════════════
+// Which plugins a saved design needs, and which of those have been removed from the site.
 
 (function (root, factory) {
   const api = factory();
@@ -22,7 +9,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   const clean = v => String(v ?? '').replace(/^"([^"]*)"$/, '$1');
 
-  /** [[pluginKey, itemName], …] for one design. */
+  // [[plugin, item]] a design uses
   function refsOf(design) {
     const out = [];
     if (!design || typeof design !== 'object') return out;
@@ -39,7 +26,7 @@
     return out;
   }
 
-  /** Index removed_plugins rows by every name a design might use for them. */
+  // removed plugins by every name a design might use
   function indexRemoved(rows) {
     const map = new Map();
     for (const r of rows || []) {
@@ -50,6 +37,7 @@
     return map;
   }
 
+  // removed plugins a design needs
   function missingFor(design, removedIndex) {
     if (!removedIndex || !removedIndex.size) return [];
     const byPlugin = new Map();

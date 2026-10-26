@@ -1,28 +1,13 @@
 'use strict';
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  pluginAvailability.js — "this ship needs a plugin that was removed"
-//
-//  When the parser removes a plugin it records it in `removed_plugins`
-//  (name, where it came from, when). This reads that list once and lets any
-//  page mark ships that still use it — fleets in the browser, shared ships,
-//  profile pages — with the plugin's name and a link to where it lives, so
-//  people know what's missing and how to get it back.
-//
-//    PluginAvailability.ready                → Promise (list loaded)
-//    PluginAvailability.missing(design)      → [{ plugin_id, display_name, repository, removed_at, uses }]
-//    PluginAvailability.badgeHtml(design)    → small "⚠ Needs …" badge(s), or ''
-//    PluginAvailability.noticeHtml(design)   → a fuller explanation, or ''
-//
-//  Fires 'pluginAvailabilityReady' on document when the list arrives.
-//  Needs pluginRefs.js and supabaseClient.js.
-// ═══════════════════════════════════════════════════════════════════════════
+// Badges and notices for designs that need a plugin the site no longer has.
 
 (function () {
   const h = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const CACHE_KEY = 'es_removed_plugins_v1';
   let index = null;
 
+  // removed-plugin rows
   function setRows(rows) {
     index = window.PluginRefs ? window.PluginRefs.indexRemoved(rows) : null;
   }
@@ -43,6 +28,7 @@
     document.dispatchEvent(new CustomEvent('pluginAvailabilityReady'));
   })();
 
+  // what's missing for a design
   function missing(design) {
     if (!index || !window.PluginRefs) return [];
     return window.PluginRefs.missingFor(design, index);
@@ -51,12 +37,14 @@
   const repoLabel = url => String(url || '').replace(/^https?:\/\/(www\.)?/, '').replace(/\.git$/, '');
   const when = iso => { try { return new Date(iso).toLocaleDateString(); } catch (_) { return ''; } };
 
+  // tooltip text
   function tooltip(m) {
     const uses = m.uses.length ? ` (${m.uses.slice(0, 5).join(', ')}${m.uses.length > 5 ? '…' : ''})` : '';
     return `This ship uses ${m.display_name}${uses}, which was removed from the site${m.removed_at ? ' on ' + when(m.removed_at) : ''}.` +
       (m.repository ? ` It comes from ${repoLabel(m.repository)} — install it in Endless Sky to fly this ship, or ask for it to be added back to the site.` : '');
   }
 
+  // ⚠ badge
   function badgeHtml(design) {
     return missing(design).map(m => {
       const inner = `⚠ Needs ${h(m.display_name)}`;
@@ -67,6 +55,7 @@
     }).join('');
   }
 
+  // notice text
   function noticeHtml(design) {
     const list = missing(design);
     if (!list.length) return '';
