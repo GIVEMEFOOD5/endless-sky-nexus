@@ -58,3 +58,10 @@ from public.client_errors
 where created_at > now() - interval '7 days'
 group by message, page
 order by times desc;
+
+-- the website adds reports; admins read them (newer Supabase projects need this spelled out)
+grant insert          on public.client_errors         to anon, authenticated;
+grant select, delete  on public.client_errors         to authenticated;
+grant select          on public.client_errors_summary to authenticated;
+grant usage, select on sequence public.client_errors_id_seq to anon, authenticated;
+notify pgrst, 'reload schema';

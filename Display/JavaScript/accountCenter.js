@@ -165,18 +165,23 @@
   }
 
   // ── admin: site errors and moderation ──
-  let _siteErrorsMissing = false;   // ask once per page if the table isn't set up yet
+  let _siteErrorsMissing = false, _siteErrorsBusy = false;   // ask once per page if it isn't set up yet
   async function renderSiteErrors() {
-    if (_siteErrorsMissing) return;
+    if (_siteErrorsMissing || _siteErrorsBusy) return;
+    _siteErrorsBusy = true;
+    try { await _renderSiteErrors(); } finally { _siteErrorsBusy = false; }
+  }
+  async function _renderSiteErrors() {
     const box = document.getElementById('ac-admin');
     if (!box) return;
     let el = document.getElementById('ac-site-errors');
     if (!el) { el = document.createElement('div'); el.id = 'ac-site-errors'; box.after(el); }
     const { data, error } = await sb().from('client_errors_summary').select('*').limit(25);
     if (error) {
-      if (/does not exist|relation|schema cache|PGRST205/i.test(error.message + ' ' + (error.code || ''))) _siteErrorsMissing = true;
+      // missing, or not allowed to read it yet (403 — see supabase/grants.sql)
+      if (/does not exist|relation|schema cache|PGRST205|permission denied|42501/i.test(error.message + ' ' + (error.code || ''))) _siteErrorsMissing = true;
       el.innerHTML = _siteErrorsMissing
-        ? '<p style="font-size:0.84rem;color:var(--c-text-dim);">Site error reports: run <code>supabase/client_errors.sql</code> once to switch them on.</p>'
+        ? '<p style="font-size:0.84rem;color:var(--c-text-dim);">Site error reports: run <code>supabase/client_errors.sql</code> and <code>supabase/grants.sql</code> once to switch them on.</p>'
         : `<p style="color:var(--c-danger-text);">Could not load site errors: ${h(error.message)}</p>`;
       return;
     }

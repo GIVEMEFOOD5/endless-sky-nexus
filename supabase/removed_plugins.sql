@@ -58,3 +58,8 @@ begin
       foreign key (base_ship_id) references public.ships(id) on delete set null;
   end if;
 end $$;
+
+-- the website reads these (newer Supabase projects need this spelled out)
+grant select on public.removed_plugins          to anon, authenticated;
+grant select on public.saved_ship_plugin_flags  to anon, authenticated;
+grant select on public.fleet_plugin_flags       to authenticated;
