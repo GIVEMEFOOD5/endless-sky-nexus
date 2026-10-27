@@ -45,16 +45,20 @@ async function _fetchRepoTree() {
   if (_repoTreeFetching) return _repoTreeFetching;
 
   _repoTreeFetching = (async () => {
-    try {
-      const res = await fetch(GITHUB_API_BASE, {
-        headers: { Accept: 'application/vnd.github.v3+json' }
-      });
-      if (!res.ok) throw new Error(`GitHub API returned ${res.status}`);
+    // GitHub allows ~60 of these an hour per visitor, so keep the list in the
+    // browser until the parser publishes new data (one fetch per data version)
+    const fetchTree = async () => {
+      const res = await fetch(GITHUB_API_BASE, { headers: { Accept: 'application/vnd.github.v3+json' } });
+      if (!res.ok) throw new Error(`GitHub API returned ${res.status}${res.status === 403 ? ' (hourly limit reached — try again later)' : ''}`);
       const data = await res.json();
-      _repoTree = data.tree || [];
-      console.log(`ImageGrabber: repo tree fetched — ${_repoTree.length} entries`);
+      return data.tree || [];
+    };
+    try {
+      _repoTree = window.EsCache ? await window.EsCache.loadWithCache('imageRepoTree', fetchTree) : await fetchTree();
+      console.log(`ImageGrabber: repo tree ready — ${_repoTree.length} entries`);
     } catch (err) {
-      console.error('ImageGrabber: failed to fetch repo tree:', err);
+      // a failed fetch isn't cached, so the next page load tries again
+      console.warn('ImageGrabber: could not get the image list:', err.message);
       _repoTree = [];
     }
     _repoTreeFetching = null;

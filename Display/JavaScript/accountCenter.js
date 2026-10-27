@@ -165,14 +165,17 @@
   }
 
   // ── admin: site errors and moderation ──
+  let _siteErrorsMissing = false;   // ask once per page if the table isn't set up yet
   async function renderSiteErrors() {
+    if (_siteErrorsMissing) return;
     const box = document.getElementById('ac-admin');
     if (!box) return;
     let el = document.getElementById('ac-site-errors');
     if (!el) { el = document.createElement('div'); el.id = 'ac-site-errors'; box.after(el); }
     const { data, error } = await sb().from('client_errors_summary').select('*').limit(25);
     if (error) {
-      el.innerHTML = /does not exist|relation/i.test(error.message)
+      if (/does not exist|relation|schema cache|PGRST205/i.test(error.message + ' ' + (error.code || ''))) _siteErrorsMissing = true;
+      el.innerHTML = _siteErrorsMissing
         ? '<p style="font-size:0.84rem;color:var(--c-text-dim);">Site error reports: run <code>supabase/client_errors.sql</code> once to switch them on.</p>'
         : `<p style="color:var(--c-danger-text);">Could not load site errors: ${h(error.message)}</p>`;
       return;
