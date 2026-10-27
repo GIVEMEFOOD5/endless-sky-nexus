@@ -37,11 +37,22 @@ jobs:
             attributeParser.js
             data/
             parse-status.json
+            build/
+            supabase/migrations/
+            Display/JavaScript/
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - name: Make sure the database is set up
+        continue-on-error: true
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          npm install --no-save --no-package-lock pg@8
+          node build/dbHealth.mjs
 
       - name: Install parser dependencies
         run: npm install adm-zip tar @supabase/supabase-js --prefix /tmp/parser-deps --no-save
