@@ -20,14 +20,15 @@ const summary = [];   // lines for the GitHub job summary
 
 // every table/view and function the site's own code asks Supabase for
 function whatTheSiteUses() {
-  const tables = new Set(), fns = new Set();
+  const tables = new Set(), fns = new Set(), buckets = new Set();
   const walk = dir => {
     for (const f of fs.readdirSync(dir)) {
       const p = path.join(dir, f);
       if (fs.statSync(p).isDirectory()) { if (!/vendor|node_modules/.test(p)) walk(p); continue; }
-      if (!/\.(m?js)$/.test(f)) continue;
+      if (!/\.(m?js)$/.test(f) || f === 'dbHealth.mjs') continue;   // not this file's own examples
       const src = fs.readFileSync(p, 'utf8');
-      for (const m of src.matchAll(/\.from\(\s*'([a-z_]+)'\s*\)/g)) tables.add(m[1]);
+      // .storage.from('x') is a file bucket, not a table
+      for (const m of src.matchAll(/(\bstorage\s*)?\.from\(\s*'([a-z_]+)'\s*\)/g)) (m[1] ? buckets : tables).add(m[2]);
       for (const m of src.matchAll(/(?:fetchAllRows|byIds|allRows)\(\s*'([a-z_]+)'/g)) tables.add(m[1]);
       for (const m of src.matchAll(/\.rpc\(\s*'([a-z_]+)'/g)) fns.add(m[1]);
       for (const m of src.matchAll(/request\(\s*`?'?rpc\/([a-z_]+)/g)) fns.add(m[1]);
@@ -35,7 +36,7 @@ function whatTheSiteUses() {
   };
   walk(path.join(ROOT, 'Display', 'JavaScript'));
   if (fs.existsSync(path.join(ROOT, 'build'))) walk(path.join(ROOT, 'build'));
-  return { tables: [...tables].sort(), fns: [...fns].sort() };
+  return { tables: [...tables].sort(), fns: [...fns].sort(), buckets: [...buckets].sort() };
 }
 
 // what's wrong right now → [{ kind, name, problem }]
@@ -58,6 +59,12 @@ async function check(db, uses) {
         where n.nspname = 'public' and p.proname = $1`, [f]);
     if (rows[0].ok === null) problems.push({ kind: 'function', name: f, problem: 'missing' });
     else if (!rows[0].ok) problems.push({ kind: 'function', name: f, problem: 'the website isn\'t allowed to call it' });
+  }
+  // file buckets (Supabase Storage) — checked only where the storage schema exists
+  const { rows: hasStorage } = await db.query(`select 1 from pg_namespace where nspname = 'storage'`);
+  if (hasStorage.length) for (const b of uses.buckets) {
+    const { rows } = await db.query(`select 1 from storage.buckets where id = $1 or name = $1`, [b]);
+    if (!rows.length) problems.push({ kind: 'storage bucket', name: b, problem: 'missing (create it under Supabase → Storage)' });
   }
   return problems;
 }
@@ -120,7 +127,7 @@ async function main() {
   const db = new pg.Client({ connectionString: url, ssl: /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: false } });
   await db.connect();
   const uses = whatTheSiteUses();
-  log(`The website uses ${uses.tables.length} tables/views and ${uses.fns.length} functions.`);
+  log(`The website uses ${uses.tables.length} tables/views, ${uses.fns.length} functions and ${uses.buckets.length} storage bucket(s).`);
 
   const before = await check(db, uses);
   report('Before', before);
