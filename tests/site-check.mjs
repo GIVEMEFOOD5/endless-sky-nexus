@@ -16,6 +16,23 @@ const results = [];
 let browser, context;
 
 // collect page errors
+// what the page was doing, for failure notes: recent console lines, failed requests, requests still waiting
+function trace(page) {
+  const t = { log: [], failed: [], pending: new Map() };
+  page.on('console', m => { t.log.push(`${m.type()}: ${m.text().slice(0, 160)}`); if (t.log.length > 12) t.log.shift(); });
+  page.on('request', r => t.pending.set(r, Date.now()));
+  page.on('requestfinished', r => t.pending.delete(r));
+  page.on('requestfailed', r => { t.pending.delete(r); t.failed.push(`${r.failure()?.errorText || 'failed'} ${r.url().slice(0, 120)}`); });
+  page.on('response', r => { if (r.status() >= 400) t.failed.push(`${r.status()} ${r.url().slice(0, 120)}`); });
+  return () => {
+    const now = Date.now();
+    const waiting = [...t.pending].map(([r, at]) => `${Math.round((now - at) / 1000)}s ${r.url().slice(0, 120)}`).slice(0, 6);
+    return [waiting.length && `still waiting for: ${waiting.join(' | ')}`,
+            t.failed.length && `failed requests: ${t.failed.slice(-6).join(' | ')}`,
+            t.log.length && `last console lines: ${t.log.slice(-6).join(' | ')}`].filter(Boolean).join('\n');
+  };
+}
+
 function watch(page) {
   const errors = [];
   page.on('pageerror', e => errors.push(`page error: ${e.message}`));
@@ -32,6 +49,7 @@ function watch(page) {
 async function check(name, fn) {
   const page = await context.newPage();
   const errors = watch(page);
+  const why = trace(page);
   const started = Date.now();
   try {
     const note = await fn(page);
@@ -41,8 +59,9 @@ async function check(name, fn) {
   } catch (err) {
     const file = path.join(OUT, name.replace(/[^\w]+/g, '_').slice(0, 80) + '.png');
     try { await page.screenshot({ path: file, fullPage: true }); } catch (_) {}
-    results.push({ name, ok: false, note: String(err.message || err).slice(0, 1500), secs: (Date.now() - started) / 1000 });
-    console.log(`❌ ${name}\n   ${String(err.message || err).split('\n').join('\n   ')}`);
+    const extra = why();
+    results.push({ name, ok: false, note: (String(err.message || err).slice(0, 600) + (extra ? '\n' + extra : '')).slice(0, 2500), secs: (Date.now() - started) / 1000 });
+    console.log(`❌ ${name}\n   ${String(err.message || err).split('\n').join('\n   ')}${extra ? '\n   ' + extra.split('\n').join('\n   ') : ''}`);
   } finally {
     await page.close();
   }
@@ -234,7 +253,7 @@ await browser.close();
 const failed = results.filter(r => !r.ok);
 const md = [`## Site checks: ${failed.length ? `❌ ${failed.length} failed` : '✅ all passed'} (${results.length} checks)`, '',
   '| | Check | Notes | Time |', '|---|---|---|---|',
-  ...results.map(r => `| ${r.ok ? '✅' : '❌'} | ${r.name} | ${r.note.replace(/\n/g, '<br>').replace(/\|/g, '\\|').slice(0, 400)} | ${r.secs.toFixed(1)}s |`)].join('\n');
+  ...results.map(r => `| ${r.ok ? '✅' : '❌'} | ${r.name} | ${r.note.replace(/\n/g, '<br>').replace(/\|/g, '\\|').slice(0, 1500)} | ${r.secs.toFixed(1)}s |`)].join('\n');
 fs.writeFileSync(path.join(OUT, 'summary.md'), md);
 if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + '\n');
 console.log(`\n${failed.length ? `❌ ${failed.length} of ${results.length} checks failed` : `✅ All ${results.length} checks passed`}`);

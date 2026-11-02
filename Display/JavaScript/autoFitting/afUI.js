@@ -18,9 +18,18 @@
   // Remembered between visits: never use secondary weapons, and outfits never to use.
   const PREFS_KEY = 'af_prefs_v1';
   // saved choices (exclude list, no secondaries)
-  function loadPrefs() { try { const p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); return { noSecondary: !!p.noSecondary, exclude: Array.isArray(p.exclude) ? p.exclude : [] }; } catch (_) { return { noSecondary: false, exclude: [] }; } }
+  function loadPrefs() {
+    try {
+      const p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+      return { noSecondary: !!p.noSecondary, noCargo: !!p.noCargo, noStorage: !!p.noStorage, noUnique: !!p.noUnique,
+               exclude: Array.isArray(p.exclude) ? p.exclude : [] };
+    } catch (_) { return { noSecondary: false, noCargo: false, noStorage: false, noUnique: false, exclude: [] }; }
+  }
   // save them
-  function savePrefs() { try { localStorage.setItem(PREFS_KEY, JSON.stringify({ noSecondary: ui.prefs.noSecondary, exclude: ui.prefs.exclude })); } catch (_) {} }
+  function savePrefs() {
+    const p = ui.prefs;
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify({ noSecondary: p.noSecondary, noCargo: p.noCargo, noStorage: p.noStorage, noUnique: p.noUnique, exclude: p.exclude })); } catch (_) {}
+  }
 
   // small removable chip
   function chip(inner, act, name) {
@@ -172,6 +181,10 @@
       if (!ui) return;
       if (t.dataset.fac) { t.checked ? ui.factions.add(t.dataset.fac) : ui.factions.delete(t.dataset.fac); return; }
       if (t.id === 'af-weapons') ui.opts.weapons = t.value;
+      else if (t.id === 'af-nocargo' || t.id === 'af-nostorage' || t.id === 'af-nounique') {
+        ui.prefs[{ 'af-nocargo': 'noCargo', 'af-nostorage': 'noStorage', 'af-nounique': 'noUnique' }[t.id]] = t.checked;
+        savePrefs(); ui.result = null; render();
+      }
       else if (t.id === 'af-nosec') {
         ui.prefs.noSecondary = t.checked; savePrefs();
         if (t.checked && ui.opts.weapons !== 'primary') ui.opts.weapons = 'primary';
@@ -300,10 +313,16 @@
       </details>
       ${ui.goal === 'general' ? `<div style="font-size:0.78rem;color:var(--c-text-dim);margin-top:8px;">${peerNote()}</div>` : ''}
 
-      <details style="margin-top:10px;" ${ui.result ? '' : 'open'}><summary style="cursor:pointer;font-weight:600;">Outfits to leave out${ui.prefs.noSecondary || ui.prefs.exclude.length ? ` (${[ui.prefs.noSecondary && 'no secondaries', ui.prefs.exclude.length && `${ui.prefs.exclude.length} excluded`].filter(Boolean).join(', ')})` : ''}</summary>
+      <details style="margin-top:10px;" ${ui.result ? '' : 'open'}><summary style="cursor:pointer;font-weight:600;">Outfits to leave out${(() => { const p = ui.prefs; const on = [p.noSecondary && 'no secondaries', p.noCargo && 'not cargo', p.noStorage && 'not storage', p.noUnique && 'no unique', p.exclude.length && `${p.exclude.length} excluded`].filter(Boolean); return on.length ? ` (${on.join(', ')})` : ''; })()}</summary>
         <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0 4px;font-size:0.86rem;">
           <input type="checkbox" id="af-nosec"${ui.prefs.noSecondary ? ' checked' : ''}>
           <span>Don't use secondary weapons<span style="display:block;font-size:0.76rem;color:var(--c-text-dim);">No missiles, rockets, torpedoes or other launchers (or their ammunition), for every goal. Anti-missile turrets still count.</span></span></label>
+        ${[['af-nocargo', 'noCargo', "Don't use outfits in my cargo", 'Outfits sitting in your fleet\'s cargo hold don\'t count as owned.'],
+           ['af-nostorage', 'noStorage', "Don't use outfits in planet storage", 'Outfits you\'ve stored on planets don\'t count as owned.'],
+           ['af-nounique', 'noUnique', "Don't use unique outfits", 'Leave out outfits marked as unique (one-of-a-kind items).']]
+          .map(([id, key, label, hint]) => `<label style="display:flex;gap:8px;align-items:flex-start;margin:6px 0 4px;font-size:0.86rem;">
+            <input type="checkbox" id="${id}"${ui.prefs[key] ? ' checked' : ''}>
+            <span>${label}<span style="display:block;font-size:0.76rem;color:var(--c-text-dim);">${hint}</span></span></label>`).join('')}
         <div style="font-size:0.86rem;margin-top:8px;">Never use these outfits:</div>
         <div style="margin:4px 0;">${ui.prefs.exclude.length ? ui.prefs.exclude.map(n => chip(outfitHtml(n), 'excl-rm', n)).join('') + ' <button class="btn btn-secondary btn-sm" data-af="excl-clear">Clear all</button>' : '<em style="color:var(--c-text-dim);font-size:0.82rem;">none yet — add any you don\'t want here, or press “Exclude” next to an outfit in a result</em>'}</div>
         <div style="max-width:360px;"><input id="af-excl-add" class="text-input" placeholder="Add an outfit to leave out…" autocomplete="off"></div>
@@ -567,12 +586,14 @@
 
   // ── running a search ──
   function candidates() {
-    const f = { ...ui.filters, factions: ui.factions && ui.factions.size ? ui.factions : null };
+    const f = { ...ui.filters, factions: ui.factions && ui.factions.size ? ui.factions : null,
+                noCargo: ui.prefs.noCargo, noStorage: ui.prefs.noStorage };
     const access = new Map(), list = [];
     const excluded = new Set(ui.prefs.exclude);
     for (const e of ui.ctx.list) {
       if (excluded.has(e.name)) continue;
       if (ui.prefs.noSecondary && S().isSecondary(e.outfit)) continue;
+      if (ui.prefs.noUnique && e.unique) continue;
       const a = P().access(ui.ctx, e, f);
       if (!a.ok) continue;
       access.set(e.name, a);

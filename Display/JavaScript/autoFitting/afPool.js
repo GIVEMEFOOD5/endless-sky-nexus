@@ -84,9 +84,13 @@
       const conds = doc.conditions;
       const happened = new Set(doc.changes.filter(n => n.tokens[0] === 'event').map(n => clean(n.tokens[1])));
       for (const k of Object.keys(conds)) { const m = /^event: (.+)$/.exec(k); if (m) happened.add(m[1]); }
-      const owned = new Map();
-      for (const s of doc.ships) for (const [n, c] of Object.entries(s.outfits || {})) owned.set(n, (owned.get(n) || 0) + Number(c || 0));
-      for (const [n, c] of Object.entries(doc.cargo.outfits || {})) owned.set(n, (owned.get(n) || 0) + Number(c || 0));
+      // owned outfits by where they are: fitted on ships, in the fleet's cargo, in planet storage
+      const add = (map, n, c) => map.set(n, (map.get(n) || 0) + Number(c || 0));
+      const fitted = new Map(), inCargo = new Map(), inStorage = new Map();
+      for (const s of doc.ships) for (const [n, c] of Object.entries(s.outfits || {})) add(fitted, n, c);
+      for (const [n, c] of Object.entries(doc.cargo.outfits || {})) add(inCargo, n, c);
+      for (const st of doc.storage || []) for (const [n, c] of Object.entries(st.outfits || {})) add(inStorage, n, c);
+      const owned = { fitted, inCargo, inStorage };
       return {
         pilot: `${doc.pilot.first} ${doc.pilot.last}`.trim(),
         visitedPlanets: new Set(doc.visitedPlanets),
@@ -141,7 +145,8 @@
           plunder: { ships: carriers, govs: flyGovs },
           missions: [...new Set(locs.flatMap(l => l.Missions || []))],
           licences,
-          owned: save ? (save.owned.get(o.name) || 0) : 0,
+          owned: save ? { fitted: save.owned.fitted.get(o.name) || 0, cargo: save.owned.inCargo.get(o.name) || 0,
+                          storage: save.owned.inStorage.get(o.name) || 0 } : { fitted: 0, cargo: 0, storage: 0 },
         };
         for (const g of buyGovs) factionCount.set(g, (factionCount.get(g) || 0) + 1);
         list.push(entry);
@@ -177,9 +182,13 @@
   function access(ctx, e, f) {
     if (e.excluded) return { ok: false };
     const other = otherSources(ctx, e, f);
-    if (f.includeOwned && e.owned > 0) {
-      if (other.ok) return { ...other, note: `You own ${e.owned} · ${other.note}` };
-      return { ok: true, how: 'owned', note: `You already own ${e.owned}`, maxCount: e.owned };
+    // owned copies, leaving out cargo / storage if those boxes are ticked
+    const where = [['fitted', e.owned.fitted], ['in cargo', f.noCargo ? 0 : e.owned.cargo], ['in storage', f.noStorage ? 0 : e.owned.storage]].filter(([, n]) => n > 0);
+    const owned = where.reduce((t, [, n]) => t + n, 0);
+    if (f.includeOwned && owned > 0) {
+      const say = `You own ${owned} (${where.map(([w, n]) => `${n} ${w}`).join(', ')})`;
+      if (other.ok) return { ...other, note: `${say} · ${other.note}` };
+      return { ok: true, how: 'owned', note: say, maxCount: owned };
     }
     return other;
   }
